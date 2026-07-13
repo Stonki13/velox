@@ -42,6 +42,8 @@ public:
     BodyId addSphere(Vec3 position, float radius, float mass);
     BodyId addBox(Vec3 position, Vec3 halfExtents, float mass);
     BodyId addCapsule(Vec3 position, float radius, float halfHeight, float mass);
+    BodyId addCylinder(Vec3 position, float radius, float halfHeight, float mass);
+    BodyId addCone(Vec3 position, float radius, float height, float mass);
     // Convex hull from a local-space point cloud (points should already be on
     // the hull; interior points only cost support-function time).
     BodyId addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass);
@@ -51,6 +53,10 @@ public:
     // indices: 3 per triangle.
     BodyId addStaticMesh(const std::vector<Vec3>& vertices,
                          const std::vector<uint32_t>& indices);
+    // Row-major heights over width x depth samples. Grid lies in local X/Z;
+    // origin is the world position of sample (0, 0).
+    BodyId addStaticHeightfield(uint32_t width, uint32_t depth, float cellSize,
+                                const std::vector<float>& heights, Vec3 origin = {});
 
     Body& body(BodyId id);
     const Body& body(BodyId id) const;

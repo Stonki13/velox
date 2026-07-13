@@ -730,6 +730,55 @@ static void testCompoundBody() {
     check(ok, "compound body (local children, parent queries, CCD)");
 }
 
+// 30. Cylinder and center-of-mass-centered cone support runs through the same
+// GJK/EPA/CCD path as other convexes. Heightfields build validated terrain
+// triangles into the mesh BVH rather than requiring hand-authored indices.
+static void testCylinderConeAndHeightfield() {
+    velox::World primitives;
+    primitives.addStaticPlane({0, 1, 0}, 0.0f);
+    auto cylinder = primitives.addCylinder({-2, 4, 0}, 0.6f, 1.0f, 1.0f);
+    auto cone = primitives.addCone({2, 4, 0}, 0.8f, 2.0f, 1.0f);
+    for (int i = 0; i < 300; ++i) primitives.step(1.0f / 60.0f);
+    bool ok = primitives.body(cylinder).position.y > 0.85f &&
+              primitives.body(cone).position.y > 0.35f;
+    auto cylinderHit = primitives.rayCast({-2, 5, 0}, {0, -1, 0}, 10.0f);
+    auto coneHit = primitives.rayCast({2, 5, 0}, {0, -1, 0}, 10.0f);
+    ok &= cylinderHit.hit && cylinderHit.body == cylinder;
+    ok &= coneHit.hit && coneHit.body == cone;
+
+    velox::World terrain;
+    std::vector<float> heights = {
+        1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 0.0f, 0.0f, 1.0f,
+        1.0f, 0.0f, 0.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f};
+    auto heightfield = terrain.addStaticHeightfield(
+        4, 4, 1.0f, heights, {-1.5f, 0, -1.5f});
+    auto ball = terrain.addSphere({0, 3, 0}, 0.35f, 1.0f);
+    for (int i = 0; i < 300; ++i) terrain.step(1.0f / 60.0f);
+    ok &= terrain.body(ball).position.y > 0.3f;
+    auto terrainHit = terrain.rayCast({0, 5, 0}, {0, -1, 0}, 10.0f);
+    ok &= terrainHit.hit &&
+          (terrainHit.body == ball || terrainHit.body == heightfield);
+    size_t count = terrain.bodyCount();
+    ok &= throwsException([&] {
+        terrain.addStaticHeightfield(3, 3, 1.0f, {0, 0, 0});
+    });
+    ok &= terrain.bodyCount() == count;
+
+    velox::World fast;
+    fast.gravity = {0, 0, 0};
+    fast.addStaticPlane({0, 1, 0}, 0.0f);
+    auto projectile = fast.addCone({0, 2, 0}, 0.2f, 0.5f, 1.0f);
+    fast.setLinearVelocity(projectile, {0, -1500, 0});
+    fast.setAngularVelocity(projectile, {30, 10, 20});
+    for (int i = 0; i < 10; ++i) {
+        fast.step(1.0f / 60.0f);
+        ok &= fast.body(projectile).position.y > -0.5f;
+    }
+    check(ok, "cylinder, cone, and heightfield (GJK, BVH, CCD)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -760,6 +809,7 @@ int main() {
     testFiltersSensorsAndEventPhases();
     testConeTwistJoint();
     testCompoundBody();
+    testCylinderConeAndHeightfield();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

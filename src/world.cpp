@@ -208,6 +208,49 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
     return addBody(b);
 }
 
+BodyId World::addCylinder(Vec3 position, float radius, float halfHeight, float mass) {
+    requireFiniteVec(position, "velox: cylinder position must be finite");
+    requirePositive(radius, "velox: cylinder radius must be finite and positive");
+    requirePositive(halfHeight,
+                    "velox: cylinder half height must be finite and positive");
+    requireMass(mass);
+    Body b;
+    b.position = position;
+    b.shape = ShapeType::Cylinder;
+    b.radius = radius;
+    b.capsuleHalfHeight = halfHeight;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
+    b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    if (mass > 0.0f) {
+        float height = 2.0f * halfHeight;
+        float iy = 0.5f * mass * radius * radius;
+        float ix = mass * (3.0f * radius * radius + height * height) / 12.0f;
+        b.invInertia = {1.0f / ix, 1.0f / iy, 1.0f / ix};
+    }
+    return addBody(b);
+}
+
+BodyId World::addCone(Vec3 position, float radius, float height, float mass) {
+    requireFiniteVec(position, "velox: cone position must be finite");
+    requirePositive(radius, "velox: cone radius must be finite and positive");
+    requirePositive(height, "velox: cone height must be finite and positive");
+    requireMass(mass);
+    Body b;
+    b.position = position; // center of mass, one quarter-height above the base
+    b.shape = ShapeType::Cone;
+    b.radius = radius;
+    b.capsuleHalfHeight = height * 0.5f;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
+    b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    if (mass > 0.0f) {
+        float iy = 0.3f * mass * radius * radius;
+        float ix = 0.15f * mass * radius * radius +
+                   0.0375f * mass * height * height;
+        b.invInertia = {1.0f / ix, 1.0f / iy, 1.0f / ix};
+    }
+    return addBody(b);
+}
+
 BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass) {
     requireFiniteVec(position, "velox: convex hull position must be finite");
     requireMass(mass);
@@ -329,6 +372,29 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             child.capsuleHalfHeight = shape.capsuleHalfHeight;
             bound = shape.radius + shape.capsuleHalfHeight;
             break;
+        case ShapeType::Cylinder:
+            requirePositive(shape.radius,
+                            "velox: compound cylinder radius must be positive");
+            requirePositive(shape.capsuleHalfHeight,
+                            "velox: compound cylinder half height must be positive");
+            child.radius = shape.radius;
+            child.capsuleHalfHeight = shape.capsuleHalfHeight;
+            bound = sqrtf(shape.radius * shape.radius +
+                          shape.capsuleHalfHeight * shape.capsuleHalfHeight);
+            break;
+        case ShapeType::Cone: {
+            requirePositive(shape.radius,
+                            "velox: compound cone radius must be positive");
+            requirePositive(shape.capsuleHalfHeight,
+                            "velox: compound cone half height must be positive");
+            child.radius = shape.radius;
+            child.capsuleHalfHeight = shape.capsuleHalfHeight;
+            float top = 1.5f * shape.capsuleHalfHeight;
+            bound = vmax(top, sqrtf(shape.radius * shape.radius +
+                                    0.25f * shape.capsuleHalfHeight *
+                                        shape.capsuleHalfHeight));
+            break;
+        }
         case ShapeType::Hull: {
             if (shape.hullPoints.size() < 4)
                 throw std::invalid_argument("velox: compound hull requires at least four points");
@@ -538,6 +604,42 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
     b.meshIndex = static_cast<uint32_t>(meshes_.meshes.size() - 1);
     b.invMass = 0.0f; // mesh colliders are static (level geometry)
     return addBody(b);
+}
+
+BodyId World::addStaticHeightfield(uint32_t width, uint32_t depth, float cellSize,
+                                   const std::vector<float>& heights, Vec3 origin) {
+    if (width < 2 || depth < 2)
+        throw std::invalid_argument("velox: heightfield requires at least 2x2 samples");
+    requirePositive(cellSize, "velox: heightfield cell size must be positive");
+    requireFiniteVec(origin, "velox: heightfield origin must be finite");
+    uint64_t sampleCount = (uint64_t)width * depth;
+    if (sampleCount != heights.size() || sampleCount > UINT32_MAX)
+        throw std::invalid_argument("velox: heightfield sample count does not match dimensions");
+    for (float height : heights)
+        if (!finiteFloat(height))
+            throw std::invalid_argument("velox: heightfield samples must be finite");
+    uint64_t indexCount = (uint64_t)(width - 1) * (depth - 1) * 6;
+    if (indexCount > UINT32_MAX)
+        throw std::length_error("velox: heightfield exceeds 32-bit index capacity");
+
+    std::vector<Vec3> vertices;
+    std::vector<uint32_t> indices;
+    vertices.reserve((size_t)sampleCount);
+    indices.reserve((size_t)indexCount);
+    for (uint32_t z = 0; z < depth; ++z)
+        for (uint32_t x = 0; x < width; ++x)
+            vertices.push_back(origin + Vec3{x * cellSize, heights[z * width + x],
+                                             z * cellSize});
+    for (uint32_t z = 0; z + 1 < depth; ++z) {
+        for (uint32_t x = 0; x + 1 < width; ++x) {
+            uint32_t a = z * width + x;
+            uint32_t b = a + 1;
+            uint32_t c = a + width;
+            uint32_t d = c + 1;
+            indices.insert(indices.end(), {a, c, b, b, c, d});
+        }
+    }
+    return addStaticMesh(vertices, indices);
 }
 
 MotionType World::motionType(BodyId id) const { return body(id).motionType; }
@@ -1201,6 +1303,16 @@ void World::step(float dt) {
             requirePositive(body.radius, "velox: capsule body has an invalid radius");
             requireNonNegative(body.capsuleHalfHeight,
                                "velox: capsule body has an invalid half height");
+            break;
+        case ShapeType::Cylinder:
+            requirePositive(body.radius, "velox: cylinder body has an invalid radius");
+            requirePositive(body.capsuleHalfHeight,
+                            "velox: cylinder body has an invalid half height");
+            break;
+        case ShapeType::Cone:
+            requirePositive(body.radius, "velox: cone body has an invalid radius");
+            requirePositive(body.capsuleHalfHeight,
+                            "velox: cone body has an invalid half height");
             break;
         case ShapeType::Plane:
             if (!finiteVec(body.planeNormal) || lengthSq(body.planeNormal) < 1e-12f ||

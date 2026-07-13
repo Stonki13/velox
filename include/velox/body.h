@@ -26,18 +26,20 @@ VELOX_HD inline bool operator==(BodyId a, BodyId b) { return a.value == b.value;
 VELOX_HD inline bool operator!=(BodyId a, BodyId b) { return !(a == b); }
 VELOX_HD inline bool operator<(BodyId a, BodyId b) { return a.value < b.value; }
 
-enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh, Hull, Compound };
+enum class ShapeType : uint8_t {
+    Sphere, Plane, Box, Capsule, Mesh, Hull, Compound, Cylinder, Cone
+};
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
 
 // Host-side description of one locally transformed convex child. Compound
-// bodies accept spheres, boxes, capsules, and convex hulls.
+// bodies accept spheres, boxes, capsules, cylinders, cones, and convex hulls.
 struct CompoundShape {
     ShapeType shape = ShapeType::Sphere;
     Vec3 localPosition;
     Quat localOrientation;
     float radius = 0.5f;
     Vec3 halfExtents{0.5f, 0.5f, 0.5f};
-    float capsuleHalfHeight = 0.5f;
+    float capsuleHalfHeight = 0.5f; // Capsule/Cylinder: half height; Cone: half total height
     std::vector<Vec3> hullPoints;
 };
 
@@ -79,7 +81,7 @@ struct Body {
     ShapeType shape = ShapeType::Sphere;
     float radius = 0.5f;        // Sphere, Capsule
     Vec3 halfExtents{0.5f, 0.5f, 0.5f}; // Box
-    float capsuleHalfHeight = 0.5f;     // Capsule: half length of the core segment (local Y)
+    float capsuleHalfHeight = 0.5f; // Capsule/Cylinder: half height; Cone: half total height
     Vec3 planeNormal{0, 1, 0};  // Plane: dot(n, p) = planeOffset
     float planeOffset = 0.0f;
     uint32_t meshIndex = 0;     // Mesh: index into World's mesh storage
@@ -112,6 +114,12 @@ struct Body {
         float r = radius;
         if (shape == ShapeType::Box) r = length(halfExtents);
         else if (shape == ShapeType::Capsule) r = capsuleHalfHeight + radius;
+        else if (shape == ShapeType::Cylinder)
+            r = sqrtf(capsuleHalfHeight * capsuleHalfHeight + radius * radius);
+        else if (shape == ShapeType::Cone) {
+            float top = 1.5f * capsuleHalfHeight;
+            r = vmax(top, sqrtf(radius * radius + 0.25f * capsuleHalfHeight * capsuleHalfHeight));
+        }
         else if (shape == ShapeType::Compound) r = radius;
         return length(velocity) + length(angularVelocity) * r;
     }

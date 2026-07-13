@@ -152,6 +152,16 @@ VELOX_HD inline void bodyAabb(const Body& b, float dt, Vec3& lo, Vec3& hi) {
     case ShapeType::Sphere:  ext = b.radius; break;
     case ShapeType::Hull:    ext = b.radius; break;
     case ShapeType::Compound: ext = b.radius; break;
+    case ShapeType::Cylinder:
+        ext = sqrtf(b.radius * b.radius +
+                    b.capsuleHalfHeight * b.capsuleHalfHeight);
+        break;
+    case ShapeType::Cone: {
+        float top = 1.5f * b.capsuleHalfHeight;
+        ext = vmax(top, sqrtf(b.radius * b.radius +
+                              0.25f * b.capsuleHalfHeight * b.capsuleHalfHeight));
+        break;
+    }
     default:                 ext = 0.0f; break; // plane/mesh handled separately
     }
     float reach = ext + b.maxPointSpeed() * dt + 1e-2f;
@@ -269,6 +279,15 @@ VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,
             emit(conv, plane, ic, ip, pn, pts[pick], gaps[pick], dt, out, cap, n,
                  contactFeatureKey(features[pick], kFaceFeature));
         }
+        break;
+    }
+    case ShapeType::Cylinder:
+    case ShapeType::Cone: {
+        Convex shape = makeConvex(conv, soup);
+        Vec3 deepest = shape.support(-pn);
+        emit(conv, plane, ic, ip, pn, deepest,
+             dot(pn, deepest) - plane.planeOffset, dt, out, cap, n,
+             contactFeatureKey(kImplicitFeature, kFaceFeature));
         break;
     }
     default: break;
@@ -444,7 +463,8 @@ VELOX_HD inline void meshConvex(const Body& conv, const Body& meshBody,
 
 VELOX_HD inline bool isConvexVolume(ShapeType t) {
     return t == ShapeType::Sphere || t == ShapeType::Box ||
-           t == ShapeType::Capsule || t == ShapeType::Hull;
+           t == ShapeType::Capsule || t == ShapeType::Hull ||
+           t == ShapeType::Cylinder || t == ShapeType::Cone;
 }
 
 // Narrow phase for one pair; returns the number of contacts written to out

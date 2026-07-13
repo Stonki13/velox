@@ -10,7 +10,7 @@ namespace velox {
 // GJK cores from ever overlapping in practice; boxes and triangles have
 // radius 0.
 struct Convex {
-    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull } kind;
+    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull, Cylinder, Cone } kind;
     Vec3 position;      // world transform
     Quat orientation;
     Vec3 halfExtents;   // Box
@@ -19,6 +19,7 @@ struct Convex {
     const Vec3* hullPts = nullptr; // Hull: local-space point cloud
     uint32_t hullCount = 0;
     float radius;       // inflation
+    float geomRadius = 0.0f; // Cylinder/Cone geometric radius
 
     VELOX_HD Vec3 support(const Vec3& dir) const {
         switch (kind) {
@@ -48,6 +49,25 @@ struct Convex {
                 if (t > bestDot) { bestDot = t; best = i; }
             }
             return position + rotate(orientation, hullPts[best]);
+        }
+        case Cylinder: {
+            Vec3 d = rotateInv(orientation, dir);
+            float radial = sqrtf(d.x * d.x + d.z * d.z);
+            Vec3 local{radial > 1e-9f ? geomRadius * d.x / radial : 0.0f,
+                       d.y >= 0.0f ? halfExtents.y : -halfExtents.y,
+                       radial > 1e-9f ? geomRadius * d.z / radial : 0.0f};
+            return position + rotate(orientation, local);
+        }
+        case Cone: {
+            Vec3 d = rotateInv(orientation, dir);
+            float radial = sqrtf(d.x * d.x + d.z * d.z);
+            float halfHeight = halfExtents.y;
+            Vec3 base{radial > 1e-9f ? geomRadius * d.x / radial : 0.0f,
+                      -0.5f * halfHeight,
+                      radial > 1e-9f ? geomRadius * d.z / radial : 0.0f};
+            Vec3 tip{0, 1.5f * halfHeight, 0};
+            Vec3 local = dot(d, tip) > dot(d, base) ? tip : base;
+            return position + rotate(orientation, local);
         }
         }
         return position;
@@ -81,6 +101,18 @@ VELOX_HD inline Convex makeConvex(const Body& b, const MeshSoupView& soup) {
         c.kind = Convex::Hull;
         c.hullPts = soup.hullPoints + b.hullFirst;
         c.hullCount = b.hullCount;
+        c.radius = 0.0f;
+        break;
+    case ShapeType::Cylinder:
+        c.kind = Convex::Cylinder;
+        c.halfExtents.y = b.capsuleHalfHeight;
+        c.geomRadius = b.radius;
+        c.radius = 0.0f;
+        break;
+    case ShapeType::Cone:
+        c.kind = Convex::Cone;
+        c.halfExtents.y = b.capsuleHalfHeight;
+        c.geomRadius = b.radius;
         c.radius = 0.0f;
         break;
     default: // Plane/Mesh are not convex volumes; callers handle them separately
