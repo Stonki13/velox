@@ -159,14 +159,41 @@ public:
     void solveVelocities(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts, float dt,
                          bool warmStart) override {
+        if (contacts.empty()) return;
+        if (workers_.workerCount() == 1) {
+            if (warmStart)
+                for (Contact& c : contacts)
+                    if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
+                        warmStartContact(bodies[c.a], bodies[c.b], c);
+            for (int iter = 0; iter < kVelocityIterations; ++iter)
+                for (Contact& c : contacts)
+                    if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
+                        solveContact(bodies[c.a], bodies[c.b], c, dt);
+            return;
+        }
+
+        buildSolverBatches(bodies, contacts);
+        auto runBatches = [&](auto&& solve) {
+            for (const SolverBatch& batch : solverBatches_) {
+                size_t count = batch.end - batch.begin;
+                dispatchChunks(count, 64, [&](size_t begin, size_t end) {
+                    for (size_t offset = begin; offset < end; ++offset) {
+                        Contact& contact = contacts[batch.begin + offset];
+                        if (!bodies[contact.a].isSensor() &&
+                            !bodies[contact.b].isSensor())
+                            solve(contact);
+                    }
+                });
+            }
+        };
         if (warmStart)
-            for (Contact& c : contacts)
-                if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
-                    warmStartContact(bodies[c.a], bodies[c.b], c);
-        for (int iter = 0; iter < kVelocityIterations; ++iter)
-            for (Contact& c : contacts)
-                if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
-                    solveContact(bodies[c.a], bodies[c.b], c, dt);
+            runBatches([&](Contact& contact) {
+                warmStartContact(bodies[contact.a], bodies[contact.b], contact);
+            });
+        for (int iteration = 0; iteration < kVelocityIterations; ++iteration)
+            runBatches([&](Contact& contact) {
+                solveContact(bodies[contact.a], bodies[contact.b], contact, dt);
+            });
     }
 
     void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
@@ -240,6 +267,37 @@ public:
     }
 
 private:
+    struct SolverBatch { size_t begin, end; };
+
+    void buildSolverBatches(const std::vector<Body>& bodies,
+                            const std::vector<Contact>& contacts) {
+        solverBatches_.clear();
+        solverBodyStamp_.assign(bodies.size(), 0);
+        uint32_t stamp = 1;
+        size_t begin = 0;
+        for (size_t i = 0; i < contacts.size(); ++i) {
+            const Contact& contact = contacts[i];
+            bool active = !bodies[contact.a].isSensor() &&
+                          !bodies[contact.b].isSensor();
+            bool useA = active && bodies[contact.a].isDynamic();
+            bool useB = active && bodies[contact.b].isDynamic();
+            bool conflict = (useA && solverBodyStamp_[contact.a] == stamp) ||
+                            (useB && solverBodyStamp_[contact.b] == stamp);
+            if (conflict) {
+                solverBatches_.push_back({begin, i});
+                begin = i;
+                ++stamp;
+                if (stamp == 0) {
+                    std::fill(solverBodyStamp_.begin(), solverBodyStamp_.end(), 0);
+                    stamp = 1;
+                }
+            }
+            if (useA) solverBodyStamp_[contact.a] = stamp;
+            if (useB) solverBodyStamp_[contact.b] = stamp;
+        }
+        solverBatches_.push_back({begin, contacts.size()});
+    }
+
     size_t chunkCount(size_t items, size_t parallelThreshold) const {
         if (items == 0 || items < parallelThreshold || workers_.workerCount() == 1)
             return items == 0 ? 0 : 1;
@@ -261,6 +319,8 @@ private:
     std::vector<BodyIndex> boundless_;
     std::vector<uint64_t> pairs_;
     std::vector<std::vector<Contact>> chunkContacts_;
+    std::vector<SolverBatch> solverBatches_;
+    std::vector<uint32_t> solverBodyStamp_;
 };
 
 Backend* createCpuBackend() { return new CpuBackend(); }

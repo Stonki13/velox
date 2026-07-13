@@ -72,8 +72,13 @@ The CPU backend uses a persistent worker pool for independent body integration
 and deterministic narrow-phase pair batches. `World::setWorkerCount(0)` selects
 hardware concurrency; `1` provides a serial reference. Contact batches are
 merged in original broad-phase order, so worker count does not change solver
-ordering or simulation results. The sequential-impulse solve itself remains
-serial on CPU; CUDA uses conflict-free graph coloring for that stage.
+ordering or simulation results. The CPU impulse solver forms contiguous
+order-preserving batches that stop at the first shared dynamic body; contacts
+inside each batch execute in parallel without changing Gauss-Seidel ordering.
+CUDA uses broader conflict-free graph coloring for maximum throughput.
+Dense interconnected piles can create short CPU batches, so this deterministic
+mode is intentionally conservative; the CUDA backend remains the high-throughput
+solver for those scenes.
 
 ## Solver
 
