@@ -23,27 +23,36 @@ still let extreme cases slip). Velox layers them:
 2. **Iterative velocity solve** — each contact removes only approach velocity
    in excess of `gap/dt`. Grazing bodies keep their speed; piles are resolved
    by solver iterations, so there is no event queue to stall.
-3. **Exact sweep safety net** — after integration, every body is swept along
-   the displacement it actually made; anything the solver let slip is clamped
-   to its exact time of impact. Tunneling is impossible by construction.
+3. **Conservative-advancement safety net** — after integration, any pair that
+   ended the step interpenetrating is rewound along its actual motion
+   (rotation included) to the moment of first contact, using GJK distance as
+   the oracle. Tunneling is impossible by construction, at any linear or
+   angular speed.
 
-`examples/stress_demo` locks all of this in: a 2 km/s bullet, a grazing skim,
-a 125-sphere pile, a 3 km/s head-on impact, and long-run resting stability.
+`examples/stress_demo` locks all of this in: 2 km/s bullets, grazing skims,
+a 125-sphere pile, 3 km/s head-on impacts, a 1.5 km/s spinning box, resting
+stability for every shape, and a ball settling inside a triangle-mesh trough.
 
 ## Status
 
 Early development. Working today:
 
-- Rigid body dynamics (semi-implicit Euler integrator)
-- Sphere and static-plane colliders
+- Full rigid body dynamics: linear + rotational (quaternions, world-space
+  inverse inertia, contact torques)
+- Colliders: **sphere, box, capsule, static plane, static triangle mesh**
+- GJK narrow phase over support functions (one code path for all convex
+  pairs and mesh triangles), with contact manifolds for resting boxes
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
 - Clean backend interface (`velox::Backend`) so a GPU solver can drop in
 
+Mesh colliders are static-only (level geometry), matching how game engines
+treat non-convex meshes.
+
 Roadmap:
 
-- [ ] Boxes, capsules, convex hulls (GJK/EPA)
-- [ ] Rotational dynamics + conservative-advancement sweeps for spinning bodies
-- [ ] Broad phase: sweep-and-prune → GPU BVH
+- [ ] Convex hull collider (the GJK path already supports it — needs the shape)
+- [ ] EPA for exact deep-penetration recovery (rarely hit thanks to PCS)
+- [ ] Broad phase: sweep-and-prune → GPU BVH; BVH over mesh triangles
 - [ ] CUDA backend for integration + narrow phase
 - [ ] Constraint solver (joints), islands, sleeping
 

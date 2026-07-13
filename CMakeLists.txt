@@ -9,7 +9,7 @@ option(VELOX_ENABLE_CUDA "Build the CUDA GPU backend (requires CUDA toolkit)" OF
 
 add_library(velox
     src/world.cpp
-    src/ccd.cpp
+    src/gjk.cpp
     src/solver.cpp
 )
 target_include_directories(velox PUBLIC include)

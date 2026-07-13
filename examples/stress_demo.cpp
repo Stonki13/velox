@@ -3,6 +3,7 @@
 #include <velox/velox.h>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 static int failures = 0;
 static void check(bool ok, const char* name) {
@@ -86,12 +87,87 @@ static void testResting() {
     check(ok, "resting sphere (stable, no jitter/sink)");
 }
 
+// 6. Resting box: needs a proper contact manifold + rotational solver or it
+// wobbles on one point and falls over.
+static void testRestingBox() {
+    velox::World w;
+    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto id = w.addBox({0, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    for (int i = 0; i < 600; ++i) w.step(1.0f / 60.0f); // 10 s
+    const auto& b = w.body(id);
+    bool ok = std::fabs(b.position.y - 0.5f) < 2e-2f &&
+              velox::length(b.angularVelocity) < 0.5f;
+    check(ok, "resting box (manifold keeps it flat)");
+}
+
+// 7. Fast box vs floor: tunneling test for a rotated non-sphere shape.
+static void testFastBox() {
+    velox::World w;
+    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto id = w.addBox({0, 2.0f, 0}, {0.2f, 0.2f, 0.2f}, 1.0f);
+    w.body(id).orientation = velox::fromAxisAngle({1, 0, 1}, 0.7f);
+    w.body(id).velocity = {0, -1500.0f, 0};
+    w.body(id).angularVelocity = {30.0f, 0, 10.0f}; // spinning hard, too
+    bool ok = true;
+    for (int i = 0; i < 120; ++i) {
+        w.step(1.0f / 60.0f);
+        ok &= w.body(id).position.y >= -0.4f; // center may dip to ~vertex depth only
+    }
+    check(ok, "1.5 km/s spinning box vs floor (no tunneling)");
+}
+
+// 8. Capsule resting and rolling on a plane.
+static void testCapsule() {
+    velox::World w;
+    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto id = w.addCapsule({0, 2.0f, 0}, 0.3f, 0.5f, 1.0f);
+    w.body(id).orientation = velox::fromAxisAngle({0, 0, 1}, 1.5707963f); // lying down
+    for (int i = 0; i < 600; ++i) w.step(1.0f / 60.0f);
+    const auto& b = w.body(id);
+    bool ok = std::fabs(b.position.y - 0.3f) < 2e-2f;
+    check(ok, "capsule settles lying on the floor");
+}
+
+// 9. Mesh collider: a ball dropped onto a V-shaped triangle-mesh ramp must
+// come to rest inside the valley, and a bullet must not pierce the mesh.
+static void testMesh() {
+    velox::World w;
+    // V-trough: two rectangles meeting at y=0 along the z axis.
+    std::vector<velox::Vec3> verts = {
+        {-4, 4, -4}, {0, 0, -4}, {0, 0, 4}, {-4, 4, 4},   // left wall
+        {4, 4, -4},  {0, 0, -4}, {0, 0, 4}, {4, 4, 4},    // right wall
+    };
+    std::vector<uint32_t> idx = {0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6};
+    w.addStaticMesh(verts, idx);
+
+    auto ball = w.addSphere({-2.0f, 3.5f, 0}, 0.4f, 1.0f);
+    auto bullet = w.addSphere({2.0f, 30.0f, 0}, 0.05f, 0.01f);
+    w.body(bullet).velocity = {0, -1200.0f, 0};
+
+    bool ok = true;
+    for (int i = 0; i < 600; ++i) {
+        w.step(1.0f / 60.0f);
+        // Neither body may end up below the trough surface (y >= |x| - slack).
+        for (auto id : {ball, bullet}) {
+            const auto& b = w.body(id);
+            if (std::fabs(b.position.x) < 3.5f && std::fabs(b.position.z) < 3.5f)
+                ok &= b.position.y >= std::fabs(b.position.x) - 0.5f;
+        }
+    }
+    ok &= velox::length(w.body(ball).velocity) < 1.0f; // ball settled in the valley
+    check(ok, "triangle-mesh trough (rest + no tunneling)");
+}
+
 int main() {
     testBullet();
     testGrazing();
     testPile();
     testHeadOn();
     testResting();
+    testRestingBox();
+    testFastBox();
+    testCapsule();
+    testMesh();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;
