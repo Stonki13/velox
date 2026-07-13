@@ -19,7 +19,14 @@ inline bool operator==(JointId a, JointId b) { return a.value == b.value; }
 inline bool operator!=(JointId a, JointId b) { return !(a == b); }
 
 enum class JointType : uint8_t {
-    Ball, Distance, Hinge, ConeTwist, Fixed, Prismatic
+    Ball, Distance, Hinge, ConeTwist, Fixed, Prismatic, SixDof
+};
+
+enum JointAxisBits : uint8_t {
+    JointAxisX = 1u << 0,
+    JointAxisY = 1u << 1,
+    JointAxisZ = 1u << 2,
+    JointAxisAll = JointAxisX | JointAxisY | JointAxisZ
 };
 
 // Joints connect two bodies (b may be a static body). Anchors and axes are
@@ -63,12 +70,32 @@ struct Joint {
     float lowerTwistLimit = -3.14159265f;
     float upperTwistLimit = 3.14159265f;
 
+    // Six-degree-of-freedom joint configuration. Bit 0/1/2 selects the
+    // joint-frame X/Y/Z axis. A limit bit with equal bounds locks that axis;
+    // clearing it leaves the axis free. Motors drive B relative to A.
+    uint8_t linearLimitMask = JointAxisAll;
+    uint8_t angularLimitMask = JointAxisAll;
+    uint8_t linearMotorMask = 0;
+    uint8_t angularMotorMask = 0;
+    Vec3 lowerLinearLimit;
+    Vec3 upperLinearLimit;
+    Vec3 lowerAngularLimit;
+    Vec3 upperAngularLimit;
+    Vec3 linearMotorSpeed;
+    Vec3 angularMotorSpeed;
+    Vec3 maxLinearMotorForce;
+    Vec3 maxAngularMotorTorque;
+
     // Solver scratch, reset for every substep.
     float motorImpulse = 0.0f;
     float limitImpulse = 0.0f;
     float swingImpulse = 0.0f;
     float twistImpulse = 0.0f;
     float springImpulse = 0.0f;
+    Vec3 linearMotorImpulse;
+    Vec3 angularMotorImpulse;
+    Vec3 linearLimitImpulse;
+    Vec3 angularLimitImpulse;
     Vec3 reactionLinearImpulse;
     Vec3 reactionAngularImpulse;
     bool broken = false;

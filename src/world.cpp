@@ -22,7 +22,68 @@ bool validCombineMode(MaterialCombineMode mode) {
 }
 
 bool validJointType(JointType type) {
-    return (uint8_t)type <= (uint8_t)JointType::Prismatic;
+    return (uint8_t)type <= (uint8_t)JointType::SixDof;
+}
+
+void jointFrame(const Joint& joint, const Body& a, const Body& b,
+                Vec3& xA, Vec3& yA, Vec3& zA,
+                Vec3& xB, Vec3& yB, Vec3& zB) {
+    xA = normalize(rotate(a.orientation, joint.localAxisA));
+    yA = normalize(rotate(a.orientation, joint.localRefA));
+    zA = normalize(cross(xA, yA));
+    yA = cross(zA, xA);
+    xB = normalize(rotate(b.orientation, joint.localAxisB));
+    yB = normalize(rotate(b.orientation, joint.localRefB));
+    zB = normalize(cross(xB, yB));
+    yB = cross(zB, xB);
+}
+
+Quat quaternionFromRotationMatrix(float m00, float m01, float m02,
+                                  float m10, float m11, float m12,
+                                  float m20, float m21, float m22) {
+    Quat q;
+    float trace = m00 + m11 + m22;
+    if (trace > 0.0f) {
+        float s = std::sqrt(trace + 1.0f) * 2.0f;
+        q = {(m21 - m12) / s, (m02 - m20) / s,
+             (m10 - m01) / s, 0.25f * s};
+    } else if (m00 > m11 && m00 > m22) {
+        float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q = {0.25f * s, (m01 + m10) / s, (m02 + m20) / s,
+             (m21 - m12) / s};
+    } else if (m11 > m22) {
+        float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q = {(m01 + m10) / s, 0.25f * s, (m12 + m21) / s,
+             (m02 - m20) / s};
+    } else {
+        float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q = {(m02 + m20) / s, (m12 + m21) / s, 0.25f * s,
+             (m10 - m01) / s};
+    }
+    return normalize(q);
+}
+
+Vec3 sixDofRotationVector(const Joint& joint, const Body& a, const Body& b) {
+    Vec3 xA, yA, zA, xB, yB, zB;
+    jointFrame(joint, a, b, xA, yA, zA, xB, yB, zB);
+    Quat q = quaternionFromRotationMatrix(
+        dot(xA, xB), dot(xA, yB), dot(xA, zB),
+        dot(yA, xB), dot(yA, yB), dot(yA, zB),
+        dot(zA, xB), dot(zA, yB), dot(zA, zB));
+    if (q.w < 0.0f) q = {-q.x, -q.y, -q.z, -q.w};
+    Vec3 v{q.x, q.y, q.z};
+    float sinHalf = length(v);
+    if (sinHalf < 1e-7f) return v * 2.0f;
+    float angle = 2.0f * std::atan2(sinHalf, vclamp(q.w, 0.0f, 1.0f));
+    return v * (angle / sinHalf);
+}
+
+float component(const Vec3& v, int axis) {
+    return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+}
+
+float& component(Vec3& v, int axis) {
+    return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
 }
 
 void requireFiniteVec(const Vec3& value, const char* message) {
@@ -965,6 +1026,24 @@ JointId World::addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor,
     return addJoint(j);
 }
 
+JointId World::addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchor, "velox: 6DoF-joint anchor must be finite");
+    Joint j;
+    j.type = JointType::SixDof;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchor - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, {1, 0, 0});
+    j.localAxisB = rotateInv(bodies_[ib].orientation, {1, 0, 0});
+    j.localRefA = rotateInv(bodies_[ia].orientation, {0, 1, 0});
+    j.localRefB = rotateInv(bodies_[ib].orientation, {0, 1, 0});
+    return addJoint(j);
+}
+
 float World::hingeAngle(JointId id) const {
     const Joint& j = joint(id);
     if (j.type != JointType::Hinge)
@@ -1013,6 +1092,29 @@ float World::prismaticTranslation(JointId id) const {
     Vec3 pb = b.position + rotate(b.orientation, j.localAnchorB);
     Vec3 axis = normalize(rotate(a.orientation, j.localAxisA));
     return dot(pb - pa, axis);
+}
+
+Vec3 World::sixDofLinearTranslation(JointId id) const {
+    const Joint& j = joint(id);
+    if (j.type != JointType::SixDof)
+        throw std::invalid_argument(
+            "velox: sixDofLinearTranslation requires a 6DoF joint");
+    const Body& a = bodies_[j.a];
+    const Body& b = bodies_[j.b];
+    Vec3 pa = a.position + rotate(a.orientation, j.localAnchorA);
+    Vec3 pb = b.position + rotate(b.orientation, j.localAnchorB);
+    Vec3 xA, yA, zA, xB, yB, zB;
+    jointFrame(j, a, b, xA, yA, zA, xB, yB, zB);
+    Vec3 d = pb - pa;
+    return {dot(d, xA), dot(d, yA), dot(d, zA)};
+}
+
+Vec3 World::sixDofAngularRotation(JointId id) const {
+    const Joint& j = joint(id);
+    if (j.type != JointType::SixDof)
+        throw std::invalid_argument(
+            "velox: sixDofAngularRotation requires a 6DoF joint");
+    return sixDofRotationVector(j, bodies_[j.a], bodies_[j.b]);
 }
 
 void World::wake(BodyId id) {
@@ -1236,6 +1338,10 @@ void World::solveJoints(float dt) {
         j.swingImpulse = 0.0f;
         j.twistImpulse = 0.0f;
         j.springImpulse = 0.0f;
+        j.linearMotorImpulse = {};
+        j.angularMotorImpulse = {};
+        j.linearLimitImpulse = {};
+        j.angularLimitImpulse = {};
         j.reactionLinearImpulse = {};
         j.reactionAngularImpulse = {};
         j.broken = false;
@@ -1350,6 +1456,121 @@ void World::solveJoints(float dt) {
                         applyJointImpulse(j, a, b, ra, rb,
                                           axis * lambda, -1.0f);
                     }
+                }
+                break;
+            }
+            case JointType::SixDof: {
+                Vec3 xA, yA, zA, xB, yB, zB;
+                jointFrame(j, a, b, xA, yA, zA, xB, yB, zB);
+                Vec3 axes[3] = {xA, yA, zA};
+                Vec3 d = pb - pa;
+                Mat3 pointK = pointMass(a, b, ra, rb);
+
+                for (int axisIndex = 0; axisIndex < 3; ++axisIndex) {
+                    uint8_t bit = uint8_t(1u << axisIndex);
+                    Vec3 axis = axes[axisIndex];
+                    float k = dot(axis, mul(pointK, axis));
+                    if (k <= 0.0f) continue;
+
+                    float speed = dot(anchorVelocity(b, rb) -
+                                      anchorVelocity(a, ra), axis);
+                    if ((j.linearMotorMask & bit) != 0) {
+                        float lambda = (component(j.linearMotorSpeed, axisIndex) -
+                                        speed) / k;
+                        float maxImpulse = component(j.maxLinearMotorForce,
+                                                     axisIndex) * dt;
+                        float& accumulated = component(j.linearMotorImpulse,
+                                                       axisIndex);
+                        float oldImpulse = accumulated;
+                        accumulated = vclamp(oldImpulse + lambda,
+                                             -maxImpulse, maxImpulse);
+                        lambda = accumulated - oldImpulse;
+                        applyJointImpulse(j, a, b, ra, rb, axis * lambda,
+                                          -1.0f);
+                        speed = dot(anchorVelocity(b, rb) -
+                                    anchorVelocity(a, ra), axis);
+                    }
+
+                    if ((j.linearLimitMask & bit) == 0) continue;
+                    float position = dot(d, axis);
+                    float lower = component(j.lowerLinearLimit, axisIndex);
+                    float upper = component(j.upperLinearLimit, axisIndex);
+                    float lambda = 0.0f;
+                    float& accumulated = component(j.linearLimitImpulse,
+                                                   axisIndex);
+                    float oldImpulse = accumulated;
+                    if (lower == upper) {
+                        float bias = (position - lower) * (kBeta / dt);
+                        lambda = -(speed + bias) / k;
+                        accumulated += lambda;
+                    } else if (position < lower) {
+                        float bias = (position - lower) * (kBeta / dt);
+                        lambda = -(speed + bias) / k;
+                        accumulated = vmax(0.0f, oldImpulse + lambda);
+                        lambda = accumulated - oldImpulse;
+                    } else if (position > upper) {
+                        float bias = (position - upper) * (kBeta / dt);
+                        lambda = -(speed + bias) / k;
+                        accumulated = vmin(0.0f, oldImpulse + lambda);
+                        lambda = accumulated - oldImpulse;
+                    }
+                    if (lambda != 0.0f)
+                        applyJointImpulse(j, a, b, ra, rb, axis * lambda,
+                                          -1.0f);
+                }
+
+                Vec3 rotation = sixDofRotationVector(j, a, b);
+                for (int axisIndex = 0; axisIndex < 3; ++axisIndex) {
+                    uint8_t bit = uint8_t(1u << axisIndex);
+                    Vec3 axis = axes[axisIndex];
+                    float k = dot(axis, a.invInertiaMul(axis)) +
+                              dot(axis, b.invInertiaMul(axis));
+                    if (k <= 0.0f) continue;
+
+                    float speed = dot(b.angularVelocity - a.angularVelocity,
+                                      axis);
+                    if ((j.angularMotorMask & bit) != 0) {
+                        float lambda = (speed -
+                                        component(j.angularMotorSpeed,
+                                                  axisIndex)) / k;
+                        float maxImpulse = component(j.maxAngularMotorTorque,
+                                                     axisIndex) * dt;
+                        float& accumulated = component(j.angularMotorImpulse,
+                                                       axisIndex);
+                        float oldImpulse = accumulated;
+                        accumulated = vclamp(oldImpulse + lambda,
+                                             -maxImpulse, maxImpulse);
+                        lambda = accumulated - oldImpulse;
+                        applyJointAngularImpulse(j, a, b, axis * lambda);
+                        speed = dot(b.angularVelocity - a.angularVelocity,
+                                    axis);
+                    }
+
+                    if ((j.angularLimitMask & bit) == 0) continue;
+                    float angle = component(rotation, axisIndex);
+                    float lower = component(j.lowerAngularLimit, axisIndex);
+                    float upper = component(j.upperAngularLimit, axisIndex);
+                    float lambda = 0.0f;
+                    float& accumulated = component(j.angularLimitImpulse,
+                                                   axisIndex);
+                    float oldImpulse = accumulated;
+                    if (lower == upper) {
+                        float bias = (angle - lower) * (kBeta / dt);
+                        lambda = (speed + bias) / k;
+                        accumulated += lambda;
+                    } else if (angle < lower) {
+                        float bias = (angle - lower) * (kBeta / dt);
+                        lambda = (speed + bias) / k;
+                        accumulated = vmin(0.0f, oldImpulse + lambda);
+                        lambda = accumulated - oldImpulse;
+                    } else if (angle > upper) {
+                        float bias = (angle - upper) * (kBeta / dt);
+                        lambda = (speed + bias) / k;
+                        accumulated = vmax(0.0f, oldImpulse + lambda);
+                        lambda = accumulated - oldImpulse;
+                    }
+                    if (lambda != 0.0f)
+                        applyJointAngularImpulse(j, a, b, axis * lambda);
                 }
                 break;
             }
@@ -1661,11 +1882,16 @@ void World::step(float dt) {
         bool framed = joint.type == JointType::Hinge ||
                       joint.type == JointType::ConeTwist ||
                       joint.type == JointType::Fixed ||
-                      joint.type == JointType::Prismatic;
+                      joint.type == JointType::Prismatic ||
+                      joint.type == JointType::SixDof;
         if (framed && (lengthSq(joint.localAxisA) < 1e-12f ||
                        lengthSq(joint.localAxisB) < 1e-12f ||
                        lengthSq(joint.localRefA) < 1e-12f ||
-                       lengthSq(joint.localRefB) < 1e-12f))
+                       lengthSq(joint.localRefB) < 1e-12f ||
+                       lengthSq(cross(joint.localAxisA,
+                                      joint.localRefA)) < 1e-12f ||
+                       lengthSq(cross(joint.localAxisB,
+                                      joint.localRefB)) < 1e-12f))
             throw std::invalid_argument("velox: joint contains an invalid local frame");
         if (!finiteFloat(joint.motorSpeed) || !finiteFloat(joint.maxMotorTorque) ||
             joint.maxMotorTorque < 0.0f || !finiteFloat(joint.maxMotorForce) ||
@@ -1678,6 +1904,38 @@ void World::step(float dt) {
             joint.upperTwistLimit > 3.14159265f ||
             joint.lowerTwistLimit > joint.upperTwistLimit)
             throw std::invalid_argument("velox: joint contains invalid motor or limit settings");
+        if ((joint.linearLimitMask & ~uint8_t(0x7)) != 0 ||
+            (joint.angularLimitMask & ~uint8_t(0x7)) != 0 ||
+            (joint.linearMotorMask & ~uint8_t(0x7)) != 0 ||
+            (joint.angularMotorMask & ~uint8_t(0x7)) != 0 ||
+            !finiteVec(joint.lowerLinearLimit) ||
+            !finiteVec(joint.upperLinearLimit) ||
+            !finiteVec(joint.lowerAngularLimit) ||
+            !finiteVec(joint.upperAngularLimit) ||
+            !finiteVec(joint.linearMotorSpeed) ||
+            !finiteVec(joint.angularMotorSpeed) ||
+            !finiteVec(joint.maxLinearMotorForce) ||
+            !finiteVec(joint.maxAngularMotorTorque) ||
+            joint.lowerLinearLimit.x > joint.upperLinearLimit.x ||
+            joint.lowerLinearLimit.y > joint.upperLinearLimit.y ||
+            joint.lowerLinearLimit.z > joint.upperLinearLimit.z ||
+            joint.lowerAngularLimit.x > joint.upperAngularLimit.x ||
+            joint.lowerAngularLimit.y > joint.upperAngularLimit.y ||
+            joint.lowerAngularLimit.z > joint.upperAngularLimit.z ||
+            joint.lowerAngularLimit.x < -3.14159265f ||
+            joint.lowerAngularLimit.y < -3.14159265f ||
+            joint.lowerAngularLimit.z < -3.14159265f ||
+            joint.upperAngularLimit.x > 3.14159265f ||
+            joint.upperAngularLimit.y > 3.14159265f ||
+            joint.upperAngularLimit.z > 3.14159265f ||
+            joint.maxLinearMotorForce.x < 0.0f ||
+            joint.maxLinearMotorForce.y < 0.0f ||
+            joint.maxLinearMotorForce.z < 0.0f ||
+            joint.maxAngularMotorTorque.x < 0.0f ||
+            joint.maxAngularMotorTorque.y < 0.0f ||
+            joint.maxAngularMotorTorque.z < 0.0f)
+            throw std::invalid_argument(
+                "velox: joint contains invalid 6DoF settings");
         if (!finiteFloat(joint.springFrequencyHz) ||
             !finiteFloat(joint.springDampingRatio) ||
             joint.springFrequencyHz < 0.0f || joint.springDampingRatio < 0.0f ||

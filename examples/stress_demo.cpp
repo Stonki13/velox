@@ -1051,7 +1051,111 @@ static void testFixedAndPrismaticJoints() {
           "prismatic joint (free axis, motor, limits, validation)");
 }
 
-// 34. Soft distance constraints use frequency and damping ratio rather than a
+// 34. A 6DoF joint independently locks, limits, frees, and motors each axis in
+// its creation frame. Translation and exponential-map rotation queries expose
+// B relative to A without Euler-angle singularities.
+static void testSixDofJoint() {
+    velox::World locked;
+    locked.gravity = {0, 0, 0};
+    auto base = locked.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto payload = locked.addBox({1, 0, 0}, {0.3f, 0.2f, 0.25f}, 1.0f);
+    locked.setTransform(payload, {1, 0, 0},
+                        velox::fromAxisAngle({0, 0, 1}, 0.35f));
+    velox::Vec3 initialDirection = velox::rotate(
+        locked.body(payload).orientation, {1, 0, 0});
+    auto lockedJoint = locked.addSixDofJoint(base, payload, {0.5f, 0, 0});
+    locked.setLinearVelocity(payload, {4, -3, 2});
+    locked.setAngularVelocity(payload, {3, 4, -5});
+    for (int i = 0; i < 180; ++i) locked.step(1.0f / 60.0f);
+    velox::Vec3 lockedTranslation = locked.sixDofLinearTranslation(lockedJoint);
+    velox::Vec3 lockedRotation = locked.sixDofAngularRotation(lockedJoint);
+    velox::Vec3 finalDirection = velox::rotate(
+        locked.body(payload).orientation, {1, 0, 0});
+    bool lockOk = velox::length(lockedTranslation) < 0.03f &&
+                  velox::length(lockedRotation) < 0.03f &&
+                  velox::length(finalDirection - initialDirection) < 0.03f;
+
+    velox::World free;
+    free.gravity = {0, 0, 0};
+    auto freeBase = free.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto freeBody = free.addBox({}, {0.3f, 0.3f, 0.3f}, 1.0f);
+    auto freeJoint = free.addSixDofJoint(freeBase, freeBody, {});
+    free.joint(freeJoint).linearLimitMask =
+        velox::JointAxisY | velox::JointAxisZ; // free X, lock Y/Z
+    free.setLinearVelocity(freeBody, {3, 5, 2});
+    free.setAngularVelocity(freeBody, {2, 3, 4});
+    for (int i = 0; i < 60; ++i) free.step(1.0f / 60.0f);
+    velox::Vec3 freeTranslation = free.sixDofLinearTranslation(freeJoint);
+    velox::Vec3 freeRotation = free.sixDofAngularRotation(freeJoint);
+    bool freeOk = freeTranslation.x > 2.5f &&
+                  std::fabs(freeTranslation.y) < 0.03f &&
+                  std::fabs(freeTranslation.z) < 0.03f &&
+                  velox::length(freeRotation) < 0.03f;
+
+    velox::World linearMotor;
+    linearMotor.gravity = {0, 0, 0};
+    auto linearBase = linearMotor.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto linearBody = linearMotor.addBox({}, {0.3f, 0.3f, 0.3f}, 1.0f);
+    auto linearJoint = linearMotor.addSixDofJoint(linearBase, linearBody, {});
+    auto& linear = linearMotor.joint(linearJoint);
+    linear.lowerLinearLimit = {-1, 0, 0};
+    linear.upperLinearLimit = {2, 0, 0};
+    linear.linearMotorMask = velox::JointAxisX;
+    linear.linearMotorSpeed = {4, 0, 0};
+    linear.maxLinearMotorForce = {100, 0, 0};
+    for (int i = 0; i < 12; ++i) linearMotor.step(1.0f / 60.0f);
+    bool linearMotorOk = linearMotor.body(linearBody).velocity.x > 3.5f;
+    for (int i = 0; i < 120; ++i) linearMotor.step(1.0f / 60.0f);
+    velox::Vec3 limitedTranslation =
+        linearMotor.sixDofLinearTranslation(linearJoint);
+    bool linearLimitOk = limitedTranslation.x >= -1.03f &&
+                         limitedTranslation.x <= 2.03f;
+
+    velox::World angularMotor;
+    angularMotor.gravity = {0, 0, 0};
+    auto angularBase = angularMotor.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto angularBody = angularMotor.addBox({}, {0.5f, 0.2f, 0.2f}, 1.0f);
+    auto angularJoint = angularMotor.addSixDofJoint(
+        angularBase, angularBody, {});
+    auto& angular = angularMotor.joint(angularJoint);
+    angular.lowerAngularLimit = {0, 0, -0.4f};
+    angular.upperAngularLimit = {0, 0, 0.4f};
+    angular.angularMotorMask = velox::JointAxisZ;
+    angular.angularMotorSpeed = {0, 0, 3};
+    angular.maxAngularMotorTorque = {0, 0, 100};
+    for (int i = 0; i < 8; ++i) angularMotor.step(1.0f / 60.0f);
+    bool angularMotorOk =
+        angularMotor.sixDofAngularRotation(angularJoint).z > 0.1f;
+    for (int i = 0; i < 120; ++i) angularMotor.step(1.0f / 60.0f);
+    velox::Vec3 limitedRotation =
+        angularMotor.sixDofAngularRotation(angularJoint);
+    bool angularLimitOk = limitedRotation.z >= -0.43f &&
+                          limitedRotation.z <= 0.43f &&
+                          std::fabs(limitedRotation.x) < 0.03f &&
+                          std::fabs(limitedRotation.y) < 0.03f;
+
+    bool validationOk = throwsException([&] {
+        locked.addSixDofJoint(payload, payload, {});
+    });
+    validationOk &= throwsException([&] {
+        (void)locked.sixDofLinearTranslation(locked.addFixedJoint(
+            base, payload, {}));
+    });
+    free.joint(freeJoint).linearMotorMask = 0x8;
+    validationOk &= throwsException([&] { free.step(1.0f / 60.0f); });
+    free.joint(freeJoint).linearMotorMask = 0;
+    free.joint(freeJoint).lowerAngularLimit.x = 1.0f;
+    free.joint(freeJoint).upperAngularLimit.x = -1.0f;
+    validationOk &= throwsException([&] { free.step(1.0f / 60.0f); });
+
+    check(lockOk && freeOk,
+          "6DoF joint (default lock and independently free axes)");
+    check(linearMotorOk && linearLimitOk && angularMotorOk &&
+              angularLimitOk && validationOk,
+          "6DoF joint (per-axis motors, limits, queries, validation)");
+}
+
+// 35. Soft distance constraints use frequency and damping ratio rather than a
 // mass-specific stiffness. Equal tuning should therefore produce the same
 // motion for light and heavy bodies, and critical damping should settle cleanly.
 static void testDistanceSpring() {
@@ -1097,7 +1201,7 @@ static void testDistanceSpring() {
           "distance spring (mass-independent frequency and damping)");
 }
 
-// 35. Joint reactions are measured as impulse/dt. Breaking is deferred until
+// 36. Joint reactions are measured as impulse/dt. Breaking is deferred until
 // the solver pass completes, then emits stable body handles and the now-stale
 // joint handle before generation-safe slot reuse.
 static void testBreakableJoints() {
@@ -1142,7 +1246,7 @@ static void testBreakableJoints() {
           "breakable joints (force, torque, events, handle reuse)");
 }
 
-// 36. A rollback point restores dynamic state, topology/generations, joints,
+// 37. A rollback point restores dynamic state, topology/generations, joints,
 // geometry, solver caches, sleeping history, and event phase. Replaying across
 // an impact must reproduce the abandoned timeline on both CPU and CUDA.
 static void testWorldSnapshots() {
@@ -1205,7 +1309,7 @@ static void testWorldSnapshots() {
           "world snapshot (topology, caches, deterministic replay)");
 }
 
-// 37. Built-in frame diagnostics expose enough phase and workload data to
+// 38. Built-in frame diagnostics expose enough phase and workload data to
 // profile collision/solver/CCD regressions without an external timing harness.
 static void testStepStats() {
     velox::World w;
@@ -1235,7 +1339,7 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
-// 38. CPU integration and narrow phase may execute on persistent workers, but
+// 39. CPU integration and narrow phase may execute on persistent workers, but
 // pair-range merging preserves the exact serial contact order and trajectory.
 static void testDeterministicCpuWorkers() {
     velox::World serial(velox::BackendType::Cpu);
@@ -1274,7 +1378,7 @@ static void testDeterministicCpuWorkers() {
     check(ok, "CPU workers (parallel integration/narrow phase, serial replay)");
 }
 
-// 39. Debug geometry is renderer-agnostic and must safely traverse every
+// 40. Debug geometry is renderer-agnostic and must safely traverse every
 // internal storage kind while allowing shapes, AABBs, contacts, and joints to
 // be requested independently.
 static void testDebugLines() {
@@ -1351,6 +1455,7 @@ int main() {
     testFilteredQueriesAndShapeCasts();
     testMaterialsAndContactModification();
     testFixedAndPrismaticJoints();
+    testSixDofJoint();
     testDistanceSpring();
     testBreakableJoints();
     testWorldSnapshots();

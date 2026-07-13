@@ -10,6 +10,9 @@ constexpr uint32_t kStaticColor = 0x8b95a5ffu;
 constexpr uint32_t kAabbColor = 0xf2c14effu;
 constexpr uint32_t kContactColor = 0xf45b69ffu;
 constexpr uint32_t kJointColor = 0x7bd389ffu;
+constexpr uint32_t kAxisXColor = 0xf45b69ffu;
+constexpr uint32_t kAxisYColor = 0x7bd389ffu;
+constexpr uint32_t kAxisZColor = 0x58c4ddffu;
 constexpr float kTau = 6.28318530718f;
 
 void addLine(std::vector<DebugLine>& out, Vec3 a, Vec3 b, uint32_t color) {
@@ -169,7 +172,14 @@ void World::debugLines(std::vector<DebugLine>& out, uint32_t flags) const {
             addLine(out, pa, pb, kJointColor);
             addPointCross(out, pa, kJointColor);
             addPointCross(out, pb, kJointColor);
-            if (joint.type == JointType::Hinge ||
+            if (joint.type == JointType::SixDof) {
+                Vec3 x = normalize(rotate(a.orientation, joint.localAxisA));
+                Vec3 y = normalize(rotate(a.orientation, joint.localRefA));
+                Vec3 z = normalize(cross(x, y));
+                addLine(out, pa, pa + x * 0.5f, kAxisXColor);
+                addLine(out, pa, pa + y * 0.5f, kAxisYColor);
+                addLine(out, pa, pa + z * 0.5f, kAxisZColor);
+            } else if (joint.type == JointType::Hinge ||
                 joint.type == JointType::ConeTwist ||
                 joint.type == JointType::Prismatic) {
                 Vec3 axis = normalize(rotate(a.orientation, joint.localAxisA));

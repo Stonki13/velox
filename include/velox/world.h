@@ -186,6 +186,7 @@ public:
     JointId addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     JointId addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     JointId addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
+    JointId addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     Joint& joint(JointId id);                              // configure motors/limits
     const Joint& joint(JointId id) const;
     bool isValid(JointId id) const noexcept;
@@ -194,6 +195,8 @@ public:
     float coneSwingAngle(JointId id) const;
     float coneTwistAngle(JointId id) const;
     float prismaticTranslation(JointId id) const;
+    Vec3 sixDofLinearTranslation(JointId id) const;
+    Vec3 sixDofAngularRotation(JointId id) const;
     const std::vector<JointBreakEvent>& jointBreakEvents() const {
         return jointBreakEvents_;
     }
