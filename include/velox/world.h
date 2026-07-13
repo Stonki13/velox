@@ -7,7 +7,11 @@ namespace velox {
 
 class World {
 public:
-    World();
+    // Auto picks the CUDA backend when built with VELOX_ENABLE_CUDA and a
+    // device is present, otherwise the CPU backend. Cuda throws if unavailable.
+    explicit World(BackendType type = BackendType::Auto);
+
+    const char* backendName() const;
 
     Vec3 gravity{0, -9.81f, 0};
 
@@ -35,6 +39,7 @@ private:
     std::vector<Contact> contacts_;
     struct PrevState { Vec3 position; Quat orientation; };
     std::vector<PrevState> prev_;
+    std::vector<uint64_t> pairKeys_;
     MeshSoup meshes_;
     std::unique_ptr<Backend> backend_;
 };

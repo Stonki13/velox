@@ -28,10 +28,10 @@ struct Body {
     float planeOffset = 0.0f;
     uint32_t meshIndex = 0;     // Mesh: index into World's mesh storage
 
-    bool isStatic() const { return invMass == 0.0f; }
+    VELOX_HD bool isStatic() const { return invMass == 0.0f; }
 
     // World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v))
-    Vec3 invInertiaMul(const Vec3& v) const {
+    VELOX_HD Vec3 invInertiaMul(const Vec3& v) const {
         Vec3 local = rotateInv(orientation, v);
         return rotate(orientation, {local.x * invInertia.x,
                                     local.y * invInertia.y,
@@ -40,7 +40,7 @@ struct Body {
 
     // Conservative bound on how far any surface point can move per second:
     // linear speed plus angular speed times the shape's bounding radius.
-    float maxPointSpeed() const {
+    VELOX_HD float maxPointSpeed() const {
         float r = radius;
         if (shape == ShapeType::Box) r = length(halfExtents);
         else if (shape == ShapeType::Capsule) r = capsuleHalfHeight + radius;
@@ -56,7 +56,17 @@ struct Mesh {
     // Stored by World; Body references it via meshIndex.
     uint32_t firstVertex = 0, vertexCount = 0;
     uint32_t firstIndex = 0, indexCount = 0;
+    uint32_t firstNode = 0, nodeCount = 0;   // triangle BVH (flat, GPU-traversable)
+    uint32_t firstTriRef = 0;                // leaf triangle references
     Vec3 aabbMin, aabbMax;
+};
+
+// Flat BVH node. Leaves hold a range of triangle references; inner nodes
+// store the index of their left child, and the right child is left + 1.
+struct BvhNode {
+    Vec3 aabbMin, aabbMax;
+    uint32_t leftFirst = 0; // inner: index of left child (right = left+1); leaf: first tri ref
+    uint32_t triCount = 0;  // 0 = inner node, >0 = leaf
 };
 
 } // namespace velox

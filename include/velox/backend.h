@@ -9,7 +9,23 @@ struct MeshSoup {
     std::vector<Vec3> vertices;
     std::vector<uint32_t> indices;
     std::vector<Mesh> meshes;
+    std::vector<BvhNode> bvhNodes;   // all meshes' BVHs, concatenated
+    std::vector<uint32_t> bvhTriRefs; // leaf -> triangle number within its mesh
 };
+
+// Raw-pointer view of MeshSoup, usable identically from host and device code.
+struct MeshSoupView {
+    const Vec3* vertices;
+    const uint32_t* indices;
+    const Mesh* meshes;
+    const BvhNode* bvhNodes;
+    const uint32_t* bvhTriRefs;
+};
+
+inline MeshSoupView view(const MeshSoup& s) {
+    return {s.vertices.data(), s.indices.data(), s.meshes.data(),
+            s.bvhNodes.data(), s.bvhTriRefs.data()};
+}
 
 // A speculative contact: generated while the pair is still separated, whenever
 // the relative motion could close the gap within the step. gap > 0 means
@@ -25,12 +41,15 @@ struct Contact {
     float tangentImpulse;
 };
 
+enum class BackendType { Auto, Cpu, Cuda };
+
 // Compute backend interface. The CPU reference backend lives in solver.cpp;
-// a CUDA backend implements the same interface over device buffers, which is
-// possible because Body is a POD laid out for bulk upload.
+// the CUDA backend (backend_cuda.cu) runs the same integration and narrow
+// phase — shared VELOX_HD code — over device buffers.
 class Backend {
 public:
     virtual ~Backend() = default;
+    virtual const char* name() const = 0;
     virtual void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) = 0;
     // Finds all pairs whose gap could close within dt (speculative detection).
     virtual void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
@@ -38,8 +57,6 @@ public:
 };
 
 Backend* createCpuBackend();
-#if VELOX_HAS_CUDA
-Backend* createCudaBackend();
-#endif
+Backend* createCudaBackend(); // returns nullptr if unavailable (no build/device)
 
 } // namespace velox
