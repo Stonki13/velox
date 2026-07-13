@@ -23,8 +23,11 @@ __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (b.isStatic() || b.asleep) return;
-    b.velocity += gravity * dt;
+    if (!b.isDynamic() || b.asleep) return;
+    b.velocity += (gravity * b.gravityScale + b.force * b.solverInvMass()) * dt;
+    b.angularVelocity += b.invInertiaMul(b.torque) * dt;
+    b.velocity *= 1.0f / (1.0f + b.linearDamping * dt);
+    b.angularVelocity *= 1.0f / (1.0f + b.angularDamping * dt);
 }
 
 // Compact AABBs so the pair kernel can reject without touching Body structs.
@@ -206,7 +209,7 @@ public:
             numColors_ = 0;
             for (int k = 0; k < m; ++k) {
                 const Contact& c = contacts[k];
-                bool sa = bodies[c.a].isStatic(), sb = bodies[c.b].isStatic();
+                bool sa = !bodies[c.a].isDynamic(), sb = !bodies[c.b].isDynamic();
                 uint64_t used = (sa ? 0 : colorMask_[c.a]) | (sb ? 0 : colorMask_[c.b]);
                 int color;
                 if (~used) {

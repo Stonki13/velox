@@ -3,6 +3,7 @@
 #include <velox/velox.h>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -10,6 +11,13 @@ static int failures = 0;
 static void check(bool ok, const char* name) {
     std::printf("%-44s %s\n", name, ok ? "PASS" : "FAIL");
     if (!ok) ++failures;
+}
+
+template <typename F>
+static bool throwsException(F&& action) {
+    try { action(); }
+    catch (const std::exception&) { return true; }
+    return false;
 }
 
 // 1. Tunneling: tiny sphere into the floor at 2 km/s.
@@ -432,6 +440,125 @@ static void testTwoAxisFriction() {
     check(ok, "two-axis friction (isotropic diagonal slide)");
 }
 
+// 23. Public inputs and mutable runtime state must fail before unsafe geometry
+// reaches GJK/BVH/CUDA code, and failed additions must not change bodyCount().
+static void testValidation() {
+    velox::World w;
+    size_t initialCount = w.bodyCount();
+    bool ok = true;
+    ok &= throwsException([&] { w.addSphere({}, -1.0f, 1.0f); });
+    ok &= throwsException([&] { w.addBox({}, {1, 0, 1}, 1.0f); });
+    ok &= throwsException([&] { w.addCapsule({}, 0.5f, -0.1f, 1.0f); });
+    ok &= throwsException([&] { w.addStaticPlane({}, 0.0f); });
+    std::vector<velox::Vec3> flat = {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {1, 0, 1}};
+    ok &= throwsException([&] { w.addConvexHull({}, flat, 1.0f); });
+    ok &= throwsException([&] {
+        w.addStaticMesh({{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}, {0, 1, 9});
+    });
+    ok &= throwsException([&] {
+        w.addStaticMesh({{0, 0, 0}, {1, 0, 0}, {2, 0, 0}}, {0, 1, 2});
+    });
+    ok &= w.bodyCount() == initialCount;
+
+    auto ground = w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto body = w.addSphere({0, 2, 0}, 0.5f, 1.0f);
+    ok &= throwsException([&] { (void)w.body(9999); });
+    ok &= throwsException([&] { (void)w.joint(9999); });
+    ok &= throwsException([&] { w.addBallJoint(body, body, {}); });
+    ok &= throwsException([&] { w.addHingeJoint(ground, body, {}, {}); });
+    ok &= throwsException([&] { (void)w.rayCast({}, {}, 1.0f); });
+    std::vector<velox::BodyId> overlaps;
+    ok &= throwsException([&] { w.overlapSphere({}, 0.0f, overlaps); });
+    ok &= throwsException([&] { w.step(-1.0f); });
+    ok &= throwsException([&] { w.step(std::numeric_limits<float>::quiet_NaN()); });
+    w.substeps = 0;
+    ok &= throwsException([&] { w.step(1.0f / 60.0f); });
+    w.substeps = 4;
+    w.body(body).velocity.x = std::numeric_limits<float>::infinity();
+    ok &= throwsException([&] { w.step(1.0f / 60.0f); });
+    w.body(body).velocity = {};
+    w.step(0.0f); // explicitly supported no-op
+    check(ok, "public API validation (geometry, IDs, state, timestep)");
+}
+
+// 24. Kinematic bodies follow prescribed velocities, ignore gravity and
+// impulses, but still wake and push dynamic bodies. Motion-type transitions
+// retain the body's original mass/inertia for a later return to Dynamic.
+static void testMotionTypes() {
+    velox::World w;
+    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto mover = w.addBox({-2, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 2.0f);
+    auto ball = w.addSphere({0, 0.5f, 0}, 0.5f, 1.0f);
+    w.setMotionType(mover, velox::MotionType::Kinematic);
+    w.body(mover).velocity = {4, 0, 0};
+    for (int i = 0; i < 60; ++i) w.step(1.0f / 60.0f);
+    const auto movingPosition = w.body(mover).position;
+    bool ok = w.motionType(mover) == velox::MotionType::Kinematic &&
+              std::fabs(movingPosition.x - 2.0f) < 0.05f &&
+              std::fabs(movingPosition.y - 0.5f) < 0.02f &&
+              std::fabs(w.body(mover).velocity.x - 4.0f) < 1e-4f &&
+              w.body(ball).position.x > 1.0f;
+
+    w.setMotionType(mover, velox::MotionType::Static);
+    velox::Vec3 staticPosition = w.body(mover).position;
+    w.step(1.0f / 60.0f);
+    ok &= velox::length(w.body(mover).position - staticPosition) < 1e-6f;
+    w.body(mover).position.y = 2.0f;
+    w.setMotionType(mover, velox::MotionType::Dynamic);
+    w.step(1.0f / 60.0f);
+    ok &= w.body(mover).velocity.y < 0.0f;
+
+    auto massless = w.addBox({10, 1, 0}, {0.5f, 0.5f, 0.5f}, 0.0f);
+    w.setMotionType(massless, velox::MotionType::Kinematic);
+    ok &= throwsException([&] { w.setMotionType(massless, velox::MotionType::Dynamic); });
+    check(ok, "motion types (static, kinematic, dynamic transitions)");
+}
+
+// 25. Controlled state changes must preserve the dynamic-body invariants:
+// forces accumulate for one public step, impulses are immediate, off-center
+// application produces angular motion, and per-body integration controls work.
+static void testForcesAndStateApi() {
+    velox::World w;
+    w.gravity = {0, 0, 0};
+    auto body = w.addBox({0, 5, 0}, {0.5f, 0.5f, 0.5f}, 2.0f);
+
+    w.addForce(body, {12, 0, 0});
+    w.step(0.5f);
+    bool ok = std::fabs(w.body(body).velocity.x - 3.0f) < 1e-4f;
+    w.step(0.5f);
+    ok &= std::fabs(w.body(body).velocity.x - 3.0f) < 1e-4f;
+
+    w.addLinearImpulse(body, {2, 0, 0});
+    ok &= std::fabs(w.body(body).velocity.x - 4.0f) < 1e-4f;
+    velox::Vec3 point = w.body(body).position + velox::Vec3{1, 0, 0};
+    w.addImpulseAtPoint(body, {0, 2, 0}, point);
+    ok &= w.body(body).angularVelocity.z > 0.1f;
+
+    w.setLinearVelocity(body, {10, 0, 0});
+    w.setAngularVelocity(body, {});
+    w.body(body).linearDamping = 1.0f;
+    w.step(1.0f);
+    ok &= std::fabs(w.body(body).velocity.x - 4.096f) < 1e-3f;
+
+    w.gravity = {0, -9.81f, 0};
+    w.body(body).linearDamping = 0.0f;
+    w.body(body).gravityScale = 0.0f;
+    w.setTransform(body, {2, 10, 3}, {0, 0, 0, 2});
+    w.setLinearVelocity(body, {});
+    w.step(0.25f);
+    ok &= std::fabs(w.body(body).position.y - 10.0f) < 1e-5f;
+    ok &= std::fabs(w.body(body).orientation.w - 1.0f) < 1e-5f;
+
+    auto fixed = w.addBox({20, 0, 0}, {1, 1, 1}, 0.0f);
+    ok &= throwsException([&] { w.addForce(fixed, {1, 0, 0}); });
+    ok &= throwsException([&] { w.addLinearImpulse(fixed, {1, 0, 0}); });
+    ok &= throwsException([&] { w.setLinearVelocity(fixed, {1, 0, 0}); });
+    ok &= throwsException([&] {
+        w.setTransform(body, {}, {0, 0, 0, 0});
+    });
+    check(ok, "forces and state API (impulses, damping, gravity scale)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -455,6 +582,9 @@ int main() {
     testDeepHullPenetration();
     testDynamicCcdMomentum();
     testTwoAxisFriction();
+    testValidation();
+    testMotionTypes();
+    testForcesAndStateApi();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

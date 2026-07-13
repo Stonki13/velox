@@ -7,6 +7,7 @@ namespace velox {
 using BodyId = uint32_t;
 
 enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh, Hull };
+enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
 
 // Data-oriented body layout: plain structs in contiguous arrays so the same
 // data can be uploaded to a GPU backend unchanged.
@@ -15,10 +16,16 @@ struct Body {
     Quat orientation;
     Vec3 velocity;
     Vec3 angularVelocity;
+    Vec3 force;
+    Vec3 torque;
     float invMass = 1.0f;       // 0 => static / infinite mass
     Vec3 invInertia;            // body-space diagonal inverse inertia tensor
     float restitution = 0.3f;
     float friction = 0.5f;
+    float linearDamping = 0.0f;
+    float angularDamping = 0.0f;
+    float gravityScale = 1.0f;
+    MotionType motionType = MotionType::Dynamic;
 
     uint8_t asleep = 0;         // sleeping bodies skip integration and solving
     float sleepTimer = 0.0f;    // seconds below the motion threshold
@@ -32,10 +39,14 @@ struct Body {
     uint32_t meshIndex = 0;     // Mesh: index into World's mesh storage
     uint32_t hullFirst = 0, hullCount = 0; // Hull: local-space points in soup
 
-    VELOX_HD bool isStatic() const { return invMass == 0.0f; }
+    VELOX_HD bool isStatic() const { return motionType == MotionType::Static; }
+    VELOX_HD bool isKinematic() const { return motionType == MotionType::Kinematic; }
+    VELOX_HD bool isDynamic() const { return motionType == MotionType::Dynamic; }
+    VELOX_HD float solverInvMass() const { return isDynamic() ? invMass : 0.0f; }
 
     // World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v))
     VELOX_HD Vec3 invInertiaMul(const Vec3& v) const {
+        if (!isDynamic()) return {};
         Vec3 local = rotateInv(orientation, v);
         return rotate(orientation, {local.x * invInertia.x,
                                     local.y * invInertia.y,

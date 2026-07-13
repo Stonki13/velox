@@ -48,12 +48,12 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
     Vec3 impulse = c.normal * c.normalImpulse +
                    tangent1 * c.tangentImpulse1 +
                    tangent2 * c.tangentImpulse2;
-    if (!a.isStatic()) {
-        a.velocity += impulse * a.invMass;
+    if (a.isDynamic()) {
+        a.velocity += impulse * a.solverInvMass();
         a.angularVelocity += a.invInertiaMul(cross(c.point - a.position, impulse));
     }
-    if (!b.isStatic()) {
-        b.velocity -= impulse * b.invMass;
+    if (b.isDynamic()) {
+        b.velocity -= impulse * b.solverInvMass();
         b.angularVelocity -= b.invInertiaMul(cross(c.point - b.position, impulse));
     }
 }
@@ -72,7 +72,7 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     // Effective mass along the normal, including rotation.
     Vec3 raxn = cross(ra, c.normal);
     Vec3 rbxn = cross(rb, c.normal);
-    float kNormal = a.invMass + b.invMass +
+    float kNormal = a.solverInvMass() + b.solverInvMass() +
                     dot(raxn, a.invInertiaMul(raxn)) +
                     dot(rbxn, b.invInertiaMul(rbxn));
     if (kNormal <= 0.0f) return;
@@ -97,12 +97,12 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     c.normalImpulse = newImpulse;
 
     Vec3 impulse = c.normal * jn;
-    if (!a.isStatic()) {
-        a.velocity += impulse * a.invMass;
+    if (a.isDynamic()) {
+        a.velocity += impulse * a.solverInvMass();
         a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
     }
-    if (!b.isStatic()) {
-        b.velocity -= impulse * b.invMass;
+    if (b.isDynamic()) {
+        b.velocity -= impulse * b.solverInvMass();
         b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
     }
 
@@ -114,9 +114,9 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     contactTangents(c.normal, tangent1, tangent2);
     Vec3 raxt1 = cross(ra, tangent1), rbxt1 = cross(rb, tangent1);
     Vec3 raxt2 = cross(ra, tangent2), rbxt2 = cross(rb, tangent2);
-    float k1 = a.invMass + b.invMass + dot(raxt1, a.invInertiaMul(raxt1)) +
+    float k1 = a.solverInvMass() + b.solverInvMass() + dot(raxt1, a.invInertiaMul(raxt1)) +
                dot(rbxt1, b.invInertiaMul(rbxt1));
-    float k2 = a.invMass + b.invMass + dot(raxt2, a.invInertiaMul(raxt2)) +
+    float k2 = a.solverInvMass() + b.solverInvMass() + dot(raxt2, a.invInertiaMul(raxt2)) +
                dot(rbxt2, b.invInertiaMul(rbxt2));
     if (k1 > 0.0f && k2 > 0.0f) {
         float old1 = c.tangentImpulse1, old2 = c.tangentImpulse2;
@@ -132,12 +132,12 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
         c.tangentImpulse1 = next1;
         c.tangentImpulse2 = next2;
         Vec3 fImpulse = tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
-        if (!a.isStatic()) {
-            a.velocity += fImpulse * a.invMass;
+        if (a.isDynamic()) {
+            a.velocity += fImpulse * a.solverInvMass();
             a.angularVelocity += a.invInertiaMul(cross(ra, fImpulse));
         }
-        if (!b.isStatic()) {
-            b.velocity -= fImpulse * b.invMass;
+        if (b.isDynamic()) {
+            b.velocity -= fImpulse * b.solverInvMass();
             b.angularVelocity -= b.invInertiaMul(cross(rb, fImpulse));
         }
     }

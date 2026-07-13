@@ -1,10 +1,16 @@
 // Scene queries: raycasts and overlap tests against every collider type.
 #include "velox/world.h"
 #include "narrowphase.h"
+#include <stdexcept>
 
 namespace velox {
 
 namespace {
+
+bool finiteQueryFloat(float value) { return std::isfinite(value); }
+bool finiteQueryVec(const Vec3& v) {
+    return finiteQueryFloat(v.x) && finiteQueryFloat(v.y) && finiteQueryFloat(v.z);
+}
 
 struct LocalHit { bool hit; float t; Vec3 normal; };
 
@@ -186,6 +192,11 @@ LocalHit rayConvex(const Vec3& o, const Vec3& d, const Body& body,
 } // namespace
 
 RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
+    if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
+        !finiteQueryFloat(maxDist) || maxDist < 0.0f)
+        throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
+    if (lengthSq(dir) < 1e-12f)
+        throw std::invalid_argument("velox: ray direction must be non-zero");
     dir = normalize(dir);
     RayHit best;
     best.t = maxDist;
@@ -215,6 +226,8 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
 }
 
 void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) const {
+    if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
+        throw std::invalid_argument("velox: overlap sphere requires a finite center and positive radius");
     out.clear();
     const MeshSoupView soup = view(meshes_);
     Body probe;

@@ -11,8 +11,11 @@ public:
 
     void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) override {
         for (Body& b : bodies) {
-            if (b.isStatic() || b.asleep) continue;
-            b.velocity += gravity * dt; // semi-implicit Euler
+            if (!b.isDynamic() || b.asleep) continue;
+            b.velocity += (gravity * b.gravityScale + b.force * b.solverInvMass()) * dt;
+            b.angularVelocity += b.invInertiaMul(b.torque) * dt;
+            b.velocity *= 1.0f / (1.0f + b.linearDamping * dt);
+            b.angularVelocity *= 1.0f / (1.0f + b.angularDamping * dt);
         }
     }
 

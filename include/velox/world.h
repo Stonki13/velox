@@ -47,15 +47,27 @@ public:
     BodyId addStaticMesh(const std::vector<Vec3>& vertices,
                          const std::vector<uint32_t>& indices);
 
-    Body& body(BodyId id) { return bodies_[id]; }
-    const Body& body(BodyId id) const { return bodies_[id]; }
+    Body& body(BodyId id);
+    const Body& body(BodyId id) const;
     size_t bodyCount() const { return bodies_.size(); }
+    MotionType motionType(BodyId id) const;
+    void setMotionType(BodyId id, MotionType type);
+    void setTransform(BodyId id, Vec3 position, Quat orientation);
+    void setLinearVelocity(BodyId id, Vec3 velocity);
+    void setAngularVelocity(BodyId id, Vec3 velocity);
+    void addForce(BodyId id, Vec3 force);
+    void addForceAtPoint(BodyId id, Vec3 force, Vec3 worldPoint);
+    void addTorque(BodyId id, Vec3 torque);
+    void addLinearImpulse(BodyId id, Vec3 impulse);
+    void addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint);
+    void clearForces(BodyId id);
 
     // --- joints -------------------------------------------------------------
     JointId addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     JointId addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB);
     JointId addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
-    Joint& joint(JointId id) { return joints_[id]; }        // configure motors/limits
+    Joint& joint(JointId id);                              // configure motors/limits
+    const Joint& joint(JointId id) const;
     float hingeAngle(JointId id) const;                     // radians, 0 at creation
 
     // Contact begin events from the most recent step().

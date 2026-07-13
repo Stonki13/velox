@@ -5,6 +5,71 @@
 
 namespace velox {
 
+namespace {
+
+bool finiteFloat(float value) { return std::isfinite(value); }
+bool finiteVec(const Vec3& v) {
+    return finiteFloat(v.x) && finiteFloat(v.y) && finiteFloat(v.z);
+}
+bool finiteQuat(const Quat& q) {
+    return finiteFloat(q.x) && finiteFloat(q.y) &&
+           finiteFloat(q.z) && finiteFloat(q.w);
+}
+
+void requireFiniteVec(const Vec3& value, const char* message) {
+    if (!finiteVec(value)) throw std::invalid_argument(message);
+}
+
+void requireMass(float mass) {
+    if (!finiteFloat(mass) || mass < 0.0f)
+        throw std::invalid_argument("velox: mass must be finite and non-negative");
+}
+
+void requireBodyId(BodyId id, size_t count) {
+    if ((size_t)id >= count) throw std::out_of_range("velox: invalid body id");
+}
+
+void requireJointId(JointId id, size_t count) {
+    if ((size_t)id >= count) throw std::out_of_range("velox: invalid joint id");
+}
+
+void requireJointBodies(BodyId a, BodyId b, size_t count) {
+    requireBodyId(a, count);
+    requireBodyId(b, count);
+    if (a == b) throw std::invalid_argument("velox: a joint requires two different bodies");
+}
+
+void requirePositive(float value, const char* message) {
+    if (!finiteFloat(value) || value <= 0.0f) throw std::invalid_argument(message);
+}
+
+void requireNonNegative(float value, const char* message) {
+    if (!finiteFloat(value) || value < 0.0f) throw std::invalid_argument(message);
+}
+
+void validateRuntimeBody(const Body& body) {
+    if (!finiteVec(body.position) || !finiteQuat(body.orientation) ||
+        !finiteVec(body.velocity) || !finiteVec(body.angularVelocity) ||
+        !finiteVec(body.force) || !finiteVec(body.torque) ||
+        !finiteFloat(body.invMass) || body.invMass < 0.0f ||
+        !finiteVec(body.invInertia) || body.invInertia.x < 0.0f ||
+        body.invInertia.y < 0.0f || body.invInertia.z < 0.0f ||
+        !finiteFloat(body.restitution) ||
+        body.restitution < 0.0f || !finiteFloat(body.friction) || body.friction < 0.0f ||
+        !finiteFloat(body.linearDamping) || body.linearDamping < 0.0f ||
+        !finiteFloat(body.angularDamping) || body.angularDamping < 0.0f ||
+        !finiteFloat(body.gravityScale))
+        throw std::invalid_argument("velox: body contains invalid or non-finite state");
+    float q2 = body.orientation.x * body.orientation.x +
+               body.orientation.y * body.orientation.y +
+               body.orientation.z * body.orientation.z +
+               body.orientation.w * body.orientation.w;
+    if (!finiteFloat(q2) || q2 < 1e-12f)
+        throw std::invalid_argument("velox: body orientation must be a finite non-zero quaternion");
+}
+
+} // namespace
+
 World::World(BackendType type) {
     if (type != BackendType::Cpu) backend_.reset(createCudaBackend());
     if (!backend_) {
@@ -17,11 +82,35 @@ World::World(BackendType type) {
 
 const char* World::backendName() const { return backend_->name(); }
 
+Body& World::body(BodyId id) {
+    requireBodyId(id, bodies_.size());
+    return bodies_[id];
+}
+
+const Body& World::body(BodyId id) const {
+    requireBodyId(id, bodies_.size());
+    return bodies_[id];
+}
+
+Joint& World::joint(JointId id) {
+    requireJointId(id, joints_.size());
+    return joints_[id];
+}
+
+const Joint& World::joint(JointId id) const {
+    requireJointId(id, joints_.size());
+    return joints_[id];
+}
+
 BodyId World::addSphere(Vec3 position, float radius, float mass) {
+    requireFiniteVec(position, "velox: sphere position must be finite");
+    requirePositive(radius, "velox: sphere radius must be finite and positive");
+    requireMass(mass);
     Body b;
     b.position = position;
     b.shape = ShapeType::Sphere;
     b.radius = radius;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     if (mass > 0.0f) {
         float i = 0.4f * mass * radius * radius; // solid sphere: 2/5 m r^2
@@ -32,10 +121,16 @@ BodyId World::addSphere(Vec3 position, float radius, float mass) {
 }
 
 BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
+    requireFiniteVec(position, "velox: box position must be finite");
+    requireFiniteVec(halfExtents, "velox: box half extents must be finite");
+    if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+        throw std::invalid_argument("velox: box half extents must be positive");
+    requireMass(mass);
     Body b;
     b.position = position;
     b.shape = ShapeType::Box;
     b.halfExtents = halfExtents;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     if (mass > 0.0f) {
         Vec3 e = halfExtents * 2.0f;
@@ -49,11 +144,16 @@ BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
 }
 
 BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float mass) {
+    requireFiniteVec(position, "velox: capsule position must be finite");
+    requirePositive(radius, "velox: capsule radius must be finite and positive");
+    requireNonNegative(halfHeight, "velox: capsule half height must be finite and non-negative");
+    requireMass(mass);
     Body b;
     b.position = position;
     b.shape = ShapeType::Capsule;
     b.radius = radius;
     b.capsuleHalfHeight = halfHeight;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     if (mass > 0.0f) {
         // Approximated as a cylinder of the same core length plus end caps.
@@ -67,13 +167,48 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
 }
 
 BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass) {
+    requireFiniteVec(position, "velox: convex hull position must be finite");
+    requireMass(mass);
     if (points.size() < 4)
         throw std::invalid_argument("velox: convex hull requires at least four points");
+    if (points.size() > UINT32_MAX)
+        throw std::invalid_argument("velox: convex hull has too many points");
+    for (const Vec3& p : points)
+        requireFiniteVec(p, "velox: convex hull points must be finite");
+
+    // Reject point, line, and plane clouds. GJK can represent them, but they
+    // have zero volume and cannot produce valid 3D mass properties or EPA seeds.
+    const Vec3 p0 = points[0];
+    float scale2 = 0.0f;
+    size_t i1 = 0;
+    for (size_t i = 1; i < points.size(); ++i) {
+        float d2 = lengthSq(points[i] - p0);
+        if (d2 > scale2) { scale2 = d2; i1 = i; }
+    }
+    if (scale2 < 1e-12f)
+        throw std::invalid_argument("velox: convex hull points are coincident");
+    Vec3 edge = points[i1] - p0;
+    float bestArea2 = 0.0f;
+    size_t i2 = 0;
+    for (size_t i = 1; i < points.size(); ++i) {
+        float area2 = lengthSq(cross(edge, points[i] - p0));
+        if (area2 > bestArea2) { bestArea2 = area2; i2 = i; }
+    }
+    if (bestArea2 <= scale2 * scale2 * 1e-12f)
+        throw std::invalid_argument("velox: convex hull points are collinear");
+    Vec3 planeNormal = cross(edge, points[i2] - p0);
+    float maxPlaneDistance = 0.0f;
+    for (const Vec3& p : points)
+        maxPlaneDistance = vmax(maxPlaneDistance, fabsf(dot(planeNormal, p - p0)));
+    float scale = sqrtf(scale2);
+    if (maxPlaneDistance <= scale * scale * scale * 1e-6f)
+        throw std::invalid_argument("velox: convex hull points are coplanar");
     Body b;
     b.position = position;
     b.shape = ShapeType::Hull;
     b.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
     b.hullCount = static_cast<uint32_t>(points.size());
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     meshes_.hullPoints.insert(meshes_.hullPoints.end(), points.begin(), points.end());
     float r2 = 0.0f;
     Vec3 lo = points[0], hi = lo;
@@ -97,8 +232,13 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
 }
 
 BodyId World::addStaticPlane(Vec3 normal, float offset) {
+    requireFiniteVec(normal, "velox: plane normal must be finite");
+    if (lengthSq(normal) < 1e-12f)
+        throw std::invalid_argument("velox: plane normal must be non-zero");
+    if (!finiteFloat(offset)) throw std::invalid_argument("velox: plane offset must be finite");
     Body b;
     b.shape = ShapeType::Plane;
+    b.motionType = MotionType::Static;
     b.planeNormal = normalize(normal);
     b.planeOffset = offset;
     b.invMass = 0.0f;
@@ -167,6 +307,22 @@ struct BvhBuilder {
 
 BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
                             const std::vector<uint32_t>& indices) {
+    if (vertices.size() < 3 || indices.empty() || indices.size() % 3 != 0)
+        throw std::invalid_argument("velox: mesh requires vertices and complete triangles");
+    if (vertices.size() > UINT32_MAX || indices.size() > UINT32_MAX)
+        throw std::invalid_argument("velox: mesh exceeds 32-bit storage limits");
+    for (const Vec3& vertex : vertices)
+        requireFiniteVec(vertex, "velox: mesh vertices must be finite");
+    for (uint32_t index : indices)
+        if ((size_t)index >= vertices.size())
+            throw std::out_of_range("velox: mesh index is outside the vertex array");
+    for (size_t i = 0; i < indices.size(); i += 3) {
+        Vec3 e1 = vertices[indices[i + 1]] - vertices[indices[i]];
+        Vec3 e2 = vertices[indices[i + 2]] - vertices[indices[i]];
+        float edgeScale2 = vmax(lengthSq(e1), lengthSq(e2));
+        if (edgeScale2 < 1e-16f || lengthSq(cross(e1, e2)) <= edgeScale2 * edgeScale2 * 1e-12f)
+            throw std::invalid_argument("velox: mesh contains a degenerate triangle");
+    }
     Mesh m;
     m.firstVertex = static_cast<uint32_t>(meshes_.vertices.size());
     m.vertexCount = static_cast<uint32_t>(vertices.size());
@@ -205,13 +361,116 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
 
     Body b;
     b.shape = ShapeType::Mesh;
+    b.motionType = MotionType::Static;
     b.meshIndex = static_cast<uint32_t>(meshes_.meshes.size() - 1);
     b.invMass = 0.0f; // mesh colliders are static (level geometry)
     bodies_.push_back(b);
     return static_cast<BodyId>(bodies_.size() - 1);
 }
 
+MotionType World::motionType(BodyId id) const { return body(id).motionType; }
+
+void World::setMotionType(BodyId id, MotionType type) {
+    Body& b = body(id);
+    if ((b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh) &&
+        type != MotionType::Static)
+        throw std::invalid_argument("velox: plane and mesh colliders must remain static");
+    if (type == MotionType::Dynamic && b.invMass <= 0.0f)
+        throw std::invalid_argument("velox: dynamic motion requires positive mass");
+    b.motionType = type;
+    b.asleep = 0;
+    b.sleepTimer = 0.0f;
+    if (type == MotionType::Static) {
+        b.velocity = {};
+        b.angularVelocity = {};
+    }
+}
+
+void World::setTransform(BodyId id, Vec3 position, Quat orientation) {
+    requireFiniteVec(position, "velox: body position must be finite");
+    if (!finiteQuat(orientation))
+        throw std::invalid_argument("velox: body orientation must be finite");
+    float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
+               orientation.z * orientation.z + orientation.w * orientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument("velox: body orientation must be non-zero");
+    Body& b = body(id);
+    if (b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh)
+        throw std::invalid_argument("velox: plane and mesh transforms are baked into geometry");
+    b.position = position;
+    b.orientation = normalize(orientation);
+    wake(id);
+}
+
+void World::setLinearVelocity(BodyId id, Vec3 velocity) {
+    requireFiniteVec(velocity, "velox: linear velocity must be finite");
+    Body& b = body(id);
+    if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
+    b.velocity = velocity;
+    wake(id);
+}
+
+void World::setAngularVelocity(BodyId id, Vec3 velocity) {
+    requireFiniteVec(velocity, "velox: angular velocity must be finite");
+    Body& b = body(id);
+    if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
+    b.angularVelocity = velocity;
+    wake(id);
+}
+
+void World::addForce(BodyId id, Vec3 force) {
+    requireFiniteVec(force, "velox: force must be finite");
+    Body& b = body(id);
+    if (!b.isDynamic()) throw std::invalid_argument("velox: forces require a dynamic body");
+    b.force += force;
+    wake(id);
+}
+
+void World::addForceAtPoint(BodyId id, Vec3 force, Vec3 worldPoint) {
+    requireFiniteVec(force, "velox: force must be finite");
+    requireFiniteVec(worldPoint, "velox: force point must be finite");
+    Body& b = body(id);
+    if (!b.isDynamic()) throw std::invalid_argument("velox: forces require a dynamic body");
+    b.force += force;
+    b.torque += cross(worldPoint - b.position, force);
+    wake(id);
+}
+
+void World::addTorque(BodyId id, Vec3 torque) {
+    requireFiniteVec(torque, "velox: torque must be finite");
+    Body& b = body(id);
+    if (!b.isDynamic()) throw std::invalid_argument("velox: torque requires a dynamic body");
+    b.torque += torque;
+    wake(id);
+}
+
+void World::addLinearImpulse(BodyId id, Vec3 impulse) {
+    requireFiniteVec(impulse, "velox: impulse must be finite");
+    Body& b = body(id);
+    if (!b.isDynamic()) throw std::invalid_argument("velox: impulses require a dynamic body");
+    b.velocity += impulse * b.solverInvMass();
+    wake(id);
+}
+
+void World::addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint) {
+    requireFiniteVec(impulse, "velox: impulse must be finite");
+    requireFiniteVec(worldPoint, "velox: impulse point must be finite");
+    Body& b = body(id);
+    if (!b.isDynamic()) throw std::invalid_argument("velox: impulses require a dynamic body");
+    b.velocity += impulse * b.solverInvMass();
+    b.angularVelocity += b.invInertiaMul(cross(worldPoint - b.position, impulse));
+    wake(id);
+}
+
+void World::clearForces(BodyId id) {
+    Body& b = body(id);
+    b.force = {};
+    b.torque = {};
+}
+
 JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    requireJointBodies(a, b, bodies_.size());
+    requireFiniteVec(worldAnchor, "velox: ball-joint anchor must be finite");
     Joint j;
     j.type = JointType::Ball;
     j.a = a; j.b = b;
@@ -222,6 +481,9 @@ JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
 }
 
 JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB) {
+    requireJointBodies(a, b, bodies_.size());
+    requireFiniteVec(worldAnchorA, "velox: distance-joint anchor must be finite");
+    requireFiniteVec(worldAnchorB, "velox: distance-joint anchor must be finite");
     Joint j;
     j.type = JointType::Distance;
     j.a = a; j.b = b;
@@ -233,6 +495,11 @@ JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worl
 }
 
 JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
+    requireJointBodies(a, b, bodies_.size());
+    requireFiniteVec(worldAnchor, "velox: hinge anchor must be finite");
+    requireFiniteVec(worldAxis, "velox: hinge axis must be finite");
+    if (lengthSq(worldAxis) < 1e-12f)
+        throw std::invalid_argument("velox: hinge axis must be non-zero");
     Joint j;
     j.type = JointType::Hinge;
     j.a = a; j.b = b;
@@ -251,7 +518,10 @@ JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxi
 }
 
 float World::hingeAngle(JointId id) const {
+    requireJointId(id, joints_.size());
     const Joint& j = joints_[id];
+    if (j.type != JointType::Hinge)
+        throw std::invalid_argument("velox: hingeAngle requires a hinge joint");
     const Body& a = bodies_[j.a];
     const Body& b = bodies_[j.b];
     Vec3 axis = rotate(a.orientation, j.localAxisA);
@@ -264,6 +534,7 @@ float World::hingeAngle(JointId id) const {
 }
 
 void World::wake(BodyId id) {
+    requireBodyId(id, bodies_.size());
     bodies_[id].asleep = 0;
     bodies_[id].sleepTimer = 0.0f;
 }
@@ -294,7 +565,7 @@ Mat3 inverse(const Mat3& m) {
 // K(P): change of relative anchor velocity per unit impulse P at the anchors.
 Mat3 pointMass(const Body& a, const Body& b, const Vec3& ra, const Vec3& rb) {
     auto col = [&](Vec3 e) {
-        Vec3 k = e * (a.invMass + b.invMass);
+        Vec3 k = e * (a.solverInvMass() + b.solverInvMass());
         k += cross(a.invInertiaMul(cross(ra, e)), ra);
         k += cross(b.invInertiaMul(cross(rb, e)), rb);
         return k;
@@ -307,8 +578,8 @@ Vec3 anchorVelocity(const Body& x, const Vec3& r) {
 }
 
 void applyImpulse(Body& x, const Vec3& r, const Vec3& P, float sign) {
-    if (x.isStatic()) return;
-    x.velocity += P * (sign * x.invMass);
+    if (!x.isDynamic()) return;
+    x.velocity += P * (sign * x.solverInvMass());
     x.angularVelocity += x.invInertiaMul(cross(r, P)) * sign;
 }
 
@@ -380,7 +651,7 @@ void World::solveJoints(float dt) {
                 if (len < 1e-8f) break;
                 Vec3 n = d * (1.0f / len);
                 Vec3 raxn = cross(ra, n), rbxn = cross(rb, n);
-                float k = a.invMass + b.invMass +
+                float k = a.solverInvMass() + b.solverInvMass() +
                           dot(raxn, a.invInertiaMul(raxn)) +
                           dot(rbxn, b.invInertiaMul(rbxn));
                 if (k <= 0.0f) break;
@@ -411,8 +682,8 @@ void World::solveJoints(float dt) {
                     // realign, i.e. the relative velocity wr = wa - wb must
                     // be driven towards -err * beta/dt.
                     float lambda = -(dot(wr, t) + dot(err, t) * (kBeta / dt)) / k;
-                    if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(t * lambda);
-                    if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(t * lambda);
+                    if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(t * lambda);
+                    if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(t * lambda);
                     wr = a.angularVelocity - b.angularVelocity;
                 }
 
@@ -427,8 +698,8 @@ void World::solveJoints(float dt) {
                         float oldImpulse = j.motorImpulse;
                         j.motorImpulse = vclamp(oldImpulse + lambda, -maxImpulse, maxImpulse);
                         lambda = j.motorImpulse - oldImpulse;
-                        if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
-                        if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                        if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
+                        if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
                     }
                     if (j.enableLimit) {
                         // Current angle from the stored references.
@@ -456,8 +727,8 @@ void World::solveJoints(float dt) {
                             lambda = j.limitImpulse - oldImpulse;
                         }
                         if (lambda != 0.0f) {
-                            if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
-                            if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                            if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
+                            if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
                         }
                     }
                 }
@@ -490,12 +761,12 @@ void World::updateSleeping(float dt) {
         if (x != y) unionParent_[x] = y;
     };
     for (const Contact& c : contacts_)
-        if (!bodies_[c.a].isStatic() && !bodies_[c.b].isStatic()) unite(c.a, c.b);
+        if (bodies_[c.a].isDynamic() && bodies_[c.b].isDynamic()) unite(c.a, c.b);
     for (const Joint& j : joints_)
-        if (!bodies_[j.a].isStatic() && !bodies_[j.b].isStatic()) unite(j.a, j.b);
+        if (bodies_[j.a].isDynamic() && bodies_[j.b].isDynamic()) unite(j.a, j.b);
 
     for (Body& b : bodies_) {
-        if (b.isStatic() || b.asleep) continue;
+        if (!b.isDynamic() || b.asleep) continue;
         float motion = lengthSq(b.velocity) + lengthSq(b.angularVelocity);
         b.sleepTimer = motion < kMotionTol ? b.sleepTimer + dt : 0.0f;
     }
@@ -504,13 +775,13 @@ void World::updateSleeping(float dt) {
     islandTimer_.assign(n, 1e30f);
     for (BodyId i = 0; i < n; ++i) {
         Body& b = bodies_[i];
-        if (b.isStatic() || b.asleep) continue;
+        if (!b.isDynamic() || b.asleep) continue;
         uint32_t root = find(i);
         if (b.sleepTimer < islandTimer_[root]) islandTimer_[root] = b.sleepTimer;
     }
     for (BodyId i = 0; i < n; ++i) {
         Body& b = bodies_[i];
-        if (b.isStatic() || b.asleep) continue;
+        if (!b.isDynamic() || b.asleep) continue;
         if (islandTimer_[find(i)] > kTimeToSleep) {
             b.asleep = 1;
             b.velocity = {};
@@ -532,7 +803,51 @@ void World::updateSleeping(float dt) {
 //    (rotation included) to the moment of first contact. Tunneling stays
 //    impossible regardless of linear or angular speed.
 void World::step(float dt) {
-    if (dt <= 0.0f) return;
+    if (!finiteFloat(dt) || dt < 0.0f)
+        throw std::invalid_argument("velox: timestep must be finite and non-negative");
+    if (dt == 0.0f) return;
+    if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
+    if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
+    for (Body& body : bodies_) {
+        validateRuntimeBody(body);
+        switch (body.shape) {
+        case ShapeType::Sphere:
+            requirePositive(body.radius, "velox: sphere body has an invalid radius");
+            break;
+        case ShapeType::Box:
+            if (!finiteVec(body.halfExtents) || body.halfExtents.x <= 0.0f ||
+                body.halfExtents.y <= 0.0f || body.halfExtents.z <= 0.0f)
+                throw std::invalid_argument("velox: box body has invalid half extents");
+            break;
+        case ShapeType::Capsule:
+            requirePositive(body.radius, "velox: capsule body has an invalid radius");
+            requireNonNegative(body.capsuleHalfHeight,
+                               "velox: capsule body has an invalid half height");
+            break;
+        case ShapeType::Plane:
+            if (!finiteVec(body.planeNormal) || lengthSq(body.planeNormal) < 1e-12f ||
+                !finiteFloat(body.planeOffset))
+                throw std::invalid_argument("velox: plane body has invalid geometry");
+            break;
+        case ShapeType::Mesh:
+            if ((size_t)body.meshIndex >= meshes_.meshes.size())
+                throw std::out_of_range("velox: mesh body references an invalid mesh");
+            break;
+        case ShapeType::Hull:
+            if (body.hullCount < 4 || (size_t)body.hullFirst + body.hullCount >
+                                        meshes_.hullPoints.size())
+                throw std::out_of_range("velox: hull body references invalid point storage");
+            break;
+        }
+        body.orientation = normalize(body.orientation);
+    }
+    for (const Joint& joint : joints_) {
+        requireJointBodies(joint.a, joint.b, bodies_.size());
+        if (!finiteFloat(joint.motorSpeed) || !finiteFloat(joint.maxMotorTorque) ||
+            joint.maxMotorTorque < 0.0f || !finiteFloat(joint.lowerLimit) ||
+            !finiteFloat(joint.upperLimit) || joint.lowerLimit > joint.upperLimit)
+            throw std::invalid_argument("velox: joint contains invalid motor or limit settings");
+    }
     const int nSub = substeps > 0 ? substeps : 1;
     const float h = dt / nSub;
 
@@ -649,10 +964,12 @@ void World::step(float dt) {
         BodyId i = (BodyId)(key >> 32), j = (BodyId)key;
         // Keep A dynamic for the static-dynamic case. Dynamic-dynamic pairs
         // are rewound symmetrically below.
-        if (bodies_[i].isStatic()) { BodyId t = i; i = j; j = t; }
+        if (!bodies_[i].isDynamic() && bodies_[j].isDynamic()) {
+            BodyId t = i; i = j; j = t;
+        }
         Body& a = bodies_[i];
         Body& b = bodies_[j];
-        if (a.isStatic()) continue;
+        if (!a.isDynamic()) continue;
         float search = a.maxPointSpeed() * dt + a.radius +
                        length(a.halfExtents) + a.capsuleHalfHeight + 0.1f;
         {
@@ -688,7 +1005,7 @@ void World::step(float dt) {
             // one participant and leaving the other at the end of the step.
             a.position = pa0 + da * t;
             a.orientation = integrate(qa0, a.angularVelocity, dt * t);
-            if (!b.isStatic()) {
+            if (b.isDynamic()) {
                 b.position = pb0 + db * t;
                 b.orientation = integrate(qb0, b.angularVelocity, dt * t);
             }
@@ -697,11 +1014,11 @@ void World::step(float dt) {
             // inverse-mass impulse. Linear momentum is conserved for two
             // dynamic bodies; static geometry receives no velocity update.
             float vn = dot(a.velocity - b.velocity, n);
-            float invMassSum = a.invMass + b.invMass;
+            float invMassSum = a.solverInvMass() + b.solverInvMass();
             if (vn < 0.0f && invMassSum > 0.0f) {
                 float impulse = -vn / invMassSum;
-                a.velocity += n * (impulse * a.invMass);
-                if (!b.isStatic()) b.velocity -= n * (impulse * b.invMass);
+                a.velocity += n * (impulse * a.solverInvMass());
+                if (b.isDynamic()) b.velocity -= n * (impulse * b.solverInvMass());
             }
 
             // Finish the frame from TOI using the corrected velocities. The
@@ -710,7 +1027,7 @@ void World::step(float dt) {
             float remaining = dt * (1.0f - t);
             a.position += a.velocity * remaining;
             a.orientation = integrate(a.orientation, a.angularVelocity, remaining);
-            if (!b.isStatic()) {
+            if (b.isDynamic()) {
                 b.position += b.velocity * remaining;
                 b.orientation = integrate(b.orientation, b.angularVelocity, remaining);
             }
@@ -732,13 +1049,15 @@ void World::step(float dt) {
             for (const Contact& c : contacts_) {
                 Body& a = bodies_[c.a];
                 Body& b = bodies_[c.b];
-                float invMassSum = a.invMass + b.invMass;
+                float invMassSum = a.solverInvMass() + b.solverInvMass();
                 if (invMassSum <= 0.0f) continue;
                 float g = contactLiveGap(a, b, c);
                 if (g >= -kPositionSlop) continue;
                 float push = -kResolve * (g + kPositionSlop) / invMassSum;
-                if (!a.asleep) a.position += c.normal * (push * a.invMass);
-                if (!b.asleep) b.position -= c.normal * (push * b.invMass);
+                if (a.isDynamic() && !a.asleep)
+                    a.position += c.normal * (push * a.solverInvMass());
+                if (b.isDynamic() && !b.asleep)
+                    b.position -= c.normal * (push * b.solverInvMass());
             }
         }
     }
@@ -777,6 +1096,10 @@ void World::step(float dt) {
 
     // --- sleeping + persistent contacts for next frame ------------------------
     updateSleeping(dt);
+    for (Body& body : bodies_) {
+        body.force = {};
+        body.torque = {};
+    }
     prevContacts_ = contacts_;
     std::sort(prevContacts_.begin(), prevContacts_.end(),
               [](const Contact& x, const Contact& y) {
