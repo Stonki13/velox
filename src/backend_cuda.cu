@@ -70,7 +70,7 @@ __global__ void contactsKernel(const Body* bodies, const Aabb* aabbs, int n,
     if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
 
     Contact buf[kMaxContactsPerPair];
-    int count = collidePair(a, b, (BodyId)i, (BodyId)j, soup, dt,
+    int count = collidePair(a, b, (BodyIndex)i, (BodyIndex)j, soup, dt,
                             buf, kMaxContactsPerPair);
     if (count == 0) return;
     int slot = atomicAdd(outCount, count);

@@ -183,7 +183,7 @@ VELOX_HD inline uint64_t contactFeatureKey(uint32_t featureA, uint32_t featureB)
 // velocity: the velocity solve runs after detection and can stop either body
 // dead (e.g. the box below lands), turning a zero-relative-velocity pair into
 // a colliding one within the same step.
-VELOX_HD inline void emit(const Body& a, const Body& b, BodyId ia, BodyId ib,
+VELOX_HD inline void emit(const Body& a, const Body& b, BodyIndex ia, BodyIndex ib,
                           const Vec3& normal, const Vec3& point, float gap,
                           float dt, Contact* out, int cap, int& n,
                           uint64_t featureKey = 0) {
@@ -200,7 +200,7 @@ VELOX_HD inline void emit(const Body& a, const Body& b, BodyId ia, BodyId ib,
 }
 
 VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,
-                                 BodyId ic, BodyId ip, const MeshSoupView& soup,
+                                 BodyIndex ic, BodyIndex ip, const MeshSoupView& soup,
                                  float dt, Contact* out, int cap, int& n) {
     const Vec3& pn = plane.planeNormal;
     switch (conv.shape) {
@@ -281,7 +281,7 @@ VELOX_HD inline void boxVertex(const Body& box, int i, Vec3& out) {
     out = box.position + rotate(box.orientation, local);
 }
 
-VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyId ia, BodyId ib,
+VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyIndex ia, BodyIndex ib,
                                   const MeshSoupView& soup,
                                   float dt, Contact* out, int cap, int& n) {
     Convex ca = makeConvex(a, soup), cb = makeConvex(b, soup);
@@ -404,7 +404,7 @@ VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyId ia, BodyI
 }
 
 VELOX_HD inline void meshConvex(const Body& conv, const Body& meshBody,
-                                BodyId ic, BodyId im, const MeshSoupView& soup,
+                                BodyIndex ic, BodyIndex im, const MeshSoupView& soup,
                                 float dt, Contact* out, int cap, int& n) {
     const Mesh& m = soup.meshes[meshBody.meshIndex];
     Vec3 lo, hi;
@@ -448,7 +448,7 @@ VELOX_HD inline bool isConvexVolume(ShapeType t) {
 
 // Narrow phase for one pair; returns the number of contacts written to out
 // (at most kMaxContactsPerPair).
-VELOX_HD inline int collidePair(const Body& a, const Body& b, BodyId ia, BodyId ib,
+VELOX_HD inline int collidePair(const Body& a, const Body& b, BodyIndex ia, BodyIndex ib,
                                 const MeshSoupView& soup, float dt,
                                 Contact* out, int cap) {
     using namespace np_detail;

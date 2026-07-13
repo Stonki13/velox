@@ -25,20 +25,6 @@ void requireMass(float mass) {
         throw std::invalid_argument("velox: mass must be finite and non-negative");
 }
 
-void requireBodyId(BodyId id, size_t count) {
-    if ((size_t)id >= count) throw std::out_of_range("velox: invalid body id");
-}
-
-void requireJointId(JointId id, size_t count) {
-    if ((size_t)id >= count) throw std::out_of_range("velox: invalid joint id");
-}
-
-void requireJointBodies(BodyId a, BodyId b, size_t count) {
-    requireBodyId(a, count);
-    requireBodyId(b, count);
-    if (a == b) throw std::invalid_argument("velox: a joint requires two different bodies");
-}
-
 void requirePositive(float value, const char* message) {
     if (!finiteFloat(value) || value <= 0.0f) throw std::invalid_argument(message);
 }
@@ -82,24 +68,83 @@ World::World(BackendType type) {
 
 const char* World::backendName() const { return backend_->name(); }
 
+bool World::isValid(BodyId id) const noexcept {
+    uint32_t slot = id.slot();
+    return slot < bodySlots_.size() && bodySlots_[slot].dense != UINT32_MAX &&
+           bodySlots_[slot].generation == id.generation();
+}
+
+bool World::isValid(JointId id) const noexcept {
+    uint32_t slot = id.slot();
+    return slot < jointSlots_.size() && jointSlots_[slot].dense != UINT32_MAX &&
+           jointSlots_[slot].generation == id.generation();
+}
+
+BodyIndex World::resolve(BodyId id) const {
+    if (!isValid(id)) throw std::out_of_range("velox: invalid or stale body handle");
+    return bodySlots_[id.slot()].dense;
+}
+
+uint32_t World::resolve(JointId id) const {
+    if (!isValid(id)) throw std::out_of_range("velox: invalid or stale joint handle");
+    return jointSlots_[id.slot()].dense;
+}
+
+BodyId World::bodyHandle(BodyIndex dense) const {
+    uint32_t slot = bodyDenseToSlot_[dense];
+    return BodyId::make(slot, bodySlots_[slot].generation);
+}
+
+BodyId World::addBody(Body bodyValue) {
+    if (bodies_.size() >= UINT32_MAX)
+        throw std::length_error("velox: body capacity exceeded");
+    uint32_t slot;
+    if (freeBodySlots_.empty()) {
+        slot = static_cast<uint32_t>(bodySlots_.size());
+        bodySlots_.push_back({});
+    } else {
+        slot = freeBodySlots_.back();
+        freeBodySlots_.pop_back();
+    }
+    uint32_t dense = static_cast<uint32_t>(bodies_.size());
+    bodies_.push_back(bodyValue);
+    bodyDenseToSlot_.push_back(slot);
+    bodySlots_[slot].dense = dense;
+    return BodyId::make(slot, bodySlots_[slot].generation);
+}
+
+JointId World::addJoint(Joint jointValue) {
+    if (joints_.size() >= UINT32_MAX)
+        throw std::length_error("velox: joint capacity exceeded");
+    uint32_t slot;
+    if (freeJointSlots_.empty()) {
+        slot = static_cast<uint32_t>(jointSlots_.size());
+        jointSlots_.push_back({});
+    } else {
+        slot = freeJointSlots_.back();
+        freeJointSlots_.pop_back();
+    }
+    uint32_t dense = static_cast<uint32_t>(joints_.size());
+    joints_.push_back(jointValue);
+    jointDenseToSlot_.push_back(slot);
+    jointSlots_[slot].dense = dense;
+    return JointId::make(slot, jointSlots_[slot].generation);
+}
+
 Body& World::body(BodyId id) {
-    requireBodyId(id, bodies_.size());
-    return bodies_[id];
+    return bodies_[resolve(id)];
 }
 
 const Body& World::body(BodyId id) const {
-    requireBodyId(id, bodies_.size());
-    return bodies_[id];
+    return bodies_[resolve(id)];
 }
 
 Joint& World::joint(JointId id) {
-    requireJointId(id, joints_.size());
-    return joints_[id];
+    return joints_[resolve(id)];
 }
 
 const Joint& World::joint(JointId id) const {
-    requireJointId(id, joints_.size());
-    return joints_[id];
+    return joints_[resolve(id)];
 }
 
 BodyId World::addSphere(Vec3 position, float radius, float mass) {
@@ -116,8 +161,7 @@ BodyId World::addSphere(Vec3 position, float radius, float mass) {
         float i = 0.4f * mass * radius * radius; // solid sphere: 2/5 m r^2
         b.invInertia = {1.0f / i, 1.0f / i, 1.0f / i};
     }
-    bodies_.push_back(b);
-    return static_cast<BodyId>(bodies_.size() - 1);
+    return addBody(b);
 }
 
 BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
@@ -139,8 +183,7 @@ BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
                         1.0f / (k * (e.x * e.x + e.z * e.z)),
                         1.0f / (k * (e.x * e.x + e.y * e.y))};
     }
-    bodies_.push_back(b);
-    return static_cast<BodyId>(bodies_.size() - 1);
+    return addBody(b);
 }
 
 BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float mass) {
@@ -162,8 +205,7 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
         float ix = mass * (h * h / 12.0f + r * r * 0.25f) + 0.4f * mass * r * r;
         b.invInertia = {1.0f / ix, 1.0f / iy, 1.0f / ix};
     }
-    bodies_.push_back(b);
-    return static_cast<BodyId>(bodies_.size() - 1);
+    return addBody(b);
 }
 
 BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass) {
@@ -227,8 +269,7 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
                         1.0f / (k * (e.x * e.x + e.z * e.z) + 1e-9f),
                         1.0f / (k * (e.x * e.x + e.y * e.y) + 1e-9f)};
     }
-    bodies_.push_back(b);
-    return static_cast<BodyId>(bodies_.size() - 1);
+    return addBody(b);
 }
 
 BodyId World::addStaticPlane(Vec3 normal, float offset) {
@@ -242,8 +283,7 @@ BodyId World::addStaticPlane(Vec3 normal, float offset) {
     b.planeNormal = normalize(normal);
     b.planeOffset = offset;
     b.invMass = 0.0f;
-    bodies_.push_back(b);
-    return static_cast<BodyId>(bodies_.size() - 1);
+    return addBody(b);
 }
 
 namespace {
@@ -364,8 +404,7 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
     b.motionType = MotionType::Static;
     b.meshIndex = static_cast<uint32_t>(meshes_.meshes.size() - 1);
     b.invMass = 0.0f; // mesh colliders are static (level geometry)
-    bodies_.push_back(b);
-    return static_cast<BodyId>(bodies_.size() - 1);
+    return addBody(b);
 }
 
 MotionType World::motionType(BodyId id) const { return body(id).motionType; }
@@ -469,57 +508,56 @@ void World::clearForces(BodyId id) {
 }
 
 JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
-    requireJointBodies(a, b, bodies_.size());
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: ball-joint anchor must be finite");
     Joint j;
     j.type = JointType::Ball;
-    j.a = a; j.b = b;
-    j.localAnchorA = rotateInv(bodies_[a].orientation, worldAnchor - bodies_[a].position);
-    j.localAnchorB = rotateInv(bodies_[b].orientation, worldAnchor - bodies_[b].position);
-    joints_.push_back(j);
-    return static_cast<JointId>(joints_.size() - 1);
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation, worldAnchor - bodies_[ib].position);
+    return addJoint(j);
 }
 
 JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB) {
-    requireJointBodies(a, b, bodies_.size());
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchorA, "velox: distance-joint anchor must be finite");
     requireFiniteVec(worldAnchorB, "velox: distance-joint anchor must be finite");
     Joint j;
     j.type = JointType::Distance;
-    j.a = a; j.b = b;
-    j.localAnchorA = rotateInv(bodies_[a].orientation, worldAnchorA - bodies_[a].position);
-    j.localAnchorB = rotateInv(bodies_[b].orientation, worldAnchorB - bodies_[b].position);
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchorA - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation, worldAnchorB - bodies_[ib].position);
     j.restLength = length(worldAnchorA - worldAnchorB);
-    joints_.push_back(j);
-    return static_cast<JointId>(joints_.size() - 1);
+    return addJoint(j);
 }
 
 JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
-    requireJointBodies(a, b, bodies_.size());
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: hinge anchor must be finite");
     requireFiniteVec(worldAxis, "velox: hinge axis must be finite");
     if (lengthSq(worldAxis) < 1e-12f)
         throw std::invalid_argument("velox: hinge axis must be non-zero");
     Joint j;
     j.type = JointType::Hinge;
-    j.a = a; j.b = b;
-    j.localAnchorA = rotateInv(bodies_[a].orientation, worldAnchor - bodies_[a].position);
-    j.localAnchorB = rotateInv(bodies_[b].orientation, worldAnchor - bodies_[b].position);
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation, worldAnchor - bodies_[ib].position);
     Vec3 axis = normalize(worldAxis);
-    j.localAxisA = rotateInv(bodies_[a].orientation, axis);
-    j.localAxisB = rotateInv(bodies_[b].orientation, axis);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, axis);
+    j.localAxisB = rotateInv(bodies_[ib].orientation, axis);
     // Shared perpendicular reference: measures the joint angle (0 now).
     Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
     ref = normalize(cross(axis, ref));
-    j.localRefA = rotateInv(bodies_[a].orientation, ref);
-    j.localRefB = rotateInv(bodies_[b].orientation, ref);
-    joints_.push_back(j);
-    return static_cast<JointId>(joints_.size() - 1);
+    j.localRefA = rotateInv(bodies_[ia].orientation, ref);
+    j.localRefB = rotateInv(bodies_[ib].orientation, ref);
+    return addJoint(j);
 }
 
 float World::hingeAngle(JointId id) const {
-    requireJointId(id, joints_.size());
-    const Joint& j = joints_[id];
+    const Joint& j = joint(id);
     if (j.type != JointType::Hinge)
         throw std::invalid_argument("velox: hingeAngle requires a hinge joint");
     const Body& a = bodies_[j.a];
@@ -534,9 +572,74 @@ float World::hingeAngle(JointId id) const {
 }
 
 void World::wake(BodyId id) {
-    requireBodyId(id, bodies_.size());
-    bodies_[id].asleep = 0;
-    bodies_[id].sleepTimer = 0.0f;
+    Body& b = body(id);
+    b.asleep = 0;
+    b.sleepTimer = 0.0f;
+}
+
+bool World::isAwake(BodyId id) const { return !body(id).asleep; }
+
+void World::removeJointDense(uint32_t dense) {
+    uint32_t last = static_cast<uint32_t>(joints_.size() - 1);
+    uint32_t removedSlot = jointDenseToSlot_[dense];
+    if (dense != last) {
+        joints_[dense] = joints_[last];
+        uint32_t movedSlot = jointDenseToSlot_[last];
+        jointDenseToSlot_[dense] = movedSlot;
+        jointSlots_[movedSlot].dense = dense;
+    }
+    joints_.pop_back();
+    jointDenseToSlot_.pop_back();
+
+    HandleSlot& slot = jointSlots_[removedSlot];
+    slot.dense = UINT32_MAX;
+    if (slot.generation != UINT32_MAX) {
+        ++slot.generation;
+        freeJointSlots_.push_back(removedSlot);
+    }
+}
+
+void World::removeJoint(JointId id) { removeJointDense(resolve(id)); }
+
+void World::removeBody(BodyId id) {
+    BodyIndex dense = resolve(id);
+
+    // Removing an endpoint also removes every constraint that references it.
+    for (uint32_t i = static_cast<uint32_t>(joints_.size()); i-- > 0;)
+        if (joints_[i].a == dense || joints_[i].b == dense)
+            removeJointDense(i);
+
+    BodyIndex last = static_cast<BodyIndex>(bodies_.size() - 1);
+    uint32_t removedSlot = bodyDenseToSlot_[dense];
+    if (dense != last) {
+        bodies_[dense] = bodies_[last];
+        uint32_t movedSlot = bodyDenseToSlot_[last];
+        bodyDenseToSlot_[dense] = movedSlot;
+        bodySlots_[movedSlot].dense = dense;
+        for (Joint& joint : joints_) {
+            if (joint.a == last) joint.a = dense;
+            if (joint.b == last) joint.b = dense;
+        }
+    }
+    bodies_.pop_back();
+    bodyDenseToSlot_.pop_back();
+
+    HandleSlot& slot = bodySlots_[removedSlot];
+    slot.dense = UINT32_MAX;
+    if (slot.generation != UINT32_MAX) {
+        ++slot.generation;
+        freeBodySlots_.push_back(removedSlot);
+    }
+
+    // Dense indices changed, so no contact or sleeping cache may survive.
+    contacts_.clear();
+    prevContacts_.clear();
+    pairKeys_.clear();
+    prevPairKeys_.clear();
+    events_.clear();
+    prev_.clear();
+    unionParent_.clear();
+    islandTimer_.clear();
 }
 
 namespace {
@@ -619,7 +722,10 @@ void World::solveJoints(float dt) {
 
     for (const Joint& j : joints_) {
         // A sleeping body attached to an awake one must participate.
-        if (bodies_[j.a].asleep != bodies_[j.b].asleep) { wake(j.a); wake(j.b); }
+        if (bodies_[j.a].asleep != bodies_[j.b].asleep) {
+            bodies_[j.a].asleep = bodies_[j.b].asleep = 0;
+            bodies_[j.a].sleepTimer = bodies_[j.b].sleepTimer = 0.0f;
+        }
     }
 
     for (Joint& j : joints_) {
@@ -773,13 +879,13 @@ void World::updateSleeping(float dt) {
 
     // Minimum timer per island root; islands where everyone is calm sleep.
     islandTimer_.assign(n, 1e30f);
-    for (BodyId i = 0; i < n; ++i) {
+    for (BodyIndex i = 0; i < n; ++i) {
         Body& b = bodies_[i];
         if (!b.isDynamic() || b.asleep) continue;
         uint32_t root = find(i);
         if (b.sleepTimer < islandTimer_[root]) islandTimer_[root] = b.sleepTimer;
     }
-    for (BodyId i = 0; i < n; ++i) {
+    for (BodyIndex i = 0; i < n; ++i) {
         Body& b = bodies_[i];
         if (!b.isDynamic() || b.asleep) continue;
         if (islandTimer_[find(i)] > kTimeToSleep) {
@@ -842,7 +948,8 @@ void World::step(float dt) {
         body.orientation = normalize(body.orientation);
     }
     for (const Joint& joint : joints_) {
-        requireJointBodies(joint.a, joint.b, bodies_.size());
+        if (joint.a >= bodies_.size() || joint.b >= bodies_.size() || joint.a == joint.b)
+            throw std::invalid_argument("velox: joint contains invalid body endpoints");
         if (!finiteFloat(joint.motorSpeed) || !finiteFloat(joint.maxMotorTorque) ||
             joint.maxMotorTorque < 0.0f || !finiteFloat(joint.lowerLimit) ||
             !finiteFloat(joint.upperLimit) || joint.lowerLimit > joint.upperLimit)
@@ -865,15 +972,15 @@ void World::step(float dt) {
         excluded.reserve(joints_.size());
         for (const Joint& j : joints_) {
             if (j.collideConnected) continue;
-            BodyId lo = j.a < j.b ? j.a : j.b;
-            BodyId hi = j.a < j.b ? j.b : j.a;
+            BodyIndex lo = j.a < j.b ? j.a : j.b;
+            BodyIndex hi = j.a < j.b ? j.b : j.a;
             excluded.push_back((uint64_t)lo << 32 | hi);
         }
         std::sort(excluded.begin(), excluded.end());
         contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
             [&](const Contact& c) {
-                BodyId lo = c.a < c.b ? c.a : c.b;
-                BodyId hi = c.a < c.b ? c.b : c.a;
+                BodyIndex lo = c.a < c.b ? c.a : c.b;
+                BodyIndex hi = c.a < c.b ? c.b : c.a;
                 return std::binary_search(excluded.begin(), excluded.end(),
                                           (uint64_t)lo << 32 | hi);
             }), contacts_.end());
@@ -889,8 +996,12 @@ void World::step(float dt) {
         auto moving = [](const Body& x) {
             return lengthSq(x.velocity) + lengthSq(x.angularVelocity) > 1e-3f;
         };
-        if (a.asleep && !b.isStatic() && !b.asleep && (impact || moving(b))) wake(c.a);
-        if (b.asleep && !a.isStatic() && !a.asleep && (impact || moving(a))) wake(c.b);
+        if (a.asleep && !b.isStatic() && !b.asleep && (impact || moving(b))) {
+            a.asleep = 0; a.sleepTimer = 0.0f;
+        }
+        if (b.asleep && !a.isStatic() && !a.asleep && (impact || moving(a))) {
+            b.asleep = 0; b.sleepTimer = 0.0f;
+        }
     }
 
     // --- warm starting ---------------------------------------------------------
@@ -961,11 +1072,11 @@ void World::step(float dt) {
     pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
 
     for (uint64_t key : pairKeys_) {
-        BodyId i = (BodyId)(key >> 32), j = (BodyId)key;
+        BodyIndex i = (BodyIndex)(key >> 32), j = (BodyIndex)key;
         // Keep A dynamic for the static-dynamic case. Dynamic-dynamic pairs
         // are rewound symmetrically below.
         if (!bodies_[i].isDynamic() && bodies_[j].isDynamic()) {
-            BodyId t = i; i = j; j = t;
+            BodyIndex t = i; i = j; j = t;
         }
         Body& a = bodies_[i];
         Body& b = bodies_[j];
@@ -1068,9 +1179,9 @@ void World::step(float dt) {
     {
         events_.clear();
         pairKeys_.clear();
-        auto canonicalKey = [](BodyId a, BodyId b) {
-            BodyId lo = a < b ? a : b;
-            BodyId hi = a < b ? b : a;
+        auto canonicalKey = [](BodyIndex a, BodyIndex b) {
+            BodyIndex lo = a < b ? a : b;
+            BodyIndex hi = a < b ? b : a;
             return (uint64_t)lo << 32 | hi;
         };
         for (const Contact& c : contacts_) {
@@ -1082,12 +1193,14 @@ void World::step(float dt) {
         for (uint64_t key : pairKeys_) {
             if (std::binary_search(prevPairKeys_.begin(), prevPairKeys_.end(), key))
                 continue;
-            ContactEvent ev{(BodyId)(key >> 32), (BodyId)key, {}, {}, 0.0f};
+            BodyIndex lo = (BodyIndex)(key >> 32);
+            BodyIndex hi = (BodyIndex)key;
+            ContactEvent ev{bodyHandle(lo), bodyHandle(hi), {}, {}, 0.0f};
             for (const Contact& c : contacts_)
                 if (canonicalKey(c.a, c.b) == key && c.normalImpulse > ev.impulse) {
                     ev.impulse = c.normalImpulse;
                     ev.point = c.point;
-                    ev.normal = c.a == ev.a ? c.normal : -c.normal;
+                    ev.normal = c.a == lo ? c.normal : -c.normal;
                 }
             events_.push_back(ev);
         }

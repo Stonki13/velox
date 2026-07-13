@@ -4,7 +4,26 @@
 
 namespace velox {
 
-using BodyId = uint32_t;
+using BodyIndex = uint32_t;
+
+// Stable external handle. The slot identifies a logical body while the
+// generation rejects handles retained after that slot has been removed and
+// reused. Simulation internals use BodyIndex for dense CPU/GPU arrays.
+struct BodyId {
+    uint64_t value = UINT64_MAX;
+
+    VELOX_HD static BodyId make(uint32_t slot, uint32_t generation) {
+        BodyId id;
+        id.value = (uint64_t(generation) << 32) | slot;
+        return id;
+    }
+    VELOX_HD uint32_t slot() const { return uint32_t(value); }
+    VELOX_HD uint32_t generation() const { return uint32_t(value >> 32); }
+};
+
+VELOX_HD inline bool operator==(BodyId a, BodyId b) { return a.value == b.value; }
+VELOX_HD inline bool operator!=(BodyId a, BodyId b) { return !(a == b); }
+VELOX_HD inline bool operator<(BodyId a, BodyId b) { return a.value < b.value; }
 
 enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh, Hull };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };

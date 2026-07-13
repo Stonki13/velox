@@ -3,7 +3,20 @@
 
 namespace velox {
 
-using JointId = uint32_t;
+struct JointId {
+    uint64_t value = UINT64_MAX;
+
+    static JointId make(uint32_t slot, uint32_t generation) {
+        JointId id;
+        id.value = (uint64_t(generation) << 32) | slot;
+        return id;
+    }
+    uint32_t slot() const { return uint32_t(value); }
+    uint32_t generation() const { return uint32_t(value >> 32); }
+};
+
+inline bool operator==(JointId a, JointId b) { return a.value == b.value; }
+inline bool operator!=(JointId a, JointId b) { return !(a == b); }
 
 enum class JointType : uint8_t { Ball, Distance, Hinge };
 
@@ -12,7 +25,7 @@ enum class JointType : uint8_t { Ball, Distance, Hinge };
 // Baumgarte positional correction.
 struct Joint {
     JointType type;
-    BodyId a, b;
+    BodyIndex a, b;
     Vec3 localAnchorA, localAnchorB;
     Vec3 localAxisA{0, 1, 0}, localAxisB{0, 1, 0}; // Hinge
     Vec3 localRefA{1, 0, 0}, localRefB{1, 0, 0};   // Hinge angle reference (perp to axis)

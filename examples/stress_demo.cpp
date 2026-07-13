@@ -55,13 +55,16 @@ static void testPile() {
     velox::World w;
     w.addStaticPlane({0, 1, 0}, 0.0f);
     const int N = 125; // 5x5x5 pile
+    std::vector<velox::BodyId> bodies;
+    bodies.reserve(N);
     for (int x = 0; x < 5; ++x)
         for (int y = 0; y < 5; ++y)
             for (int z = 0; z < 5; ++z)
-                w.addSphere({x * 1.01f, 0.5f + y * 1.01f, z * 1.01f}, 0.5f, 1.0f);
+                bodies.push_back(w.addSphere(
+                    {x * 1.01f, 0.5f + y * 1.01f, z * 1.01f}, 0.5f, 1.0f));
     for (int i = 0; i < 300; ++i) w.step(1.0f / 60.0f); // 5 s to settle
     bool ok = true;
-    for (velox::BodyId id = 1; id <= N; ++id)
+    for (velox::BodyId id : bodies)
         ok &= w.body(id).position.y >= 0.5f - 5e-2f; // nobody sank into the floor
     check(ok, "125-sphere pile (no TOI stall, no sinking)");
 }
@@ -462,8 +465,8 @@ static void testValidation() {
 
     auto ground = w.addStaticPlane({0, 1, 0}, 0.0f);
     auto body = w.addSphere({0, 2, 0}, 0.5f, 1.0f);
-    ok &= throwsException([&] { (void)w.body(9999); });
-    ok &= throwsException([&] { (void)w.joint(9999); });
+    ok &= throwsException([&] { (void)w.body(velox::BodyId::make(9999, 0)); });
+    ok &= throwsException([&] { (void)w.joint(velox::JointId::make(9999, 0)); });
     ok &= throwsException([&] { w.addBallJoint(body, body, {}); });
     ok &= throwsException([&] { w.addHingeJoint(ground, body, {}, {}); });
     ok &= throwsException([&] { (void)w.rayCast({}, {}, 1.0f); });
@@ -559,6 +562,46 @@ static void testForcesAndStateApi() {
     check(ok, "forces and state API (impulses, damping, gravity scale)");
 }
 
+// 26. Public handles survive dense-array swaps, while removed handles are
+// rejected even after their slots are reused. Body removal also owns the
+// lifetime of attached joints so no constraint can retain a dead endpoint.
+static void testStableHandlesAndRemoval() {
+    velox::World w;
+    w.gravity = {0, 0, 0};
+    auto a = w.addSphere({-4, 0, 0}, 0.5f, 1.0f);
+    auto removed = w.addSphere({0, 0, 0}, 0.5f, 1.0f);
+    auto moved = w.addSphere({4, 0, 0}, 0.5f, 1.0f);
+    auto retainedJoint = w.addDistanceJoint(a, moved, {-4, 0, 0}, {4, 0, 0});
+
+    w.removeBody(removed);
+    bool ok = w.bodyCount() == 2 && !w.isValid(removed) && w.isValid(moved) &&
+              w.isValid(retainedJoint);
+    ok &= std::fabs(w.body(moved).position.x - 4.0f) < 1e-6f;
+    ok &= throwsException([&] { (void)w.body(removed); });
+    w.step(1.0f / 60.0f); // remapped joint endpoints remain usable
+
+    auto replacement = w.addSphere({0, 0, 0}, 0.5f, 1.0f);
+    ok &= replacement != removed && w.isValid(replacement) && !w.isValid(removed);
+    ok &= throwsException([&] { w.setLinearVelocity(removed, {1, 0, 0}); });
+
+    auto disposableJoint = w.addBallJoint(moved, replacement, {2, 0, 0});
+    w.removeJoint(disposableJoint);
+    ok &= !w.isValid(disposableJoint);
+    ok &= throwsException([&] { (void)w.joint(disposableJoint); });
+    auto reusedJoint = w.addBallJoint(moved, replacement, {2, 0, 0});
+    ok &= reusedJoint != disposableJoint && w.isValid(reusedJoint);
+
+    w.removeBody(a);
+    ok &= !w.isValid(a) && !w.isValid(retainedJoint) && w.isValid(reusedJoint);
+
+    auto hit = w.rayCast({10, 0, 0}, {-1, 0, 0}, 20.0f);
+    ok &= hit.hit && w.isValid(hit.body);
+    std::vector<velox::BodyId> overlaps;
+    w.overlapSphere({0, 0, 0}, 1.0f, overlaps);
+    ok &= !overlaps.empty() && w.isValid(overlaps.front());
+    check(ok, "stable handles (removal, reuse, joint and query remap)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -585,6 +628,7 @@ int main() {
     testValidation();
     testMotionTypes();
     testForcesAndStateApi();
+    testStableHandlesAndRemoval();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

@@ -202,7 +202,7 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
     best.t = maxDist;
     const MeshSoupView soup = view(meshes_);
 
-    for (BodyId i = 0; i < bodies_.size(); ++i) {
+    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
         const Body& b = bodies_[i];
         LocalHit h{false, 0, {}};
         switch (b.shape) {
@@ -216,7 +216,7 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
         }
         if (h.hit && h.t < best.t) {
             best.hit = true;
-            best.body = i;
+            best.body = bodyHandle(i);
             best.t = h.t;
             best.normal = h.normal;
         }
@@ -235,7 +235,7 @@ void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) c
     probe.position = center;
     probe.radius = radius;
 
-    for (BodyId i = 0; i < bodies_.size(); ++i) {
+    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
         const Body& b = bodies_[i];
         float gap = 1e30f;
         if (b.shape == ShapeType::Plane) {
@@ -246,7 +246,7 @@ void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) c
         } else {
             gap = gjkDistance(makeConvex(probe, soup), makeConvex(b, soup)).distance;
         }
-        if (gap <= 0.0f) out.push_back(i);
+        if (gap <= 0.0f) out.push_back(bodyHandle(i));
     }
 }
 

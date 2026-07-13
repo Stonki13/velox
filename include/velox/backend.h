@@ -34,7 +34,7 @@ inline MeshSoupView view(const MeshSoup& s) {
 // "not yet touching"; the solver only removes approach velocity in excess of
 // gap/dt, so grazing bodies are never artificially stopped.
 struct Contact {
-    BodyId a, b;
+    BodyIndex a, b;
     uint64_t featureKey;  // stable shape-feature pair; 0 when unavailable
     Vec3 normal;          // from b towards a
     Vec3 point;           // world-space contact point (torque arm for rotation)

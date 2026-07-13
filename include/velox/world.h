@@ -16,7 +16,7 @@ struct ContactEvent {
 
 struct RayHit {
     bool hit = false;
-    BodyId body = 0;
+    BodyId body;
     float t = 0.0f;   // distance along the ray direction
     Vec3 point, normal;
 };
@@ -50,6 +50,8 @@ public:
     Body& body(BodyId id);
     const Body& body(BodyId id) const;
     size_t bodyCount() const { return bodies_.size(); }
+    bool isValid(BodyId id) const noexcept;
+    void removeBody(BodyId id); // also removes joints attached to the body
     MotionType motionType(BodyId id) const;
     void setMotionType(BodyId id, MotionType type);
     void setTransform(BodyId id, Vec3 position, Quat orientation);
@@ -68,6 +70,8 @@ public:
     JointId addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     Joint& joint(JointId id);                              // configure motors/limits
     const Joint& joint(JointId id) const;
+    bool isValid(JointId id) const noexcept;
+    void removeJoint(JointId id);
     float hingeAngle(JointId id) const;                     // radians, 0 at creation
 
     // Contact begin events from the most recent step().
@@ -78,7 +82,7 @@ public:
     // put to sleep (zero cost until something touches them). Call wake() after
     // manually changing a sleeping body's velocity or position.
     void wake(BodyId id);
-    bool isAwake(BodyId id) const { return !bodies_[id].asleep; }
+    bool isAwake(BodyId id) const;
 
     // --- queries ------------------------------------------------------------
     RayHit rayCast(Vec3 origin, Vec3 dir, float maxDist) const;
@@ -91,12 +95,29 @@ public:
     void step(float dt);
 
 private:
+    struct HandleSlot {
+        uint32_t dense = UINT32_MAX;
+        uint32_t generation = 0;
+    };
+
+    BodyIndex resolve(BodyId id) const;
+    uint32_t resolve(JointId id) const;
+    BodyId addBody(Body body);
+    JointId addJoint(Joint joint);
+    BodyId bodyHandle(BodyIndex dense) const;
+    void removeJointDense(uint32_t dense);
     void solveJoints(float dt);
     void updateSleeping(float dt);
 
     std::vector<Body> bodies_;
+    std::vector<HandleSlot> bodySlots_;
+    std::vector<uint32_t> bodyDenseToSlot_;
+    std::vector<uint32_t> freeBodySlots_;
     std::vector<Contact> contacts_;
     std::vector<Joint> joints_;
+    std::vector<HandleSlot> jointSlots_;
+    std::vector<uint32_t> jointDenseToSlot_;
+    std::vector<uint32_t> freeJointSlots_;
     struct PrevState { Vec3 position; Quat orientation; };
     std::vector<PrevState> prev_;
     std::vector<uint64_t> pairKeys_;

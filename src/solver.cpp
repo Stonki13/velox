@@ -41,7 +41,7 @@ public:
         boundless_.clear();
         sorted_.clear();
         aabbs_.resize(n);
-        for (BodyId i = 0; i < n; ++i) {
+        for (BodyIndex i = 0; i < n; ++i) {
             const Body& b = bodies[i];
             if (b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh)
                 boundless_.push_back(i);
@@ -56,22 +56,22 @@ public:
             for (int c = 0; c < count; ++c) out.push_back(buf[c]);
         };
 
-        auto inert = [&](BodyId k) { return bodies[k].isStatic() || bodies[k].asleep; };
+        auto inert = [&](BodyIndex k) { return bodies[k].isStatic() || bodies[k].asleep; };
 
-        for (BodyId i : sorted_)
+        for (BodyIndex i : sorted_)
             if (!inert(i))
-                for (BodyId j : boundless_)
+                for (BodyIndex j : boundless_)
                     flush(collidePair(bodies[i], bodies[j], i, j, soup, dt,
                                       buf, kMaxContactsPerPair));
 
         // Sweep-and-prune along X: sort by AABB min, only test while overlapping.
-        std::sort(sorted_.begin(), sorted_.end(), [&](BodyId a, BodyId b) {
+        std::sort(sorted_.begin(), sorted_.end(), [&](BodyIndex a, BodyIndex b) {
             return aabbs_[a].lo.x < aabbs_[b].lo.x;
         });
         for (size_t si = 0; si < sorted_.size(); ++si) {
-            BodyId i = sorted_[si];
+            BodyIndex i = sorted_[si];
             for (size_t sj = si + 1; sj < sorted_.size(); ++sj) {
-                BodyId j = sorted_[sj];
+                BodyIndex j = sorted_[sj];
                 if (aabbs_[j].lo.x > aabbs_[i].hi.x) break; // pruned: sorted axis
                 if (inert(i) && inert(j)) continue;
                 if (!aabbOverlap(aabbs_[i].lo, aabbs_[i].hi, aabbs_[j].lo, aabbs_[j].hi))
@@ -85,8 +85,8 @@ public:
 private:
     struct Aabb { Vec3 lo, hi; };
     std::vector<Aabb> aabbs_;
-    std::vector<BodyId> sorted_;
-    std::vector<BodyId> boundless_;
+    std::vector<BodyIndex> sorted_;
+    std::vector<BodyIndex> boundless_;
 };
 
 Backend* createCpuBackend() { return new CpuBackend(); }
