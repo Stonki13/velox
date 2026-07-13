@@ -109,6 +109,9 @@ closed 3D polytope cannot exist.
   spinning resistance; all coefficients are shared by the CPU and CUDA solvers
 - **Safe object lifetime**: generation-checked body/joint handles, dense
   swap-removal, stale-handle rejection, and automatic attached-joint cleanup
+- **Rollback snapshots**: copyable same-world checkpoints restore bodies,
+  joints, geometry, stable-handle generations, warm starts, sleeping state,
+  and event phase while invalidating CPU/CUDA backend caches for exact replay
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
   islands cost nothing and wake on impact
 - **Queries**: symmetrically filtered raycasts, sphere/box/capsule overlaps,

@@ -1123,6 +1123,69 @@ static void testBreakableJoints() {
           "breakable joints (force, torque, events, handle reuse)");
 }
 
+// 36. A rollback point restores dynamic state, topology/generations, joints,
+// geometry, solver caches, sleeping history, and event phase. Replaying across
+// an impact must reproduce the abandoned timeline on both CPU and CUDA.
+static void testWorldSnapshots() {
+    velox::World w;
+    auto ground = w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto falling = w.addSphere({0, 3, 0}, 0.5f, 1.0f);
+    auto anchor = w.addSphere({3, 4, 0}, 0.2f, 0.0f);
+    auto bob = w.addSphere({3, 2, 0}, 0.3f, 1.0f);
+    auto tether = w.addDistanceJoint(anchor, bob, {3, 4, 0}, {3, 2, 0});
+    for (int i = 0; i < 20; ++i) w.step(1.0f / 60.0f);
+    velox::Vec3 savedPosition = w.body(falling).position;
+    size_t savedCount = w.bodyCount();
+    auto snapshot = w.saveSnapshot();
+
+    for (int i = 0; i < 120; ++i) w.step(1.0f / 60.0f);
+    velox::Vec3 expectedFallingPosition = w.body(falling).position;
+    velox::Vec3 expectedFallingVelocity = w.body(falling).velocity;
+    velox::Vec3 expectedBobPosition = w.body(bob).position;
+    std::vector<velox::ContactEvent> expectedEvents = w.contactEvents();
+
+    w.removeBody(bob);
+    std::vector<velox::Vec3> hullPoints = {
+        {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f},
+        {0, 0.5f, -0.5f}, {0, 0, 0.5f}};
+    auto replacement = w.addConvexHull({10, 10, 10}, hullPoints, 1.0f);
+    w.gravity = {1, 2, 3};
+    w.substeps = 1;
+    w.step(1.0f / 60.0f); // upload the divergent topology/geometry on CUDA
+
+    w.restoreSnapshot(snapshot);
+    bool topologyOk = w.bodyCount() == savedCount && w.isValid(falling) &&
+                      w.isValid(bob) && w.isValid(tether) &&
+                      !w.isValid(replacement) &&
+                      velox::length(w.body(falling).position - savedPosition) < 1e-7f &&
+                      velox::length(w.gravity - velox::Vec3{0, -9.81f, 0}) < 1e-7f &&
+                      w.substeps == 4;
+    for (int i = 0; i < 120; ++i) w.step(1.0f / 60.0f);
+    bool replayOk = velox::length(w.body(falling).position -
+                                  expectedFallingPosition) < 1e-5f &&
+                    velox::length(w.body(falling).velocity -
+                                  expectedFallingVelocity) < 1e-5f &&
+                    velox::length(w.body(bob).position - expectedBobPosition) < 1e-5f &&
+                    w.contactEvents().size() == expectedEvents.size();
+    if (replayOk) {
+        for (size_t i = 0; i < expectedEvents.size(); ++i) {
+            const auto& a = w.contactEvents()[i];
+            const auto& b = expectedEvents[i];
+            replayOk &= a.a == b.a && a.b == b.b && a.type == b.type &&
+                        a.sensor == b.sensor;
+        }
+    }
+    velox::World other;
+    bool validationOk = throwsException([&] { other.restoreSnapshot(snapshot); });
+    velox::WorldSnapshot empty;
+    validationOk &= throwsException([&] { w.restoreSnapshot(empty); });
+    auto groundHit = w.rayCast({0, 5, 0}, {0, -1, 0}, 10.0f);
+    bool geometryOk = groundHit.hit &&
+                      (groundHit.body == falling || groundHit.body == ground);
+    check(topologyOk && replayOk && validationOk && geometryOk,
+          "world snapshot (topology, caches, deterministic replay)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1159,6 +1222,7 @@ int main() {
     testFixedAndPrismaticJoints();
     testDistanceSpring();
     testBreakableJoints();
+    testWorldSnapshots();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

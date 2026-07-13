@@ -756,6 +756,82 @@ void World::clearForces(BodyId id) {
     b.torque = {};
 }
 
+WorldSnapshot World::saveSnapshot() const {
+    WorldSnapshot snapshot;
+    snapshot.owner_ = this;
+    snapshot.gravity_ = gravity;
+    snapshot.substeps_ = substeps;
+    snapshot.bodies_ = bodies_;
+    snapshot.bodySlots_.reserve(bodySlots_.size());
+    for (const HandleSlot& slot : bodySlots_)
+        snapshot.bodySlots_.push_back({slot.dense, slot.generation});
+    snapshot.bodyDenseToSlot_ = bodyDenseToSlot_;
+    snapshot.freeBodySlots_ = freeBodySlots_;
+    snapshot.contacts_ = contacts_;
+    snapshot.prevContacts_ = prevContacts_;
+    snapshot.joints_ = joints_;
+    snapshot.jointSlots_.reserve(jointSlots_.size());
+    for (const HandleSlot& slot : jointSlots_)
+        snapshot.jointSlots_.push_back({slot.dense, slot.generation});
+    snapshot.jointDenseToSlot_ = jointDenseToSlot_;
+    snapshot.freeJointSlots_ = freeJointSlots_;
+    snapshot.previous_.reserve(prev_.size());
+    for (const PrevState& state : prev_)
+        snapshot.previous_.push_back({state.position, state.orientation});
+    snapshot.pairKeys_ = pairKeys_;
+    snapshot.previousPairKeys_ = prevPairKeys_;
+    snapshot.unionParent_ = unionParent_;
+    snapshot.islandTimer_ = islandTimer_;
+    snapshot.contactEvents_ = events_;
+    snapshot.jointBreakEvents_ = jointBreakEvents_;
+    snapshot.meshes_ = meshes_;
+    return snapshot;
+}
+
+void World::restoreSnapshot(const WorldSnapshot& snapshot) {
+    if (snapshot.owner_ != this)
+        throw std::invalid_argument(
+            "velox: a snapshot can only be restored to its originating world");
+
+    // Allocate every converted private representation before changing World,
+    // giving restore strong exception safety.
+    WorldSnapshot staged = snapshot;
+    std::vector<HandleSlot> bodySlots;
+    bodySlots.reserve(staged.bodySlots_.size());
+    for (const WorldSnapshot::Slot& slot : staged.bodySlots_)
+        bodySlots.push_back({slot.dense, slot.generation});
+    std::vector<HandleSlot> jointSlots;
+    jointSlots.reserve(staged.jointSlots_.size());
+    for (const WorldSnapshot::Slot& slot : staged.jointSlots_)
+        jointSlots.push_back({slot.dense, slot.generation});
+    std::vector<PrevState> previous;
+    previous.reserve(staged.previous_.size());
+    for (const WorldSnapshot::Previous& state : staged.previous_)
+        previous.push_back({state.position, state.orientation});
+
+    gravity = staged.gravity_;
+    substeps = staged.substeps_;
+    bodies_.swap(staged.bodies_);
+    bodySlots_.swap(bodySlots);
+    bodyDenseToSlot_.swap(staged.bodyDenseToSlot_);
+    freeBodySlots_.swap(staged.freeBodySlots_);
+    contacts_.swap(staged.contacts_);
+    prevContacts_.swap(staged.prevContacts_);
+    joints_.swap(staged.joints_);
+    jointSlots_.swap(jointSlots);
+    jointDenseToSlot_.swap(staged.jointDenseToSlot_);
+    freeJointSlots_.swap(staged.freeJointSlots_);
+    prev_.swap(previous);
+    pairKeys_.swap(staged.pairKeys_);
+    prevPairKeys_.swap(staged.previousPairKeys_);
+    unionParent_.swap(staged.unionParent_);
+    islandTimer_.swap(staged.islandTimer_);
+    events_.swap(staged.contactEvents_);
+    jointBreakEvents_.swap(staged.jointBreakEvents_);
+    std::swap(meshes_, staged.meshes_);
+    backend_->invalidateCaches();
+}
+
 JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");

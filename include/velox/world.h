@@ -60,6 +60,38 @@ struct ContactModifyData {
 
 using ContactModifier = std::function<void(ContactModifyData&)>;
 
+class World;
+
+// Copyable rollback point owned by the World that created it. Its contents are
+// intentionally opaque so internal dense indices and cache layouts can evolve.
+class WorldSnapshot {
+public:
+    WorldSnapshot() = default;
+
+private:
+    friend class World;
+    struct Slot { uint32_t dense = UINT32_MAX, generation = 0; };
+    struct Previous { Vec3 position; Quat orientation; };
+
+    const World* owner_ = nullptr;
+    Vec3 gravity_;
+    int substeps_ = 4;
+    std::vector<Body> bodies_;
+    std::vector<Slot> bodySlots_;
+    std::vector<uint32_t> bodyDenseToSlot_, freeBodySlots_;
+    std::vector<Contact> contacts_, prevContacts_;
+    std::vector<Joint> joints_;
+    std::vector<Slot> jointSlots_;
+    std::vector<uint32_t> jointDenseToSlot_, freeJointSlots_;
+    std::vector<Previous> previous_;
+    std::vector<uint64_t> pairKeys_, previousPairKeys_;
+    std::vector<uint32_t> unionParent_;
+    std::vector<float> islandTimer_;
+    std::vector<ContactEvent> contactEvents_;
+    std::vector<JointBreakEvent> jointBreakEvents_;
+    MeshSoup meshes_;
+};
+
 class World {
 public:
     // Auto picks the CUDA backend when built with VELOX_ENABLE_CUDA and a
@@ -109,6 +141,8 @@ public:
     void addLinearImpulse(BodyId id, Vec3 impulse);
     void addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint);
     void clearForces(BodyId id);
+    WorldSnapshot saveSnapshot() const;
+    void restoreSnapshot(const WorldSnapshot& snapshot);
 
     // --- joints -------------------------------------------------------------
     JointId addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor);

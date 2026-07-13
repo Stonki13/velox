@@ -102,6 +102,8 @@ public:
     // device memory write the accumulated values back into `contacts` (used
     // for next frame's warm starting). CPU backend solves in place: no-op.
     virtual void fetchImpulses(std::vector<Contact>&) {}
+    // Host state was restored or replaced; discard any backend-side mirrors.
+    virtual void invalidateCaches() {}
 };
 
 Backend* createCpuBackend();

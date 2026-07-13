@@ -443,6 +443,16 @@ public:
                                     cudaMemcpyDeviceToHost));
     }
 
+    void invalidateCaches() override {
+        bodiesDirty_ = true;
+        meshVerts_ = meshNodes_ = hullPts_ = compoundChildren_ = (size_t)-1;
+        solveCount_ = 0;
+        if (solveGraph_) {
+            cudaGraphExecDestroy(solveGraph_);
+            solveGraph_ = nullptr;
+        }
+    }
+
 private:
     template <typename T> void release(T*& p) {
         if (p) { cudaFree(p); p = nullptr; }
