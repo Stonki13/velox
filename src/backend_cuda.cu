@@ -74,6 +74,16 @@ __global__ void contactsKernel(const Body* bodies, const Aabb* aabbs, int n,
         out[slot + c] = buf[c];
 }
 
+// Solves every contact of one color in parallel: within a color no two
+// contacts share a dynamic body, so the writes cannot conflict.
+__global__ void solveColorKernel(Body* bodies, Contact* contacts,
+                                 int first, int count, float dt) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    Contact& c = contacts[first + k];
+    solveContact(bodies[c.a], bodies[c.b], c, dt);
+}
+
 class CudaBackend final : public Backend {
 public:
     static CudaBackend* create() {
@@ -85,6 +95,7 @@ public:
     ~CudaBackend() override {
         release(dBodies_);
         release(dAabbs_);
+        release(dSolve_);
         release(dContacts_);
         release(dCount_);
         release(dVertices_);
@@ -143,7 +154,60 @@ public:
         if (count > 0)
             VELOX_CUDA_CHECK(cudaMemcpy(out.data(), dContacts_, count * sizeof(Contact),
                                         cudaMemcpyDeviceToHost));
-        bodiesDirty_ = true; // host will mutate bodies during the solve
+        bodiesDirty_ = true; // host may mutate bodies before the solve call
+    }
+
+    void solveVelocities(std::vector<Body>& bodies,
+                         std::vector<Contact>& contacts, float dt) override {
+        int n = static_cast<int>(bodies.size());
+        int m = static_cast<int>(contacts.size());
+        if (m == 0) return;
+
+        // Greedy coloring on the host: a contact's color is one past the
+        // highest color already used by either dynamic endpoint, so no color
+        // ever contains two contacts sharing a dynamic body. Static bodies
+        // are never written by the solver and don't constrain colors.
+        nextColor_.assign(n, 0);
+        colorOf_.resize(m);
+        int numColors = 0;
+        for (int k = 0; k < m; ++k) {
+            const Contact& c = contacts[k];
+            int ca = bodies[c.a].isStatic() ? 0 : nextColor_[c.a];
+            int cb = bodies[c.b].isStatic() ? 0 : nextColor_[c.b];
+            int color = ca > cb ? ca : cb;
+            colorOf_[k] = color;
+            if (!bodies[c.a].isStatic()) nextColor_[c.a] = color + 1;
+            if (!bodies[c.b].isStatic()) nextColor_[c.b] = color + 1;
+            if (color + 1 > numColors) numColors = color + 1;
+        }
+
+        // Counting sort contacts into color order.
+        colorStart_.assign(numColors + 1, 0);
+        for (int k = 0; k < m; ++k) ++colorStart_[colorOf_[k] + 1];
+        for (int c = 0; c < numColors; ++c) colorStart_[c + 1] += colorStart_[c];
+        sorted_.resize(m);
+        fill_ = colorStart_;
+        for (int k = 0; k < m; ++k) sorted_[fill_[colorOf_[k]]++] = contacts[k];
+
+        if (bodiesDirty_) uploadBodies(bodies);
+        if ((size_t)m * sizeof(Contact) > solveCap_) {
+            release(dSolve_);
+            VELOX_CUDA_CHECK(cudaMalloc(&dSolve_, m * sizeof(Contact)));
+            solveCap_ = m * sizeof(Contact);
+        }
+        VELOX_CUDA_CHECK(cudaMemcpy(dSolve_, sorted_.data(), m * sizeof(Contact),
+                                    cudaMemcpyHostToDevice));
+
+        for (int iter = 0; iter < kVelocityIterations; ++iter)
+            for (int c = 0; c < numColors; ++c) {
+                int first = colorStart_[c], count = colorStart_[c + 1] - first;
+                solveColorKernel<<<(count + 127) / 128, 128>>>(dBodies_, dSolve_,
+                                                               first, count, dt);
+            }
+
+        VELOX_CUDA_CHECK(cudaMemcpy(bodies.data(), dBodies_, n * sizeof(Body),
+                                    cudaMemcpyDeviceToHost));
+        bodiesDirty_ = false;
     }
 
 private:
@@ -190,6 +254,10 @@ private:
     Body* dBodies_ = nullptr;
     Aabb* dAabbs_ = nullptr;
     size_t aabbCap_ = 0;
+    Contact* dSolve_ = nullptr;
+    size_t solveCap_ = 0;
+    std::vector<int> nextColor_, colorOf_, colorStart_, fill_;
+    std::vector<Contact> sorted_;
     Contact* dContacts_ = nullptr;
     int* dCount_ = nullptr;
     Vec3* dVertices_ = nullptr;

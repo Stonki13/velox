@@ -9,9 +9,80 @@
 namespace velox {
 
 constexpr int kMaxContactsPerPair = 12;
+constexpr int kVelocityIterations = 10;
 
 VELOX_HD inline Vec3 npPointVelocity(const Body& b, const Vec3& p) {
     return b.velocity + cross(b.angularVelocity, p - b.position);
+}
+
+// One sequential-impulse pass over one contact (normal + friction with
+// accumulated clamping). Shared by the CPU solver (sequential order) and the
+// CUDA solver (graph-colored parallel order). Static bodies are never
+// written, so contacts sharing only a static body may run concurrently.
+VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
+    Vec3 ra = c.point - a.position;
+    Vec3 rb = c.point - b.position;
+
+    // Effective mass along the normal, including rotation.
+    Vec3 raxn = cross(ra, c.normal);
+    Vec3 rbxn = cross(rb, c.normal);
+    float kNormal = a.invMass + b.invMass +
+                    dot(raxn, a.invInertiaMul(raxn)) +
+                    dot(rbxn, b.invInertiaMul(rbxn));
+    if (kNormal <= 0.0f) return;
+
+    float vn = dot(npPointVelocity(a, c.point) - npPointVelocity(b, c.point), c.normal);
+
+    // Target normal velocity: may still close the remaining gap, and must
+    // bounce with restitution if the approach was fast.
+    constexpr float kRestitutionThreshold = 1.0f; // m/s; below this, no bounce
+    float target = c.gap > 0.0f ? -c.gap / dt : 0.0f;
+    if (c.vn0 < -kRestitutionThreshold)
+        target = vmax(target, -vmin(a.restitution, b.restitution) * c.vn0);
+
+    float jn = (target - vn) / kNormal;
+    float newImpulse = vmax(c.normalImpulse + jn, 0.0f);
+    jn = newImpulse - c.normalImpulse;
+    c.normalImpulse = newImpulse;
+
+    Vec3 impulse = c.normal * jn;
+    if (!a.isStatic()) {
+        a.velocity += impulse * a.invMass;
+        a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
+    }
+    if (!b.isStatic()) {
+        b.velocity -= impulse * b.invMass;
+        b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
+    }
+
+    // Coulomb friction, clamped by the accumulated normal impulse.
+    Vec3 rv = npPointVelocity(a, c.point) - npPointVelocity(b, c.point);
+    Vec3 tangent = rv - c.normal * dot(rv, c.normal);
+    float tLen = length(tangent);
+    if (tLen > 1e-6f) {
+        tangent *= 1.0f / tLen;
+        Vec3 raxt = cross(ra, tangent);
+        Vec3 rbxt = cross(rb, tangent);
+        float kTangent = a.invMass + b.invMass +
+                         dot(raxt, a.invInertiaMul(raxt)) +
+                         dot(rbxt, b.invInertiaMul(rbxt));
+        if (kTangent > 0.0f) {
+            float jt = -dot(rv, tangent) / kTangent;
+            float maxFriction = sqrtf(a.friction * b.friction) * c.normalImpulse;
+            float newTangent = vclamp(c.tangentImpulse + jt, -maxFriction, maxFriction);
+            jt = newTangent - c.tangentImpulse;
+            c.tangentImpulse = newTangent;
+            Vec3 fImpulse = tangent * jt;
+            if (!a.isStatic()) {
+                a.velocity += fImpulse * a.invMass;
+                a.angularVelocity += a.invInertiaMul(cross(ra, fImpulse));
+            }
+            if (!b.isStatic()) {
+                b.velocity -= fImpulse * b.invMass;
+                b.angularVelocity -= b.invInertiaMul(cross(rb, fImpulse));
+            }
+        }
+    }
 }
 
 // World-space AABB of a body inflated by its speculative reach over dt.

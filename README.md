@@ -35,22 +35,23 @@ stability for every shape, and a ball settling inside a triangle-mesh trough.
 
 ## GPU acceleration
 
-The narrow phase (GJK, manifolds, mesh BVH traversal) is header-only
-`__host__ __device__` code: the CUDA backend runs **the exact same collision
-code as the CPU backend**, over device buffers. CMake auto-detects a CUDA
-toolkit; `World(BackendType::Auto)` picks the GPU when present. The contact
-solver currently stays on the CPU (sequential impulses are serial by nature);
-a graph-colored GPU solver is the next milestone.
+The narrow phase (GJK, manifolds, mesh BVH traversal) and the contact solver
+are header-only `__host__ __device__` code: the CUDA backend runs **the exact
+same physics code as the CPU backend**, over device buffers. Sequential
+impulses are inherently serial, so the GPU solver uses **graph coloring** —
+contacts are partitioned so no two contacts in a color share a dynamic body,
+and each color is solved as one fully parallel kernel. CMake auto-detects a
+CUDA toolkit; `World(BackendType::Auto)` picks the GPU when present.
 
-`examples/benchmark` on an RTX 5080 vs the CPU reference (Ryzen host, 60 Hz
-steps, contact solver included — it is shared and dominates at scale):
+`examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
+(60 Hz steps, full pipeline):
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 0.58 ms | 0.77 ms |
-| 2048-sphere rain | 2.86 ms | 2.02 ms |
-| 8192-sphere rain | 17.4 ms | 10.0 ms |
-| 2048 spheres on 20k-triangle terrain | 5.97 ms | 5.19 ms |
+| 512-sphere rain | 0.41 ms | 0.84 ms |
+| 2048-sphere rain | 2.31 ms | 1.50 ms |
+| 8192-sphere rain | 14.6 ms | **3.8 ms** |
+| 2048 spheres on 20k-triangle terrain | 5.15 ms | 3.90 ms |
 
 ## Status
 
@@ -62,7 +63,8 @@ Early development. Working today:
 - GJK narrow phase over support functions (one code path for all convex
   pairs and mesh triangles), with contact manifolds for resting boxes
 - **Triangle BVH** per mesh (median split, flat GPU-traversable layout)
-- **CUDA backend**: integration + full narrow phase on the GPU
+- **CUDA backend**: integration, narrow phase, and graph-colored contact
+  solver all on the GPU
 - Broad phase: sweep-and-prune (CPU), compact-AABB pair culling (GPU)
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
 
@@ -71,7 +73,6 @@ treat non-convex meshes.
 
 Roadmap:
 
-- [ ] GPU contact solver (graph coloring / Jacobi) — the current bottleneck
 - [ ] Convex hull collider (the GJK path already supports it — needs the shape)
 - [ ] EPA for exact deep-penetration recovery (rarely hit thanks to PCS)
 - [ ] Persistent contact manifolds + warm starting

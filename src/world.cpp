@@ -183,10 +183,6 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
 
 namespace {
 
-Vec3 pointVelocity(const Body& b, const Vec3& p) {
-    return b.velocity + cross(b.angularVelocity, p - b.position);
-}
-
 // Signed gap and contact normal (from B towards A) between two bodies with
 // their transforms overridden — the distance oracle for conservative
 // advancement.
@@ -235,69 +231,8 @@ void World::step(float dt) {
     for (size_t i = 0; i < bodies_.size(); ++i)
         prev_[i] = {bodies_[i].position, bodies_[i].orientation};
 
-    // --- velocity solve -----------------------------------------------------
-    constexpr int kVelocityIterations = 10;
-    constexpr float kRestitutionThreshold = 1.0f; // m/s; below this, no bounce
-    for (int iter = 0; iter < kVelocityIterations; ++iter) {
-        for (Contact& c : contacts_) {
-            Body& a = bodies_[c.a];
-            Body& b = bodies_[c.b];
-            Vec3 ra = c.point - a.position;
-            Vec3 rb = c.point - b.position;
-
-            // Effective mass along the normal, including rotation.
-            Vec3 raxn = cross(ra, c.normal);
-            Vec3 rbxn = cross(rb, c.normal);
-            float kNormal = a.invMass + b.invMass +
-                            dot(raxn, a.invInertiaMul(raxn)) +
-                            dot(rbxn, b.invInertiaMul(rbxn));
-            if (kNormal <= 0.0f) continue;
-
-            float vn = dot(pointVelocity(a, c.point) - pointVelocity(b, c.point), c.normal);
-
-            // Target normal velocity: may still close the remaining gap, and
-            // must bounce with restitution if the approach was fast.
-            float target = c.gap > 0.0f ? -c.gap / dt : 0.0f;
-            if (c.vn0 < -kRestitutionThreshold)
-                target = vmax(target, -vmin(a.restitution, b.restitution) * c.vn0);
-
-            float jn = (target - vn) / kNormal;
-            float newImpulse = vmax(c.normalImpulse + jn, 0.0f);
-            jn = newImpulse - c.normalImpulse;
-            c.normalImpulse = newImpulse;
-
-            Vec3 impulse = c.normal * jn;
-            a.velocity += impulse * a.invMass;
-            b.velocity -= impulse * b.invMass;
-            a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
-            b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
-
-            // Coulomb friction, clamped by the accumulated normal impulse.
-            Vec3 rv = pointVelocity(a, c.point) - pointVelocity(b, c.point);
-            Vec3 tangent = rv - c.normal * dot(rv, c.normal);
-            float tLen = length(tangent);
-            if (tLen > 1e-6f) {
-                tangent *= 1.0f / tLen;
-                Vec3 raxt = cross(ra, tangent);
-                Vec3 rbxt = cross(rb, tangent);
-                float kTangent = a.invMass + b.invMass +
-                                 dot(raxt, a.invInertiaMul(raxt)) +
-                                 dot(rbxt, b.invInertiaMul(rbxt));
-                if (kTangent > 0.0f) {
-                    float jt = -dot(rv, tangent) / kTangent;
-                    float maxFriction = sqrtf(a.friction * b.friction) * c.normalImpulse;
-                    float newTangent = vclamp(c.tangentImpulse + jt, -maxFriction, maxFriction);
-                    jt = newTangent - c.tangentImpulse;
-                    c.tangentImpulse = newTangent;
-                    Vec3 fImpulse = tangent * jt;
-                    a.velocity += fImpulse * a.invMass;
-                    b.velocity -= fImpulse * b.invMass;
-                    a.angularVelocity += a.invInertiaMul(cross(ra, fImpulse));
-                    b.angularVelocity -= b.invInertiaMul(cross(rb, fImpulse));
-                }
-            }
-        }
-    }
+    // --- velocity solve (backend: sequential on CPU, graph-colored on GPU) ---
+    backend_->solveVelocities(bodies_, contacts_, dt);
 
     // --- integrate positions & orientations ----------------------------------
     for (Body& b : bodies_) {

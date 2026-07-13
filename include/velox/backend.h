@@ -54,6 +54,10 @@ public:
     // Finds all pairs whose gap could close within dt (speculative detection).
     virtual void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
                               float dt, std::vector<Contact>& out) = 0;
+    // Iterative velocity solve over the contacts. CPU: sequential impulses.
+    // CUDA: graph-colored parallel impulses (same math, conflict-free order).
+    virtual void solveVelocities(std::vector<Body>& bodies,
+                                 std::vector<Contact>& contacts, float dt) = 0;
 };
 
 Backend* createCpuBackend();

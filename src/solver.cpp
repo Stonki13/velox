@@ -16,6 +16,13 @@ public:
         }
     }
 
+    void solveVelocities(std::vector<Body>& bodies,
+                         std::vector<Contact>& contacts, float dt) override {
+        for (int iter = 0; iter < kVelocityIterations; ++iter)
+            for (Contact& c : contacts)
+                solveContact(bodies[c.a], bodies[c.b], c, dt);
+    }
+
     void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
                       float dt, std::vector<Contact>& out) override {
         out.clear();
