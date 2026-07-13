@@ -20,6 +20,9 @@ struct Body {
     float restitution = 0.3f;
     float friction = 0.5f;
 
+    uint8_t asleep = 0;         // sleeping bodies skip integration and solving
+    float sleepTimer = 0.0f;    // seconds below the motion threshold
+
     ShapeType shape = ShapeType::Sphere;
     float radius = 0.5f;        // Sphere, Capsule
     Vec3 halfExtents{0.5f, 0.5f, 0.5f}; // Box

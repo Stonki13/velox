@@ -11,13 +11,17 @@ public:
 
     void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) override {
         for (Body& b : bodies) {
-            if (b.isStatic()) continue;
+            if (b.isStatic() || b.asleep) continue;
             b.velocity += gravity * dt; // semi-implicit Euler
         }
     }
 
     void solveVelocities(std::vector<Body>& bodies,
-                         std::vector<Contact>& contacts, float dt) override {
+                         std::vector<Contact>& contacts, float dt,
+                         bool warmStart) override {
+        if (warmStart)
+            for (Contact& c : contacts)
+                warmStartContact(bodies[c.a], bodies[c.b], c);
         for (int iter = 0; iter < kVelocityIterations; ++iter)
             for (Contact& c : contacts)
                 solveContact(bodies[c.a], bodies[c.b], c, dt);
@@ -49,8 +53,10 @@ public:
             for (int c = 0; c < count; ++c) out.push_back(buf[c]);
         };
 
+        auto inert = [&](BodyId k) { return bodies[k].isStatic() || bodies[k].asleep; };
+
         for (BodyId i : sorted_)
-            if (!bodies[i].isStatic())
+            if (!inert(i))
                 for (BodyId j : boundless_)
                     flush(collidePair(bodies[i], bodies[j], i, j, soup, dt,
                                       buf, kMaxContactsPerPair));
@@ -64,7 +70,7 @@ public:
             for (size_t sj = si + 1; sj < sorted_.size(); ++sj) {
                 BodyId j = sorted_[sj];
                 if (aabbs_[j].lo.x > aabbs_[i].hi.x) break; // pruned: sorted axis
-                if (bodies[i].isStatic() && bodies[j].isStatic()) continue;
+                if (inert(i) && inert(j)) continue;
                 if (!aabbOverlap(aabbs_[i].lo, aabbs_[i].hi, aabbs_[j].lo, aabbs_[j].hi))
                     continue;
                 flush(collidePair(bodies[i], bodies[j], i, j, soup, dt,

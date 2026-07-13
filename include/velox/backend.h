@@ -35,7 +35,10 @@ struct Contact {
     BodyId a, b;
     Vec3 normal;          // from b towards a
     Vec3 point;           // world-space contact point (torque arm for rotation)
-    float gap;            // signed distance between surfaces (negative = penetrating)
+    float gap;            // signed distance between surfaces at detection
+    float bias0;          // gap - dot(normal, posA - posB) at detection: lets the
+                          // solver evaluate the LIVE gap from current positions,
+                          // so one detection pass serves several solver substeps
     float vn0;            // normal approach velocity at detection (for restitution)
     float normalImpulse;  // accumulated by the solver
     float tangentImpulse;
@@ -56,8 +59,15 @@ public:
                               float dt, std::vector<Contact>& out) = 0;
     // Iterative velocity solve over the contacts. CPU: sequential impulses.
     // CUDA: graph-colored parallel impulses (same math, conflict-free order).
+    // warmStart is true only for the first substep of a step: accumulated
+    // impulses already live in the velocities on later substeps.
     virtual void solveVelocities(std::vector<Body>& bodies,
-                                 std::vector<Contact>& contacts, float dt) = 0;
+                                 std::vector<Contact>& contacts, float dt,
+                                 bool warmStart) = 0;
+    // Called once after the last substep: backends holding impulses in
+    // device memory write the accumulated values back into `contacts` (used
+    // for next frame's warm starting). CPU backend solves in place: no-op.
+    virtual void fetchImpulses(std::vector<Contact>&) {}
 };
 
 Backend* createCpuBackend();

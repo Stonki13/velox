@@ -1,0 +1,217 @@
+// Scene queries: raycasts and overlap tests against every collider type.
+#include "velox/world.h"
+#include "narrowphase.h"
+
+namespace velox {
+
+namespace {
+
+struct LocalHit { bool hit; float t; Vec3 normal; };
+
+LocalHit raySphere(const Vec3& o, const Vec3& d, const Vec3& center, float r) {
+    Vec3 m = o - center;
+    float b = dot(m, d);
+    float c = dot(m, m) - r * r;
+    if (c > 0.0f && b > 0.0f) return {false};
+    float disc = b * b - c;
+    if (disc < 0.0f) return {false};
+    float t = -b - sqrtf(disc);
+    if (t < 0.0f) t = 0.0f;
+    Vec3 p = o + d * t;
+    return {true, t, normalize(p - center)};
+}
+
+LocalHit rayPlane(const Vec3& o, const Vec3& d, const Vec3& n, float offset) {
+    float denom = dot(n, d);
+    float dist = dot(n, o) - offset;
+    if (denom > -1e-8f) return {false};        // parallel or exiting
+    float t = -dist / denom;
+    if (t < 0.0f) return {false};
+    return {true, t, n};
+}
+
+// Slab test in the box's local frame.
+LocalHit rayBox(const Vec3& o, const Vec3& d, const Body& box) {
+    Vec3 lo = rotateInv(box.orientation, o - box.position);
+    Vec3 ld = rotateInv(box.orientation, d);
+    const Vec3& h = box.halfExtents;
+    float tmin = 0.0f, tmax = 1e30f;
+    Vec3 nLocal{};
+    const float lov[3] = {lo.x, lo.y, lo.z}, ldv[3] = {ld.x, ld.y, ld.z};
+    const float hv[3] = {h.x, h.y, h.z};
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(ldv[i]) < 1e-9f) {
+            if (std::fabs(lov[i]) > hv[i]) return {false};
+            continue;
+        }
+        float inv = 1.0f / ldv[i];
+        float t1 = (-hv[i] - lov[i]) * inv;
+        float t2 = (hv[i] - lov[i]) * inv;
+        float sign = -1.0f;
+        if (t1 > t2) { float tt = t1; t1 = t2; t2 = tt; sign = 1.0f; }
+        if (t1 > tmin) {
+            tmin = t1;
+            nLocal = {};
+            (&nLocal.x)[i] = sign;
+        }
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return {false};
+    }
+    return {true, tmin, rotate(box.orientation, nLocal)};
+}
+
+LocalHit rayCapsule(const Vec3& o, const Vec3& d, const Body& cap) {
+    // Local frame: core segment on the Y axis, radius r.
+    Vec3 lo = rotateInv(cap.orientation, o - cap.position);
+    Vec3 ld = rotateInv(cap.orientation, d);
+    float r = cap.radius, h = cap.capsuleHalfHeight;
+
+    // Infinite cylinder x^2 + z^2 = r^2.
+    float a = ld.x * ld.x + ld.z * ld.z;
+    LocalHit best{false, 1e30f, {}};
+    if (a > 1e-12f) {
+        float b = lo.x * ld.x + lo.z * ld.z;
+        float c = lo.x * lo.x + lo.z * lo.z - r * r;
+        float disc = b * b - a * c;
+        if (disc >= 0.0f) {
+            float t = (-b - sqrtf(disc)) / a;
+            if (t >= 0.0f) {
+                float y = lo.y + ld.y * t;
+                if (y >= -h && y <= h)
+                    best = {true, t, normalize(Vec3{lo.x + ld.x * t, 0, lo.z + ld.z * t})};
+            }
+        }
+    }
+    // End cap spheres.
+    for (float s : {h, -h}) {
+        LocalHit hc = raySphere(lo, ld, {0, s, 0}, r);
+        if (hc.hit && hc.t < best.t) best = hc;
+    }
+    if (!best.hit) return best;
+    best.normal = rotate(cap.orientation, best.normal);
+    return best;
+}
+
+// Möller–Trumbore, front and back faces.
+LocalHit rayTriangle(const Vec3& o, const Vec3& d,
+                     const Vec3& v0, const Vec3& v1, const Vec3& v2) {
+    Vec3 e1 = v1 - v0, e2 = v2 - v0;
+    Vec3 p = cross(d, e2);
+    float det = dot(e1, p);
+    if (std::fabs(det) < 1e-12f) return {false};
+    float inv = 1.0f / det;
+    Vec3 s = o - v0;
+    float u = dot(s, p) * inv;
+    if (u < 0.0f || u > 1.0f) return {false};
+    Vec3 q = cross(s, e1);
+    float v = dot(d, q) * inv;
+    if (v < 0.0f || u + v > 1.0f) return {false};
+    float t = dot(e2, q) * inv;
+    if (t < 0.0f) return {false};
+    Vec3 n = normalize(cross(e1, e2));
+    if (dot(n, d) > 0.0f) n = -n;
+    return {true, t, n};
+}
+
+bool rayAabb(const Vec3& o, const Vec3& d, const Vec3& lo, const Vec3& hi, float tmax) {
+    float t0 = 0.0f, t1 = tmax;
+    const float ov[3] = {o.x, o.y, o.z}, dv[3] = {d.x, d.y, d.z};
+    const float lov[3] = {lo.x, lo.y, lo.z}, hiv[3] = {hi.x, hi.y, hi.z};
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(dv[i]) < 1e-9f) {
+            if (ov[i] < lov[i] || ov[i] > hiv[i]) return false;
+            continue;
+        }
+        float inv = 1.0f / dv[i];
+        float a = (lov[i] - ov[i]) * inv, b = (hiv[i] - ov[i]) * inv;
+        if (a > b) { float tt = a; a = b; b = tt; }
+        if (a > t0) t0 = a;
+        if (b < t1) t1 = b;
+        if (t0 > t1) return false;
+    }
+    return true;
+}
+
+LocalHit rayMesh(const Vec3& o, const Vec3& d, const Mesh& m,
+                 const MeshSoupView& soup, float tmax) {
+    LocalHit best{false, tmax, {}};
+    uint32_t stack[48];
+    int sp = 0;
+    stack[sp++] = m.firstNode;
+    while (sp > 0) {
+        const BvhNode& node = soup.bvhNodes[stack[--sp]];
+        if (!rayAabb(o, d, node.aabbMin, node.aabbMax, best.t)) continue;
+        if (node.triCount == 0) {
+            if (sp + 2 <= 48) {
+                stack[sp++] = node.leftFirst;
+                stack[sp++] = node.leftFirst + 1;
+            }
+            continue;
+        }
+        for (uint32_t k = 0; k < node.triCount; ++k) {
+            uint32_t tri = soup.bvhTriRefs[node.leftFirst + k];
+            uint32_t base = m.firstIndex + tri * 3;
+            LocalHit h = rayTriangle(o, d,
+                soup.vertices[m.firstVertex + soup.indices[base]],
+                soup.vertices[m.firstVertex + soup.indices[base + 1]],
+                soup.vertices[m.firstVertex + soup.indices[base + 2]]);
+            if (h.hit && h.t < best.t) { best = h; best.hit = true; }
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
+    dir = normalize(dir);
+    RayHit best;
+    best.t = maxDist;
+    const MeshSoupView soup = view(meshes_);
+
+    for (BodyId i = 0; i < bodies_.size(); ++i) {
+        const Body& b = bodies_[i];
+        LocalHit h{false, 0, {}};
+        switch (b.shape) {
+        case ShapeType::Sphere:  h = raySphere(origin, dir, b.position, b.radius); break;
+        case ShapeType::Box:     h = rayBox(origin, dir, b); break;
+        case ShapeType::Capsule: h = rayCapsule(origin, dir, b); break;
+        case ShapeType::Plane:   h = rayPlane(origin, dir, b.planeNormal, b.planeOffset); break;
+        case ShapeType::Mesh:    h = rayMesh(origin, dir, meshes_.meshes[b.meshIndex],
+                                             soup, best.t); break;
+        }
+        if (h.hit && h.t < best.t) {
+            best.hit = true;
+            best.body = i;
+            best.t = h.t;
+            best.normal = h.normal;
+        }
+    }
+    if (best.hit) best.point = origin + dir * best.t;
+    return best;
+}
+
+void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) const {
+    out.clear();
+    const MeshSoupView soup = view(meshes_);
+    Body probe;
+    probe.shape = ShapeType::Sphere;
+    probe.position = center;
+    probe.radius = radius;
+
+    for (BodyId i = 0; i < bodies_.size(); ++i) {
+        const Body& b = bodies_[i];
+        float gap = 1e30f;
+        if (b.shape == ShapeType::Plane) {
+            gap = dot(b.planeNormal, center) - b.planeOffset - radius;
+        } else if (b.shape == ShapeType::Mesh) {
+            Vec3 n;
+            meshGapProbe(probe, b, soup, radius + 0.01f, gap, n);
+        } else {
+            gap = gjkDistance(makeConvex(probe), makeConvex(b)).distance;
+        }
+        if (gap <= 0.0f) out.push_back(i);
+    }
+}
+
+} // namespace velox

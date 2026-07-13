@@ -43,28 +43,45 @@ contacts are partitioned so no two contacts in a color share a dynamic body,
 and each color is solved as one fully parallel kernel. CMake auto-detects a
 CUDA toolkit; `World(BackendType::Auto)` picks the GPU when present.
 
+Per-color kernel sweeps are batched with CUDA Graphs (captured once per step,
+replayed per substep), and the coloring is greedy first-free-bit, which keeps
+the color count near the max contacts per body.
+
 `examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
-(60 Hz steps, full pipeline):
+(60 Hz steps, full pipeline, 4 solver substeps):
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 0.41 ms | 0.84 ms |
-| 2048-sphere rain | 2.31 ms | 1.50 ms |
-| 8192-sphere rain | 14.6 ms | **3.8 ms** |
-| 2048 spheres on 20k-triangle terrain | 5.15 ms | 3.90 ms |
+| 512-sphere rain | 1.44 ms | 1.88 ms |
+| 2048-sphere rain | 6.53 ms | 2.95 ms |
+| 8192-sphere rain | 35.1 ms | **21.5 ms** |
+| 2048 spheres on 20k-triangle terrain | 16.8 ms | **7.6 ms** |
 
-## Status
+## Solver
 
-Early development. Working today:
+Box2D-v3-style TGS: detection runs **once per step**, then several solver
+substeps re-evaluate every contact's live gap from current body positions.
+Sequential impulses with warm starting (accumulated impulses persist across
+frames via persistent contact matching), face-snapped box manifolds for
+deterministic stacking, split-impulse positional correction (penetration is
+resolved by translation, never by velocity bias — no energy injection), and
+whole-island sleeping. A 10-box tower stands still to sub-millimeter drift.
+
+## Features
 
 - Full rigid body dynamics: linear + rotational (quaternions, world-space
   inverse inertia, contact torques)
 - Colliders: **sphere, box, capsule, static plane, static triangle mesh**
+- **Joints**: ball, distance, hinge (iterative impulses, 3x3 block solve for
+  anchors, Baumgarte stabilization)
+- **Sleeping & islands**: union-find islands over contacts + joints; settled
+  islands cost nothing and wake on impact
+- **Queries**: `rayCast` against every collider (BVH-accelerated for meshes),
+  `overlapSphere`
 - GJK narrow phase over support functions (one code path for all convex
-  pairs and mesh triangles), with contact manifolds for resting boxes
-- **Triangle BVH** per mesh (median split, flat GPU-traversable layout)
+  pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
 - **CUDA backend**: integration, narrow phase, and graph-colored contact
-  solver all on the GPU
+  solver all on the GPU (CUDA Graphs batching)
 - Broad phase: sweep-and-prune (CPU), compact-AABB pair culling (GPU)
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
 
@@ -75,8 +92,9 @@ Roadmap:
 
 - [ ] Convex hull collider (the GJK path already supports it — needs the shape)
 - [ ] EPA for exact deep-penetration recovery (rarely hit thanks to PCS)
-- [ ] Persistent contact manifolds + warm starting
-- [ ] Constraint solver (joints), islands, sleeping
+- [ ] Joint motors and limits; cone/twist for ragdolls
+- [ ] Device-resident stepping (skip per-substep transfers when no joints)
+- [ ] Collision events/callbacks and filtering layers
 
 ## Build
 

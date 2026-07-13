@@ -9,10 +9,26 @@
 namespace velox {
 
 constexpr int kMaxContactsPerPair = 12;
-constexpr int kVelocityIterations = 10;
+constexpr int kVelocityIterations = 8; // per substep
 
 VELOX_HD inline Vec3 npPointVelocity(const Body& b, const Vec3& p) {
     return b.velocity + cross(b.angularVelocity, p - b.position);
+}
+
+// Re-applies the accumulated normal impulse carried over from the previous
+// frame (warm starting). Persistent contacts then converge in far fewer
+// iterations, which is what keeps tall stacks solid.
+VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
+    if (c.normalImpulse <= 0.0f) return;
+    Vec3 impulse = c.normal * c.normalImpulse;
+    if (!a.isStatic()) {
+        a.velocity += impulse * a.invMass;
+        a.angularVelocity += a.invInertiaMul(cross(c.point - a.position, impulse));
+    }
+    if (!b.isStatic()) {
+        b.velocity -= impulse * b.invMass;
+        b.angularVelocity -= b.invInertiaMul(cross(c.point - b.position, impulse));
+    }
 }
 
 // One sequential-impulse pass over one contact (normal + friction with
@@ -36,7 +52,12 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     // Target normal velocity: may still close the remaining gap, and must
     // bounce with restitution if the approach was fast.
     constexpr float kRestitutionThreshold = 1.0f; // m/s; below this, no bounce
-    float target = c.gap > 0.0f ? -c.gap / dt : 0.0f;
+    // May close the remaining LIVE gap (re-evaluated from current positions —
+    // this is what lets several substeps reuse one detection pass), no
+    // further. Penetration is fixed by the positional correction pass, never
+    // by velocity bias (no energy gain).
+    float liveGap = c.bias0 + dot(c.normal, a.position - b.position);
+    float target = liveGap > 0.0f ? -liveGap / dt : 0.0f;
     if (c.vn0 < -kRestitutionThreshold)
         target = vmax(target, -vmin(a.restitution, b.restitution) * c.vn0);
 
@@ -109,14 +130,20 @@ VELOX_HD inline bool aabbOverlap(const Vec3& lo1, const Vec3& hi1,
 namespace np_detail {
 
 // Appends a speculative contact if the pair could touch within the step.
+// The reach uses the sum of ABSOLUTE surface speeds, not the relative
+// velocity: the velocity solve runs after detection and can stop either body
+// dead (e.g. the box below lands), turning a zero-relative-velocity pair into
+// a colliding one within the same step.
 VELOX_HD inline void emit(const Body& a, const Body& b, BodyId ia, BodyId ib,
                           const Vec3& normal, const Vec3& point, float gap,
                           float dt, Contact* out, int cap, int& n) {
     if (n >= cap) return;
-    float vn = dot(npPointVelocity(a, point) - npPointVelocity(b, point), normal);
     constexpr float slop = 1e-3f;
-    if (gap > -vn * dt + slop && gap > slop) return; // cannot touch this step
-    out[n++] = {ia, ib, normal, point, gap, vn, 0.0f, 0.0f};
+    float reach = (a.maxPointSpeed() + b.maxPointSpeed()) * dt + slop;
+    if (gap > reach) return; // cannot touch this step
+    float vn = dot(npPointVelocity(a, point) - npPointVelocity(b, point), normal);
+    float bias0 = gap - dot(normal, a.position - b.position);
+    out[n++] = {ia, ib, normal, point, gap, bias0, vn, 0.0f, 0.0f};
 }
 
 VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,
@@ -162,25 +189,68 @@ VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,
     }
 }
 
+VELOX_HD inline void boxVertex(const Body& box, int i, Vec3& out) {
+    Vec3 local{(i & 1) ? box.halfExtents.x : -box.halfExtents.x,
+               (i & 2) ? box.halfExtents.y : -box.halfExtents.y,
+               (i & 4) ? box.halfExtents.z : -box.halfExtents.z};
+    out = box.position + rotate(box.orientation, local);
+}
+
 VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyId ia, BodyId ib,
                                   float dt, Contact* out, int cap, int& n) {
-    GjkResult r = gjkDistance(makeConvex(a), makeConvex(b));
-    Vec3 mid = (r.pointA + r.pointB) * 0.5f;
-    emit(a, b, ia, ib, r.normal, mid, r.distance, dt, out, cap, n);
+    Convex ca = makeConvex(a), cb = makeConvex(b);
+    GjkResult r = gjkDistance(ca, cb);
 
-    // Box-box face contact needs more than one point to rest stably: add the
-    // box vertices that are nearly as close to the other body's surface.
     if (a.shape == ShapeType::Box && b.shape == ShapeType::Box && r.distance < 0.05f) {
-        for (int i = 0; i < 8; ++i) {
-            Vec3 local{(i & 1) ? a.halfExtents.x : -a.halfExtents.x,
-                       (i & 2) ? a.halfExtents.y : -a.halfExtents.y,
-                       (i & 4) ? a.halfExtents.z : -a.halfExtents.z};
-            Vec3 p = a.position + rotate(a.orientation, local);
-            float d = dot(r.normal, p - r.pointB);
-            if (d < r.distance + 0.02f && lengthSq(p - mid) > 1e-6f)
-                emit(a, b, ia, ib, r.normal, p, d, dt, out, cap, n);
+        // Between parallel box faces the GJK witness pair is ill-defined (any
+        // opposing points are equally close), so its normal can tilt with
+        // floating-point noise and slowly shove stacks sideways. Test the 6
+        // face normals as separating axes; if one explains the separation,
+        // snap the contact normal to it and build the manifold from vertices
+        // against that face plane — deterministic geometry, no witness points.
+        Vec3 nrm = r.normal;
+        float best = r.distance + 1e-4f;
+        bool face = false;
+        for (int side = 0; side < 2; ++side) {
+            const Body& box = side ? b : a;
+            for (int ax = 0; ax < 3; ++ax) {
+                Vec3 axis = rotate(box.orientation,
+                                   {ax == 0 ? 1.0f : 0.0f, ax == 1 ? 1.0f : 0.0f,
+                                    ax == 2 ? 1.0f : 0.0f});
+                if (dot(axis, a.position - b.position) < 0.0f) axis = -axis;
+                float sep = dot(axis, ca.support(-axis) - cb.support(axis));
+                if (sep > best - 2e-3f && sep <= r.distance + 1e-3f) {
+                    best = sep; nrm = axis; face = true;
+                }
+            }
+        }
+        if (face) {
+            // Vertices of each box near the other's supporting plane,
+            // deduplicated (equal stacked boxes produce coincident vertices
+            // from both sides — emitting both doubles the impulse).
+            float refB = dot(nrm, cb.support(nrm));   // B surface along +nrm
+            float refA = dot(nrm, ca.support(-nrm));  // A surface along -nrm
+            Vec3 pts[16];
+            int np = 0;
+            auto addPoint = [&](const Vec3& v, float d) {
+                if (d >= r.distance + 0.02f || np >= 16) return;
+                for (int k = 0; k < np; ++k)
+                    if (lengthSq(pts[k] - v) < 1e-6f) return;
+                pts[np++] = v;
+                emit(a, b, ia, ib, nrm, v, d, dt, out, cap, n);
+            };
+            for (int i = 0; i < 8; ++i) {
+                Vec3 v;
+                boxVertex(a, i, v);
+                addPoint(v, dot(nrm, v) - refB);
+                boxVertex(b, i, v);
+                addPoint(v, refA - dot(nrm, v));
+            }
+            if (np > 0) return;
         }
     }
+
+    emit(a, b, ia, ib, r.normal, (r.pointA + r.pointB) * 0.5f, r.distance, dt, out, cap, n);
 }
 
 VELOX_HD inline void meshConvex(const Body& conv, const Body& meshBody,

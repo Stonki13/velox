@@ -4,6 +4,7 @@
 // inherently serial; a Jacobi/graph-colored GPU solver is on the roadmap).
 #include "narrowphase.h"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cstdio>
 
 namespace velox {
@@ -22,7 +23,7 @@ __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (b.isStatic()) return;
+    if (b.isStatic() || b.asleep) return;
     b.velocity += gravity * dt;
 }
 
@@ -63,7 +64,7 @@ __global__ void contactsKernel(const Body* bodies, const Aabb* aabbs, int n,
 
     const Body& a = bodies[i];
     const Body& b = bodies[j];
-    if (a.isStatic() && b.isStatic()) return;
+    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
 
     Contact buf[kMaxContactsPerPair];
     int count = collidePair(a, b, (BodyId)i, (BodyId)j, soup, dt,
@@ -84,6 +85,14 @@ __global__ void solveColorKernel(Body* bodies, Contact* contacts,
     solveContact(bodies[c.a], bodies[c.b], c, dt);
 }
 
+__global__ void warmStartColorKernel(Body* bodies, Contact* contacts,
+                                     int first, int count) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    Contact& c = contacts[first + k];
+    warmStartContact(bodies[c.a], bodies[c.b], c);
+}
+
 class CudaBackend final : public Backend {
 public:
     static CudaBackend* create() {
@@ -93,6 +102,8 @@ public:
     }
 
     ~CudaBackend() override {
+        if (solveGraph_) cudaGraphExecDestroy(solveGraph_);
+        if (stream_) cudaStreamDestroy(stream_);
         release(dBodies_);
         release(dAabbs_);
         release(dSolve_);
@@ -158,56 +169,126 @@ public:
     }
 
     void solveVelocities(std::vector<Body>& bodies,
-                         std::vector<Contact>& contacts, float dt) override {
+                         std::vector<Contact>& contacts, float dt,
+                         bool warmStart) override {
         int n = static_cast<int>(bodies.size());
         int m = static_cast<int>(contacts.size());
         if (m == 0) return;
 
-        // Greedy coloring on the host: a contact's color is one past the
-        // highest color already used by either dynamic endpoint, so no color
-        // ever contains two contacts sharing a dynamic body. Static bodies
-        // are never written by the solver and don't constrain colors.
-        nextColor_.assign(n, 0);
-        colorOf_.resize(m);
-        int numColors = 0;
-        for (int k = 0; k < m; ++k) {
-            const Contact& c = contacts[k];
-            int ca = bodies[c.a].isStatic() ? 0 : nextColor_[c.a];
-            int cb = bodies[c.b].isStatic() ? 0 : nextColor_[c.b];
-            int color = ca > cb ? ca : cb;
-            colorOf_[k] = color;
-            if (!bodies[c.a].isStatic()) nextColor_[c.a] = color + 1;
-            if (!bodies[c.b].isStatic()) nextColor_[c.b] = color + 1;
-            if (color + 1 > numColors) numColors = color + 1;
-        }
+        // warmStart marks the first substep of a step: sort, color, and
+        // upload contacts once; later substeps reuse the device-resident
+        // contacts (whose impulses keep accumulating) and cached coloring.
+        if (warmStart) {
+            // The contact kernel appends via atomics, so arrival order is
+            // random each frame. Sort deterministically first: otherwise the
+            // coloring (and thus the solve order) changes every frame, and
+            // that noise is enough to walk a tall stack off balance.
+            std::sort(contacts.begin(), contacts.end(),
+                      [](const Contact& x, const Contact& y) {
+                          uint64_t kx = (uint64_t)x.a << 32 | x.b;
+                          uint64_t ky = (uint64_t)y.a << 32 | y.b;
+                          if (kx != ky) return kx < ky;
+                          if (x.point.x != y.point.x) return x.point.x < y.point.x;
+                          if (x.point.y != y.point.y) return x.point.y < y.point.y;
+                          return x.point.z < y.point.z;
+                      });
 
-        // Counting sort contacts into color order.
-        colorStart_.assign(numColors + 1, 0);
-        for (int k = 0; k < m; ++k) ++colorStart_[colorOf_[k] + 1];
-        for (int c = 0; c < numColors; ++c) colorStart_[c + 1] += colorStart_[c];
-        sorted_.resize(m);
-        fill_ = colorStart_;
-        for (int k = 0; k < m; ++k) sorted_[fill_[colorOf_[k]]++] = contacts[k];
-
-        if (bodiesDirty_) uploadBodies(bodies);
-        if ((size_t)m * sizeof(Contact) > solveCap_) {
-            release(dSolve_);
-            VELOX_CUDA_CHECK(cudaMalloc(&dSolve_, m * sizeof(Contact)));
-            solveCap_ = m * sizeof(Contact);
-        }
-        VELOX_CUDA_CHECK(cudaMemcpy(dSolve_, sorted_.data(), m * sizeof(Contact),
-                                    cudaMemcpyHostToDevice));
-
-        for (int iter = 0; iter < kVelocityIterations; ++iter)
-            for (int c = 0; c < numColors; ++c) {
-                int first = colorStart_[c], count = colorStart_[c + 1] - first;
-                solveColorKernel<<<(count + 127) / 128, 128>>>(dBodies_, dSolve_,
-                                                               first, count, dt);
+            // Greedy first-free-color coloring on the host: each contact takes
+            // the smallest color unused by either dynamic endpoint (bitmask up
+            // to 64 colors, overflow spills sequentially above). This yields
+            // roughly max-contacts-per-body colors — an order of magnitude
+            // fewer kernel launches than chain-growth schemes. Static bodies
+            // are never written and don't constrain colors.
+            colorMask_.assign(n, 0);
+            nextColor_.assign(n, 64);
+            colorOf_.resize(m);
+            numColors_ = 0;
+            for (int k = 0; k < m; ++k) {
+                const Contact& c = contacts[k];
+                bool sa = bodies[c.a].isStatic(), sb = bodies[c.b].isStatic();
+                uint64_t used = (sa ? 0 : colorMask_[c.a]) | (sb ? 0 : colorMask_[c.b]);
+                int color;
+                if (~used) {
+                    color = 0;
+                    while (used & (1ull << color)) ++color;
+                } else {
+                    int na = sa ? 64 : nextColor_[c.a];
+                    int nb = sb ? 64 : nextColor_[c.b];
+                    color = na > nb ? na : nb;
+                    if (!sa) nextColor_[c.a] = color + 1;
+                    if (!sb) nextColor_[c.b] = color + 1;
+                }
+                if (color < 64) {
+                    if (!sa) colorMask_[c.a] |= 1ull << color;
+                    if (!sb) colorMask_[c.b] |= 1ull << color;
+                }
+                colorOf_[k] = color;
+                if (color + 1 > numColors_) numColors_ = color + 1;
             }
 
-        VELOX_CUDA_CHECK(cudaMemcpy(bodies.data(), dBodies_, n * sizeof(Body),
+            // Counting sort contacts into color order (host copy too, so the
+            // eventual fetchImpulses lines up 1:1 with the device layout).
+            colorStart_.assign(numColors_ + 1, 0);
+            for (int k = 0; k < m; ++k) ++colorStart_[colorOf_[k] + 1];
+            for (int c = 0; c < numColors_; ++c) colorStart_[c + 1] += colorStart_[c];
+            sorted_.resize(m);
+            fill_ = colorStart_;
+            for (int k = 0; k < m; ++k) sorted_[fill_[colorOf_[k]]++] = contacts[k];
+            contacts = sorted_;
+
+            if ((size_t)m * sizeof(Contact) > solveCap_) {
+                release(dSolve_);
+                VELOX_CUDA_CHECK(cudaMalloc(&dSolve_, m * sizeof(Contact)));
+                solveCap_ = m * sizeof(Contact);
+            }
+            VELOX_CUDA_CHECK(cudaMemcpy(dSolve_, contacts.data(), m * sizeof(Contact),
+                                        cudaMemcpyHostToDevice));
+            solveCount_ = m;
+        }
+
+        if (bodiesDirty_) uploadBodies(bodies);
+
+        if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
+
+        if (warmStart) {
+            for (int c = 0; c < numColors_; ++c) {
+                int first = colorStart_[c], count = colorStart_[c + 1] - first;
+                warmStartColorKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
+                    dBodies_, dSolve_, first, count);
+            }
+            // Thousands of tiny per-color launches per frame are dominated by
+            // launch overhead. Capture the whole iteration sweep as a CUDA
+            // graph once per step and replay it each substep.
+            if (solveGraph_) { cudaGraphExecDestroy(solveGraph_); solveGraph_ = nullptr; }
+            // Colored order converges slower per sweep than sequential order
+            // (color 0 solves one contact of every pair Jacobi-style), so run
+            // twice the sweeps — with the graph replay they are nearly free.
+            constexpr int kGpuIterations = 2 * kVelocityIterations;
+            cudaGraph_t graph;
+            VELOX_CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal));
+            for (int iter = 0; iter < kGpuIterations; ++iter)
+                for (int c = 0; c < numColors_; ++c) {
+                    int first = colorStart_[c], count = colorStart_[c + 1] - first;
+                    solveColorKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
+                        dBodies_, dSolve_, first, count, dt);
+                }
+            VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
+            VELOX_CUDA_CHECK(cudaGraphInstantiate(&solveGraph_, graph, nullptr, nullptr, 0));
+            VELOX_CUDA_CHECK(cudaGraphDestroy(graph));
+        }
+        VELOX_CUDA_CHECK(cudaGraphLaunch(solveGraph_, stream_));
+
+        VELOX_CUDA_CHECK(cudaMemcpyAsync(bodies.data(), dBodies_, n * sizeof(Body),
+                                         cudaMemcpyDeviceToHost, stream_));
+        VELOX_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        bodiesDirty_ = true; // host integrates positions before the next call
+    }
+
+    void fetchImpulses(std::vector<Contact>& contacts) override {
+        if (solveCount_ == 0 || contacts.size() != (size_t)solveCount_) return;
+        VELOX_CUDA_CHECK(cudaMemcpy(contacts.data(), dSolve_,
+                                    solveCount_ * sizeof(Contact),
                                     cudaMemcpyDeviceToHost));
-        bodiesDirty_ = false;
     }
 
 private:
@@ -247,8 +328,10 @@ private:
     }
 
     static int vmaxContacts(int n) {
-        int c = n * 8;
-        return c < 1 << 20 ? c : 1 << 20;
+        // Manifold-rich scenes (box stacks) can produce many contacts per
+        // body; dropping any on overflow injects noise, so size generously.
+        int c = n * 24 + 1024;
+        return c < 4 << 20 ? c : 4 << 20;
     }
 
     Body* dBodies_ = nullptr;
@@ -256,7 +339,12 @@ private:
     size_t aabbCap_ = 0;
     Contact* dSolve_ = nullptr;
     size_t solveCap_ = 0;
+    int solveCount_ = 0;
+    int numColors_ = 0;
+    cudaStream_t stream_ = nullptr;
+    cudaGraphExec_t solveGraph_ = nullptr;
     std::vector<int> nextColor_, colorOf_, colorStart_, fill_;
+    std::vector<uint64_t> colorMask_;
     std::vector<Contact> sorted_;
     Contact* dContacts_ = nullptr;
     int* dCount_ = nullptr;

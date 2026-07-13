@@ -181,7 +181,88 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
     return static_cast<BodyId>(bodies_.size() - 1);
 }
 
+JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    Joint j;
+    j.type = JointType::Ball;
+    j.a = a; j.b = b;
+    j.localAnchorA = rotateInv(bodies_[a].orientation, worldAnchor - bodies_[a].position);
+    j.localAnchorB = rotateInv(bodies_[b].orientation, worldAnchor - bodies_[b].position);
+    joints_.push_back(j);
+    return static_cast<JointId>(joints_.size() - 1);
+}
+
+JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB) {
+    Joint j;
+    j.type = JointType::Distance;
+    j.a = a; j.b = b;
+    j.localAnchorA = rotateInv(bodies_[a].orientation, worldAnchorA - bodies_[a].position);
+    j.localAnchorB = rotateInv(bodies_[b].orientation, worldAnchorB - bodies_[b].position);
+    j.restLength = length(worldAnchorA - worldAnchorB);
+    joints_.push_back(j);
+    return static_cast<JointId>(joints_.size() - 1);
+}
+
+JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
+    Joint j;
+    j.type = JointType::Hinge;
+    j.a = a; j.b = b;
+    j.localAnchorA = rotateInv(bodies_[a].orientation, worldAnchor - bodies_[a].position);
+    j.localAnchorB = rotateInv(bodies_[b].orientation, worldAnchor - bodies_[b].position);
+    Vec3 axis = normalize(worldAxis);
+    j.localAxisA = rotateInv(bodies_[a].orientation, axis);
+    j.localAxisB = rotateInv(bodies_[b].orientation, axis);
+    joints_.push_back(j);
+    return static_cast<JointId>(joints_.size() - 1);
+}
+
+void World::wake(BodyId id) {
+    bodies_[id].asleep = 0;
+    bodies_[id].sleepTimer = 0.0f;
+}
+
 namespace {
+
+// Minimal column-major 3x3 for joint effective-mass solves.
+struct Mat3 {
+    Vec3 c0, c1, c2;
+};
+
+Vec3 mul(const Mat3& m, const Vec3& v) {
+    return m.c0 * v.x + m.c1 * v.y + m.c2 * v.z;
+}
+
+Mat3 inverse(const Mat3& m) {
+    Vec3 r0 = cross(m.c1, m.c2);
+    Vec3 r1 = cross(m.c2, m.c0);
+    Vec3 r2 = cross(m.c0, m.c1);
+    float det = dot(m.c0, r0);
+    float inv = std::fabs(det) > 1e-12f ? 1.0f / det : 0.0f;
+    // rows of the inverse are r0,r1,r2 scaled; transpose into columns.
+    return {{r0.x * inv, r1.x * inv, r2.x * inv},
+            {r0.y * inv, r1.y * inv, r2.y * inv},
+            {r0.z * inv, r1.z * inv, r2.z * inv}};
+}
+
+// K(P): change of relative anchor velocity per unit impulse P at the anchors.
+Mat3 pointMass(const Body& a, const Body& b, const Vec3& ra, const Vec3& rb) {
+    auto col = [&](Vec3 e) {
+        Vec3 k = e * (a.invMass + b.invMass);
+        k += cross(a.invInertiaMul(cross(ra, e)), ra);
+        k += cross(b.invInertiaMul(cross(rb, e)), rb);
+        return k;
+    };
+    return {col({1, 0, 0}), col({0, 1, 0}), col({0, 0, 1})};
+}
+
+Vec3 anchorVelocity(const Body& x, const Vec3& r) {
+    return x.velocity + cross(x.angularVelocity, r);
+}
+
+void applyImpulse(Body& x, const Vec3& r, const Vec3& P, float sign) {
+    if (x.isStatic()) return;
+    x.velocity += P * (sign * x.invMass);
+    x.angularVelocity += x.invInertiaMul(cross(r, P)) * sign;
+}
 
 // Signed gap and contact normal (from B towards A) between two bodies with
 // their transforms overridden — the distance oracle for conservative
@@ -210,6 +291,135 @@ GapProbe gapAt(const Body& a, const Vec3& pa, const Quat& qa,
 
 } // namespace
 
+// Iterative impulse solve for all joints, with Baumgarte positional bias.
+// Joints are few compared to contacts, so this runs on the CPU.
+void World::solveJoints(float dt) {
+    if (joints_.empty()) return;
+    constexpr int kJointIterations = 8;
+    constexpr float kBeta = 0.2f; // positional correction per step fraction
+
+    for (const Joint& j : joints_) {
+        // A sleeping body attached to an awake one must participate.
+        if (bodies_[j.a].asleep != bodies_[j.b].asleep) { wake(j.a); wake(j.b); }
+    }
+
+    for (int iter = 0; iter < kJointIterations; ++iter) {
+        for (Joint& j : joints_) {
+            Body& a = bodies_[j.a];
+            Body& b = bodies_[j.b];
+            if (a.asleep && b.asleep) continue;
+            Vec3 ra = rotate(a.orientation, j.localAnchorA);
+            Vec3 rb = rotate(b.orientation, j.localAnchorB);
+            Vec3 pa = a.position + ra, pb = b.position + rb;
+            Vec3 vel = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+
+            switch (j.type) {
+            case JointType::Ball: {
+                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
+                applyImpulse(a, ra, P, +1.0f);
+                applyImpulse(b, rb, P, -1.0f);
+                break;
+            }
+            case JointType::Distance: {
+                Vec3 d = pa - pb;
+                float len = length(d);
+                if (len < 1e-8f) break;
+                Vec3 n = d * (1.0f / len);
+                Vec3 raxn = cross(ra, n), rbxn = cross(rb, n);
+                float k = a.invMass + b.invMass +
+                          dot(raxn, a.invInertiaMul(raxn)) +
+                          dot(rbxn, b.invInertiaMul(rbxn));
+                if (k <= 0.0f) break;
+                float bias = (len - j.restLength) * (kBeta / dt);
+                float lambda = -(dot(vel, n) + bias) / k;
+                applyImpulse(a, ra, n * lambda, +1.0f);
+                applyImpulse(b, rb, n * lambda, -1.0f);
+                break;
+            }
+            case JointType::Hinge: {
+                // Point constraint...
+                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
+                applyImpulse(a, ra, P, +1.0f);
+                applyImpulse(b, rb, P, -1.0f);
+                // ...plus two angular rows keeping the axes aligned.
+                Vec3 axisA = rotate(a.orientation, j.localAxisA);
+                Vec3 axisB = rotate(b.orientation, j.localAxisB);
+                Vec3 err = cross(axisB, axisA); // rotate B by err to realign
+                Vec3 ref = std::fabs(axisA.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+                Vec3 b1 = normalize(cross(axisA, ref));
+                Vec3 b2 = cross(axisA, b1);
+                Vec3 wr = a.angularVelocity - b.angularVelocity;
+                for (Vec3 t : {b1, b2}) {
+                    float k = dot(t, a.invInertiaMul(t)) + dot(t, b.invInertiaMul(t));
+                    if (k <= 0.0f) continue;
+                    // err = cross(axisB, axisA): B must gain +err spin to
+                    // realign, i.e. the relative velocity wr = wa - wb must
+                    // be driven towards -err * beta/dt.
+                    float lambda = -(dot(wr, t) + dot(err, t) * (kBeta / dt)) / k;
+                    if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(t * lambda);
+                    if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(t * lambda);
+                    wr = a.angularVelocity - b.angularVelocity;
+                }
+                break;
+            }
+            }
+        }
+    }
+}
+
+// Union-find islands over contacts and joints; whole islands fall asleep
+// together once every member has been slow for long enough.
+void World::updateSleeping(float dt) {
+    constexpr float kMotionTol = 2.5e-3f; // |v|^2 + |w|^2 threshold
+    constexpr float kTimeToSleep = 0.5f;  // seconds
+
+    size_t n = bodies_.size();
+    unionParent_.resize(n);
+    for (uint32_t i = 0; i < n; ++i) unionParent_[i] = i;
+    // Iterative find with path halving.
+    auto find = [&](uint32_t x) {
+        while (unionParent_[x] != x) {
+            unionParent_[x] = unionParent_[unionParent_[x]];
+            x = unionParent_[x];
+        }
+        return x;
+    };
+    auto unite = [&](uint32_t x, uint32_t y) {
+        x = find(x); y = find(y);
+        if (x != y) unionParent_[x] = y;
+    };
+    for (const Contact& c : contacts_)
+        if (!bodies_[c.a].isStatic() && !bodies_[c.b].isStatic()) unite(c.a, c.b);
+    for (const Joint& j : joints_)
+        if (!bodies_[j.a].isStatic() && !bodies_[j.b].isStatic()) unite(j.a, j.b);
+
+    for (Body& b : bodies_) {
+        if (b.isStatic() || b.asleep) continue;
+        float motion = lengthSq(b.velocity) + lengthSq(b.angularVelocity);
+        b.sleepTimer = motion < kMotionTol ? b.sleepTimer + dt : 0.0f;
+    }
+
+    // Minimum timer per island root; islands where everyone is calm sleep.
+    islandTimer_.assign(n, 1e30f);
+    for (BodyId i = 0; i < n; ++i) {
+        Body& b = bodies_[i];
+        if (b.isStatic() || b.asleep) continue;
+        uint32_t root = find(i);
+        if (b.sleepTimer < islandTimer_[root]) islandTimer_[root] = b.sleepTimer;
+    }
+    for (BodyId i = 0; i < n; ++i) {
+        Body& b = bodies_[i];
+        if (b.isStatic() || b.asleep) continue;
+        if (islandTimer_[find(i)] > kTimeToSleep) {
+            b.asleep = 1;
+            b.velocity = {};
+            b.angularVelocity = {};
+        }
+    }
+}
+
 // Predictive Contact Sweeping (PCS)
 //
 // 1. Speculative detection: contacts are created while pairs are still apart,
@@ -224,21 +434,63 @@ GapProbe gapAt(const Body& a, const Vec3& pa, const Quat& qa,
 //    impossible regardless of linear or angular speed.
 void World::step(float dt) {
     if (dt <= 0.0f) return;
-    backend_->integrate(bodies_, gravity, dt);
+    const int nSub = substeps > 0 ? substeps : 1;
+    const float h = dt / nSub;
+
+    // Detect ONCE per step, with a speculative reach covering the full dt.
+    // The solver substeps below re-evaluate each contact's live gap from
+    // current body positions (Contact::bias0), Box2D-v3 style.
+    backend_->integrate(bodies_, gravity, h); // first substep's gravity
     backend_->findContacts(bodies_, meshes_, dt, contacts_);
+
+    // --- wake pass ------------------------------------------------------------
+    // A sleeping body is woken when something awake and moving (or actually
+    // striking it) shares a contact with it.
+    for (const Contact& c : contacts_) {
+        Body& a = bodies_[c.a];
+        Body& b = bodies_[c.b];
+        bool impact = c.vn0 < -0.1f;
+        auto moving = [](const Body& x) {
+            return lengthSq(x.velocity) + lengthSq(x.angularVelocity) > 1e-3f;
+        };
+        if (a.asleep && !b.isStatic() && !b.asleep && (impact || moving(b))) wake(c.a);
+        if (b.asleep && !a.isStatic() && !a.asleep && (impact || moving(a))) wake(c.b);
+    }
+
+    // --- warm starting ---------------------------------------------------------
+    // Carry accumulated normal impulses from last frame's matching contacts
+    // (same body pair, nearby contact point).
+    if (!prevContacts_.empty()) {
+        auto keyOf = [](const Contact& c) { return (uint64_t)c.a << 32 | c.b; };
+        for (Contact& c : contacts_) {
+            uint64_t key = keyOf(c);
+            auto lo = std::lower_bound(prevContacts_.begin(), prevContacts_.end(), key,
+                [&](const Contact& p, uint64_t k) { return keyOf(p) < k; });
+            float bestDistSq = 2.5e-3f; // 5 cm matching radius
+            for (auto it = lo; it != prevContacts_.end() && keyOf(*it) == key; ++it) {
+                float d = lengthSq(it->point - c.point);
+                if (d < bestDistSq) { bestDistSq = d; c.normalImpulse = it->normalImpulse; }
+            }
+        }
+    }
 
     prev_.resize(bodies_.size());
     for (size_t i = 0; i < bodies_.size(); ++i)
         prev_[i] = {bodies_[i].position, bodies_[i].orientation};
 
-    // --- velocity solve (backend: sequential on CPU, graph-colored on GPU) ---
-    backend_->solveVelocities(bodies_, contacts_, dt);
-
-    // --- integrate positions & orientations ----------------------------------
-    for (Body& b : bodies_) {
-        if (b.isStatic()) continue;
-        b.position += b.velocity * dt;
-        b.orientation = integrate(b.orientation, b.angularVelocity, dt);
+    // --- solver substeps -------------------------------------------------------
+    // Each substep: gravity, velocity solve against live gaps, joints, and
+    // position integration. Warm starting applies only on the first substep;
+    // afterwards the accumulated impulses already live in the velocities.
+    for (int s = 0; s < nSub; ++s) {
+        if (s > 0) backend_->integrate(bodies_, gravity, h);
+        backend_->solveVelocities(bodies_, contacts_, h, s == 0);
+        solveJoints(h);
+        for (Body& b : bodies_) {
+            if (b.isStatic() || b.asleep) continue;
+            b.position += b.velocity * h;
+            b.orientation = integrate(b.orientation, b.angularVelocity, h);
+        }
     }
 
     // --- conservative-advancement safety net ---------------------------------
@@ -300,6 +552,40 @@ void World::step(float dt) {
             if (vn < 0.0f) a.velocity -= n * (vn * (b.isStatic() ? 1.0f : 0.5f));
         }
     }
+
+    backend_->fetchImpulses(contacts_); // GPU-resident impulses -> host contacts
+
+    // --- positional correction (split-impulse style) --------------------------
+    // Resolve residual penetration by translating bodies apart directly.
+    // Velocities are untouched, so no energy is injected (Baumgarte bias in
+    // the velocity solve launches stacked bodies). The current gap of each
+    // contact is estimated from its detected gap plus the relative motion of
+    // its bodies along the normal since detection.
+    {
+        constexpr int kPositionIterations = 3;
+        constexpr float kSlop = 1e-3f, kResolve = 0.6f;
+        for (int iter = 0; iter < kPositionIterations; ++iter) {
+            for (const Contact& c : contacts_) {
+                Body& a = bodies_[c.a];
+                Body& b = bodies_[c.b];
+                float invMassSum = a.invMass + b.invMass;
+                if (invMassSum <= 0.0f) continue;
+                float g = c.bias0 + dot(c.normal, a.position - b.position);
+                if (g >= -kSlop) continue;
+                float push = -kResolve * (g + kSlop) / invMassSum;
+                if (!a.asleep) a.position += c.normal * (push * a.invMass);
+                if (!b.asleep) b.position -= c.normal * (push * b.invMass);
+            }
+        }
+    }
+
+    // --- sleeping + persistent contacts for next frame ------------------------
+    updateSleeping(dt);
+    prevContacts_ = contacts_;
+    std::sort(prevContacts_.begin(), prevContacts_.end(),
+              [](const Contact& x, const Contact& y) {
+                  return ((uint64_t)x.a << 32 | x.b) < ((uint64_t)y.a << 32 | y.b);
+              });
 }
 
 } // namespace velox
