@@ -66,6 +66,36 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
     return static_cast<BodyId>(bodies_.size() - 1);
 }
 
+BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass) {
+    if (points.size() < 4)
+        throw std::invalid_argument("velox: convex hull requires at least four points");
+    Body b;
+    b.position = position;
+    b.shape = ShapeType::Hull;
+    b.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
+    b.hullCount = static_cast<uint32_t>(points.size());
+    meshes_.hullPoints.insert(meshes_.hullPoints.end(), points.begin(), points.end());
+    float r2 = 0.0f;
+    Vec3 lo = points[0], hi = lo;
+    for (const Vec3& p : points) {
+        r2 = vmax(r2, lengthSq(p));
+        lo = vmin(lo, p);
+        hi = vmax(hi, p);
+    }
+    b.radius = sqrtf(r2); // bounding radius (AABB + maxPointSpeed)
+    b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    if (mass > 0.0f) {
+        // Inertia approximated by the bounding box of the points.
+        Vec3 e = hi - lo;
+        float k = mass / 12.0f;
+        b.invInertia = {1.0f / (k * (e.y * e.y + e.z * e.z) + 1e-9f),
+                        1.0f / (k * (e.x * e.x + e.z * e.z) + 1e-9f),
+                        1.0f / (k * (e.x * e.x + e.y * e.y) + 1e-9f)};
+    }
+    bodies_.push_back(b);
+    return static_cast<BodyId>(bodies_.size() - 1);
+}
+
 BodyId World::addStaticPlane(Vec3 normal, float offset) {
     Body b;
     b.shape = ShapeType::Plane;
@@ -211,8 +241,26 @@ JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxi
     Vec3 axis = normalize(worldAxis);
     j.localAxisA = rotateInv(bodies_[a].orientation, axis);
     j.localAxisB = rotateInv(bodies_[b].orientation, axis);
+    // Shared perpendicular reference: measures the joint angle (0 now).
+    Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    ref = normalize(cross(axis, ref));
+    j.localRefA = rotateInv(bodies_[a].orientation, ref);
+    j.localRefB = rotateInv(bodies_[b].orientation, ref);
     joints_.push_back(j);
     return static_cast<JointId>(joints_.size() - 1);
+}
+
+float World::hingeAngle(JointId id) const {
+    const Joint& j = joints_[id];
+    const Body& a = bodies_[j.a];
+    const Body& b = bodies_[j.b];
+    Vec3 axis = rotate(a.orientation, j.localAxisA);
+    Vec3 refA = rotate(a.orientation, j.localRefA);
+    Vec3 refB = rotate(b.orientation, j.localRefB);
+    // Signed angle from refA to refB about the axis.
+    float s = dot(cross(refA, refB), axis);
+    float c = dot(refA, refB);
+    return std::atan2(s, c);
 }
 
 void World::wake(BodyId id) {
@@ -276,7 +324,7 @@ GapProbe gapAt(const Body& a, const Vec3& pa, const Quat& qa,
     Body tb = b; tb.position = pb; tb.orientation = qb;
 
     if (tb.shape == ShapeType::Plane) {
-        Convex c = makeConvex(ta);
+        Convex c = makeConvex(ta, soup);
         Vec3 deep = c.support(-tb.planeNormal);
         return {dot(tb.planeNormal, deep) - tb.planeOffset - c.radius, tb.planeNormal};
     }
@@ -285,7 +333,7 @@ GapProbe gapAt(const Body& a, const Vec3& pa, const Quat& qa,
         meshGapProbe(ta, tb, soup, searchRadius, best.gap, best.normal);
         return best;
     }
-    GjkResult r = gjkDistance(makeConvex(ta), makeConvex(tb));
+    GjkResult r = gjkDistance(makeConvex(ta, soup), makeConvex(tb, soup));
     return {r.distance, r.normal};
 }
 
@@ -301,6 +349,11 @@ void World::solveJoints(float dt) {
     for (const Joint& j : joints_) {
         // A sleeping body attached to an awake one must participate.
         if (bodies_[j.a].asleep != bodies_[j.b].asleep) { wake(j.a); wake(j.b); }
+    }
+
+    for (Joint& j : joints_) {
+        j.motorImpulse = 0.0f;
+        j.limitImpulse = 0.0f;
     }
 
     for (int iter = 0; iter < kJointIterations; ++iter) {
@@ -361,6 +414,52 @@ void World::solveJoints(float dt) {
                     if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(t * lambda);
                     if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(t * lambda);
                     wr = a.angularVelocity - b.angularVelocity;
+                }
+
+                // Motor and limit act on the rotation about the hinge axis.
+                float kAxis = dot(axisA, a.invInertiaMul(axisA)) +
+                              dot(axisA, b.invInertiaMul(axisA));
+                if (kAxis > 0.0f) {
+                    if (j.enableMotor) {
+                        float wAxis = dot(a.angularVelocity - b.angularVelocity, axisA);
+                        float lambda = (j.motorSpeed - wAxis) / kAxis;
+                        float maxImpulse = j.maxMotorTorque * dt;
+                        float oldImpulse = j.motorImpulse;
+                        j.motorImpulse = vclamp(oldImpulse + lambda, -maxImpulse, maxImpulse);
+                        lambda = j.motorImpulse - oldImpulse;
+                        if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
+                        if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                    }
+                    if (j.enableLimit) {
+                        // Current angle from the stored references.
+                        Vec3 refA = rotate(a.orientation, j.localRefA);
+                        Vec3 refB = rotate(b.orientation, j.localRefB);
+                        float angle = std::atan2(dot(cross(refA, refB), axisA), dot(refA, refB));
+                        float wAxis = dot(a.angularVelocity - b.angularVelocity, axisA);
+                        // angle measures B relative... refA fixed on A: angle
+                        // grows when B rotates +axis relative to A, i.e. when
+                        // wAxis (wa - wb) is negative.
+                        float lambda = 0.0f, oldImpulse = j.limitImpulse;
+                        if (angle < j.lowerLimit) {
+                            // angleDot = -wAxis. At the lower limit, only a
+                            // negative axis impulse is allowed.
+                            float target = (angle - j.lowerLimit) * (kBeta / dt);
+                            lambda = (target - wAxis) / kAxis;
+                            j.limitImpulse = vmin(0.0f, oldImpulse + lambda);
+                            lambda = j.limitImpulse - oldImpulse;
+                        } else if (angle > j.upperLimit) {
+                            // At the upper limit, only a positive axis impulse
+                            // is allowed. The bias drives the angle back in.
+                            float target = (angle - j.upperLimit) * (kBeta / dt);
+                            lambda = (target - wAxis) / kAxis;
+                            j.limitImpulse = vmax(0.0f, oldImpulse + lambda);
+                            lambda = j.limitImpulse - oldImpulse;
+                        }
+                        if (lambda != 0.0f) {
+                            if (!a.isStatic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
+                            if (!b.isStatic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                        }
+                    }
                 }
                 break;
             }
@@ -442,6 +541,28 @@ void World::step(float dt) {
     // current body positions (Contact::bias0), Box2D-v3 style.
     backend_->integrate(bodies_, gravity, h); // first substep's gravity
     backend_->findContacts(bodies_, meshes_, dt, contacts_);
+
+    // Joint-connected bodies do not collide by default. Without this filter,
+    // contacts at a hinge anchor fight the joint and CCD repeatedly rewinds the
+    // pair. Set Joint::collideConnected when the linkage should self-collide.
+    if (!joints_.empty() && !contacts_.empty()) {
+        std::vector<uint64_t> excluded;
+        excluded.reserve(joints_.size());
+        for (const Joint& j : joints_) {
+            if (j.collideConnected) continue;
+            BodyId lo = j.a < j.b ? j.a : j.b;
+            BodyId hi = j.a < j.b ? j.b : j.a;
+            excluded.push_back((uint64_t)lo << 32 | hi);
+        }
+        std::sort(excluded.begin(), excluded.end());
+        contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+            [&](const Contact& c) {
+                BodyId lo = c.a < c.b ? c.a : c.b;
+                BodyId hi = c.a < c.b ? c.b : c.a;
+                return std::binary_search(excluded.begin(), excluded.end(),
+                                          (uint64_t)lo << 32 | hi);
+            }), contacts_.end());
+    }
 
     // --- wake pass ------------------------------------------------------------
     // A sleeping body is woken when something awake and moving (or actually
@@ -563,20 +684,52 @@ void World::step(float dt) {
     // its bodies along the normal since detection.
     {
         constexpr int kPositionIterations = 3;
-        constexpr float kSlop = 1e-3f, kResolve = 0.6f;
+        constexpr float kPositionSlop = 1e-3f, kResolve = 0.6f;
         for (int iter = 0; iter < kPositionIterations; ++iter) {
             for (const Contact& c : contacts_) {
                 Body& a = bodies_[c.a];
                 Body& b = bodies_[c.b];
                 float invMassSum = a.invMass + b.invMass;
                 if (invMassSum <= 0.0f) continue;
-                float g = c.bias0 + dot(c.normal, a.position - b.position);
-                if (g >= -kSlop) continue;
-                float push = -kResolve * (g + kSlop) / invMassSum;
+                float g = contactLiveGap(a, b, c);
+                if (g >= -kPositionSlop) continue;
+                float push = -kResolve * (g + kPositionSlop) / invMassSum;
                 if (!a.asleep) a.position += c.normal * (push * a.invMass);
                 if (!b.asleep) b.position -= c.normal * (push * b.invMass);
             }
         }
+    }
+
+    // --- contact begin events --------------------------------------------------
+    // A pair "touches" when the solver applied impulse through it. An event
+    // fires when a touching pair was not touching the previous step.
+    {
+        events_.clear();
+        pairKeys_.clear();
+        auto canonicalKey = [](BodyId a, BodyId b) {
+            BodyId lo = a < b ? a : b;
+            BodyId hi = a < b ? b : a;
+            return (uint64_t)lo << 32 | hi;
+        };
+        for (const Contact& c : contacts_) {
+            if (c.normalImpulse <= 1e-6f) continue;
+            pairKeys_.push_back(canonicalKey(c.a, c.b));
+        }
+        std::sort(pairKeys_.begin(), pairKeys_.end());
+        pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
+        for (uint64_t key : pairKeys_) {
+            if (std::binary_search(prevPairKeys_.begin(), prevPairKeys_.end(), key))
+                continue;
+            ContactEvent ev{(BodyId)(key >> 32), (BodyId)key, {}, {}, 0.0f};
+            for (const Contact& c : contacts_)
+                if (canonicalKey(c.a, c.b) == key && c.normalImpulse > ev.impulse) {
+                    ev.impulse = c.normalImpulse;
+                    ev.point = c.point;
+                    ev.normal = c.a == ev.a ? c.normal : -c.normal;
+                }
+            events_.push_back(ev);
+        }
+        prevPairKeys_ = pairKeys_;
     }
 
     // --- sleeping + persistent contacts for next frame ------------------------

@@ -161,6 +161,28 @@ LocalHit rayMesh(const Vec3& o, const Vec3& d, const Mesh& m,
     return best;
 }
 
+// Conservative-advancement raycast against any convex: march the ray point
+// forward by the GJK distance to the hull until touching (or past maxDist).
+LocalHit rayConvex(const Vec3& o, const Vec3& d, const Body& body,
+                   const MeshSoupView& soup, float maxDist) {
+    Convex hull = makeConvex(body, soup);
+    Convex probe{};
+    probe.kind = Convex::Point;
+    float t = 0.0f;
+    Vec3 lastNormal{};
+    for (int iter = 0; iter < 64; ++iter) {
+        probe.position = o + d * t;
+        GjkResult r = gjkDistance(probe, hull);
+        lastNormal = r.normal;
+        if (r.distance < 1e-4f) return {true, t, lastNormal};
+        float advance = dot(r.normal, -d);   // closing rate along the ray
+        if (advance < 1e-6f) return {false}; // moving away or parallel
+        t += r.distance / advance;
+        if (t > maxDist) return {false};
+    }
+    return {false};
+}
+
 } // namespace
 
 RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
@@ -179,6 +201,7 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
         case ShapeType::Plane:   h = rayPlane(origin, dir, b.planeNormal, b.planeOffset); break;
         case ShapeType::Mesh:    h = rayMesh(origin, dir, meshes_.meshes[b.meshIndex],
                                              soup, best.t); break;
+        case ShapeType::Hull:    h = rayConvex(origin, dir, b, soup, best.t); break;
         }
         if (h.hit && h.t < best.t) {
             best.hit = true;
@@ -208,7 +231,7 @@ void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) c
             Vec3 n;
             meshGapProbe(probe, b, soup, radius + 0.01f, gap, n);
         } else {
-            gap = gjkDistance(makeConvex(probe), makeConvex(b)).distance;
+            gap = gjkDistance(makeConvex(probe, soup), makeConvex(b, soup)).distance;
         }
         if (gap <= 0.0f) out.push_back(i);
     }

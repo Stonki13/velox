@@ -3,6 +3,7 @@
 #include <velox/velox.h>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 static int failures = 0;
@@ -286,6 +287,87 @@ static void testStack() {
     check(ok, "10-box tower (warm-started stack stays up)");
 }
 
+// 16. Convex hull: an octahedron dropped onto a bounded box must come to rest
+// on a face without sinking, and a raycast must hit it. The bounded pedestal
+// also catches hull-AABB regressions that a boundless plane cannot expose.
+static void testHull() {
+    velox::World w;
+    bool rejectedEmpty = false;
+    try { w.addConvexHull({}, {}, 1.0f); }
+    catch (const std::invalid_argument&) { rejectedEmpty = true; }
+    w.addStaticPlane({0, 1, 0}, 0.0f);
+    w.addBox({0, 0.5f, 0}, {5.0f, 0.5f, 5.0f}, 0.0f);
+    std::vector<velox::Vec3> octa = {
+        {0.6f, 0, 0}, {-0.6f, 0, 0}, {0, 0.6f, 0}, {0, -0.6f, 0}, {0, 0, 0.6f}, {0, 0, -0.6f}};
+    auto hull = w.addConvexHull({0, 2.0f, 0}, octa, 1.0f);
+    for (int i = 0; i < 600; ++i) w.step(1.0f / 60.0f);
+    const auto& b = w.body(hull);
+    // Pedestal top is y=1. A face/edge rest puts the center in (1.3, 1.6).
+    bool ok = rejectedEmpty && b.position.y > 1.25f && b.position.y < 1.65f &&
+              velox::length(b.velocity) < 0.1f;
+    auto hit = w.rayCast({b.position.x, 5, b.position.z}, {0, -1, 0}, 10.0f);
+    ok &= hit.hit && hit.body == hull;
+    check(ok, "convex hull vs box (broad phase, rest, raycast)");
+}
+
+// 17. Hinge motor: drives the door to its target angular speed.
+static void testMotor() {
+    velox::World w;
+    w.gravity = {0, 0, 0};
+    auto post = w.addBox({0, 2, 0}, {0.05f, 1.0f, 0.05f}, 0.0f);
+    auto door = w.addBox({0.55f, 2, 0}, {0.5f, 0.9f, 0.05f}, 2.0f);
+    auto j = w.addHingeJoint(post, door, {0.05f, 2, 0}, {0, 1, 0});
+    w.joint(j).enableMotor = true;
+    w.joint(j).motorSpeed = -3.0f; // door spins about +Y relative to post
+    w.joint(j).maxMotorTorque = 50.0f;
+    for (int i = 0; i < 240; ++i) w.step(1.0f / 60.0f);
+    float wy = w.body(door).angularVelocity.y;
+    check(std::fabs(wy - 3.0f) < 0.2f, "hinge motor (reaches target speed)");
+}
+
+// 18. Hinge limit: a motored door must stop at the limit angle.
+static void testLimit() {
+    velox::World w;
+    w.gravity = {0, 0, 0};
+    auto post = w.addBox({0, 2, 0}, {0.05f, 1.0f, 0.05f}, 0.0f);
+    auto door = w.addBox({0.55f, 2, 0}, {0.5f, 0.9f, 0.05f}, 2.0f);
+    auto j = w.addHingeJoint(post, door, {0.05f, 2, 0}, {0, 1, 0});
+    w.joint(j).enableMotor = true;
+    w.joint(j).motorSpeed = -2.0f;
+    w.joint(j).maxMotorTorque = 20.0f;
+    w.joint(j).enableLimit = true;
+    w.joint(j).lowerLimit = -2.0f;
+    w.joint(j).upperLimit = 1.0f; // ~57 degrees
+    float maxAngle = 0.0f;
+    for (int i = 0; i < 360; ++i) {
+        w.step(1.0f / 60.0f);
+        maxAngle = std::fmax(maxAngle, std::fabs(w.hingeAngle(j)));
+    }
+    // The motor pushes into the limit; the angle must never blow past it.
+    check(maxAngle < 1.15f && maxAngle > 0.85f, "hinge limit (motor stops at limit)");
+}
+
+// 19. Contact events: exactly one begin event when a ball lands, none while
+// it rests, and the event carries a sane impulse.
+static void testEvents() {
+    velox::World w;
+    auto floor = w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto ball = w.addSphere({0, 2.0f, 0}, 0.5f, 1.0f);
+    int began = 0;
+    float impulse = 0.0f;
+    for (int i = 0; i < 300; ++i) {
+        w.step(1.0f / 60.0f);
+        for (const auto& ev : w.contactEvents()) {
+            bool ours = (ev.a == ball && ev.b == floor) || (ev.a == floor && ev.b == ball);
+            if (ours) { ++began; impulse = std::fmax(impulse, ev.impulse); }
+        }
+    }
+    // Restitution can cause a couple of touch-bounce-touch cycles, but resting
+    // contact must not spam events every frame.
+    check(began >= 1 && began <= 6 && impulse > 0.0f,
+          "contact events (begin fires once per touch)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -302,6 +384,10 @@ int main() {
     testSleeping();
     testRaycast();
     testStack();
+    testHull();
+    testMotor();
+    testLimit();
+    testEvents();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

@@ -114,6 +114,7 @@ public:
         release(dMeshes_);
         release(dNodes_);
         release(dTriRefs_);
+        release(dHullPts_);
     }
 
     const char* name() const override { return "cuda"; }
@@ -152,7 +153,7 @@ public:
         }
         aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, n, dt, dAabbs_);
 
-        MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_};
+        MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_, dHullPts_};
         long long pairs = (long long)n * (n - 1) / 2;
         int threads = 256;
         long long blocks = (pairs + threads - 1) / threads;
@@ -308,14 +309,17 @@ private:
 
     void uploadMeshes(const MeshSoup& m) {
         // Static geometry: upload once, re-upload only if it grew.
-        if (m.vertices.size() == meshVerts_ && m.bvhNodes.size() == meshNodes_) return;
+        if (m.vertices.size() == meshVerts_ && m.bvhNodes.size() == meshNodes_ &&
+            m.hullPoints.size() == hullPts_) return;
         meshVerts_ = m.vertices.size();
         meshNodes_ = m.bvhNodes.size();
+        hullPts_ = m.hullPoints.size();
         upload(dVertices_, m.vertices);
         upload(dIndices_, m.indices);
         upload(dMeshes_, m.meshes);
         upload(dNodes_, m.bvhNodes);
         upload(dTriRefs_, m.bvhTriRefs);
+        upload(dHullPts_, m.hullPoints);
     }
 
     template <typename T>
@@ -353,6 +357,8 @@ private:
     Mesh* dMeshes_ = nullptr;
     BvhNode* dNodes_ = nullptr;
     uint32_t* dTriRefs_ = nullptr;
+    Vec3* dHullPts_ = nullptr;
+    size_t hullPts_ = ~size_t(0);
     size_t bodyCap_ = 0;
     size_t contactCap_ = 0;
     size_t meshVerts_ = ~size_t(0), meshNodes_ = ~size_t(0);

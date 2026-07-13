@@ -1,12 +1,13 @@
 # Velox
 
-**A fast, tunneling-proof 3D physics engine for games. C++17, GPU-ready.**
+**A fast, tunneling-resistant 3D physics engine for games. C++17, GPU-accelerated.**
 
 Velox (Latin: *swift*) is built around two core promises:
 
-1. **No clipping. Ever.** Continuous collision detection (CCD) is a first-class
-   citizen, not a bolted-on flag. Fast-moving bodies are swept through time, so
-   bullets don't pass through walls and cars don't fall through the floor.
+1. **High-speed tunneling prevention.** Continuous collision detection (CCD)
+   is a first-class citizen, not a bolted-on flag. Fast-moving bodies are swept
+   through time, so bullets don't pass through walls and cars don't fall
+   through the floor.
 2. **Blazingly fast.** The solver is designed data-oriented from day one so the
    hot loops can run on the GPU (CUDA / compute-shader backend) as well as
    wide-SIMD CPU.
@@ -26,8 +27,8 @@ still let extreme cases slip). Velox layers them:
 3. **Conservative-advancement safety net** — after integration, any pair that
    ended the step interpenetrating is rewound along its actual motion
    (rotation included) to the moment of first contact, using GJK distance as
-   the oracle. Tunneling is impossible by construction, at any linear or
-   angular speed.
+   the oracle. Supported collider paths are protected without a velocity
+   threshold, for both linear and angular motion.
 
 `examples/stress_demo` locks all of this in: 2 km/s bullets, grazing skims,
 a 125-sphere pile, 3 km/s head-on impacts, a 1.5 km/s spinning box, resting
@@ -52,32 +53,42 @@ the color count near the max contacts per body.
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 1.44 ms | 1.88 ms |
-| 2048-sphere rain | 6.53 ms | 2.95 ms |
-| 8192-sphere rain | 35.1 ms | **21.5 ms** |
-| 2048 spheres on 20k-triangle terrain | 16.8 ms | **7.6 ms** |
+| 512-sphere rain | 1.93 ms | **1.42 ms** |
+| 2048-sphere rain | 8.63 ms | **2.80 ms** |
+| 8192-sphere rain | **46.03 ms** | 66.76 ms |
+| 2048 spheres on 20k-triangle terrain | 23.26 ms | **8.63 ms** |
+
+These are a current local Release run on an RTX 5080. The GPU broad phase
+still scans the compact all-pairs matrix, so it becomes the bottleneck in the
+8192-body scene; replacing that path with a hierarchical GPU broad phase is
+the next major performance target.
 
 ## Solver
 
 Box2D-v3-style TGS: detection runs **once per step**, then several solver
-substeps re-evaluate every contact's live gap from current body positions.
-Sequential impulses with warm starting (accumulated impulses persist across
-frames via persistent contact matching), face-snapped box manifolds for
-deterministic stacking, split-impulse positional correction (penetration is
-resolved by translation, never by velocity bias — no energy injection), and
-whole-island sleeping. A 10-box tower stands still to sub-millimeter drift.
+substeps re-evaluate every contact's live gap from persistent local anchors and
+the bodies' current transforms. Sequential impulses with warm starting
+(accumulated impulses persist across frames via persistent contact matching),
+face-snapped box and convex-hull manifolds for deterministic stacking,
+split-impulse positional correction (penetration is resolved by translation,
+never by velocity bias — no energy injection), and whole-island sleeping. A
+10-box tower remains standing in the regression suite on both CPU and CUDA.
 
 ## Features
 
 - Full rigid body dynamics: linear + rotational (quaternions, world-space
   inverse inertia, contact torques)
-- Colliders: **sphere, box, capsule, static plane, static triangle mesh**
-- **Joints**: ball, distance, hinge (iterative impulses, 3x3 block solve for
-  anchors, Baumgarte stabilization)
+- Colliders: **sphere, box, capsule, dynamic convex hull, static plane, static
+  triangle mesh**
+- **Joints**: ball, distance, hinge, hinge motors and angular limits (iterative
+  impulses, 3x3 block solve for anchors, Baumgarte stabilization). Connected
+  bodies ignore each other by default; `Joint::collideConnected` opts back in.
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
   islands cost nothing and wake on impact
 - **Queries**: `rayCast` against every collider (BVH-accelerated for meshes),
   `overlapSphere`
+- **Contact events**: canonicalized pair-level begin events with representative
+  contact point, normal, and solved normal impulse
 - GJK narrow phase over support functions (one code path for all convex
   pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
 - **CUDA backend**: integration, narrow phase, and graph-colored contact
@@ -90,18 +101,19 @@ treat non-convex meshes.
 
 Roadmap:
 
-- [ ] Convex hull collider (the GJK path already supports it — needs the shape)
 - [ ] EPA for exact deep-penetration recovery (rarely hit thanks to PCS)
-- [ ] Joint motors and limits; cone/twist for ragdolls
+- [ ] Cone/twist joints for ragdolls
+- [ ] Hierarchical GPU broad phase (replace the current all-pairs scan)
 - [ ] Device-resident stepping (skip per-substep transfers when no joints)
-- [ ] Collision events/callbacks and filtering layers
+- [ ] End/persist contact callbacks and collision filtering layers
 
 ## Build
 
 ```bash
 cmake -B build
 cmake --build build
-./build/examples/bullet_demo   # proves the no-tunneling claim
+ctest --test-dir build -C Release --output-on-failure
+./build/examples/bullet_demo   # runs the high-speed CCD example
 ```
 
 ## Quick taste

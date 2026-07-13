@@ -11,6 +11,7 @@ struct MeshSoup {
     std::vector<Mesh> meshes;
     std::vector<BvhNode> bvhNodes;   // all meshes' BVHs, concatenated
     std::vector<uint32_t> bvhTriRefs; // leaf -> triangle number within its mesh
+    std::vector<Vec3> hullPoints;    // convex hull local-space points
 };
 
 // Raw-pointer view of MeshSoup, usable identically from host and device code.
@@ -20,11 +21,12 @@ struct MeshSoupView {
     const Mesh* meshes;
     const BvhNode* bvhNodes;
     const uint32_t* bvhTriRefs;
+    const Vec3* hullPoints;
 };
 
 inline MeshSoupView view(const MeshSoup& s) {
     return {s.vertices.data(), s.indices.data(), s.meshes.data(),
-            s.bvhNodes.data(), s.bvhTriRefs.data()};
+            s.bvhNodes.data(), s.bvhTriRefs.data(), s.hullPoints.data()};
 }
 
 // A speculative contact: generated while the pair is still separated, whenever
@@ -35,10 +37,12 @@ struct Contact {
     BodyId a, b;
     Vec3 normal;          // from b towards a
     Vec3 point;           // world-space contact point (torque arm for rotation)
+    Vec3 localAnchorA;    // contact anchor in A's local frame
+    Vec3 localAnchorB;    // contact anchor in B's local frame
     float gap;            // signed distance between surfaces at detection
-    float bias0;          // gap - dot(normal, posA - posB) at detection: lets the
-                          // solver evaluate the LIVE gap from current positions,
-                          // so one detection pass serves several solver substeps
+    float bias0;          // gap - dot(normal, anchorA - anchorB) at detection;
+                          // lets the solver evaluate the live translational and
+                          // rotational gap over several solver substeps
     float vn0;            // normal approach velocity at detection (for restitution)
     float normalImpulse;  // accumulated by the solver
     float tangentImpulse;

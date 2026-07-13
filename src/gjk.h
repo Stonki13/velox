@@ -1,5 +1,5 @@
 #pragma once
-#include "velox/body.h"
+#include "velox/backend.h"
 
 // Header-only, VELOX_HD: the exact same GJK runs on CPU and on the GPU.
 
@@ -10,12 +10,14 @@ namespace velox {
 // GJK cores from ever overlapping in practice; boxes and triangles have
 // radius 0.
 struct Convex {
-    enum Kind : uint8_t { Point, Segment, Box, Triangle } kind;
+    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull } kind;
     Vec3 position;      // world transform
     Quat orientation;
     Vec3 halfExtents;   // Box
     Vec3 segA, segB;    // Segment (world), Triangle uses segA/segB/triC
     Vec3 triC;
+    const Vec3* hullPts = nullptr; // Hull: local-space point cloud
+    uint32_t hullCount = 0;
     float radius;       // inflation
 
     VELOX_HD Vec3 support(const Vec3& dir) const {
@@ -37,12 +39,23 @@ struct Convex {
                        d.z >= 0 ? halfExtents.z : -halfExtents.z};
             return position + rotate(orientation, local);
         }
+        case Hull: {
+            Vec3 d = rotateInv(orientation, dir);
+            uint32_t best = 0;
+            float bestDot = dot(d, hullPts[0]);
+            for (uint32_t i = 1; i < hullCount; ++i) {
+                float t = dot(d, hullPts[i]);
+                if (t > bestDot) { bestDot = t; best = i; }
+            }
+            return position + rotate(orientation, hullPts[best]);
+        }
         }
         return position;
     }
 };
 
-VELOX_HD inline Convex makeConvex(const Body& b) {
+// soup provides hull point storage; pass {} when b cannot be a hull.
+VELOX_HD inline Convex makeConvex(const Body& b, const MeshSoupView& soup) {
     Convex c{};
     c.position = b.position;
     c.orientation = b.orientation;
@@ -62,6 +75,12 @@ VELOX_HD inline Convex makeConvex(const Body& b) {
     case ShapeType::Box:
         c.kind = Convex::Box;
         c.halfExtents = b.halfExtents;
+        c.radius = 0.0f;
+        break;
+    case ShapeType::Hull:
+        c.kind = Convex::Hull;
+        c.hullPts = soup.hullPoints + b.hullFirst;
+        c.hullCount = b.hullCount;
         c.radius = 0.0f;
         break;
     default: // Plane/Mesh are not convex volumes; callers handle them separately

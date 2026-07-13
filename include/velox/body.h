@@ -6,7 +6,7 @@ namespace velox {
 
 using BodyId = uint32_t;
 
-enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh };
+enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh, Hull };
 
 // Data-oriented body layout: plain structs in contiguous arrays so the same
 // data can be uploaded to a GPU backend unchanged.
@@ -30,6 +30,7 @@ struct Body {
     Vec3 planeNormal{0, 1, 0};  // Plane: dot(n, p) = planeOffset
     float planeOffset = 0.0f;
     uint32_t meshIndex = 0;     // Mesh: index into World's mesh storage
+    uint32_t hullFirst = 0, hullCount = 0; // Hull: local-space points in soup
 
     VELOX_HD bool isStatic() const { return invMass == 0.0f; }
 
@@ -43,6 +44,7 @@ struct Body {
 
     // Conservative bound on how far any surface point can move per second:
     // linear speed plus angular speed times the shape's bounding radius.
+    // For hulls, radius holds the bounding radius (set at creation).
     VELOX_HD float maxPointSpeed() const {
         float r = radius;
         if (shape == ShapeType::Box) r = length(halfExtents);

@@ -15,11 +15,24 @@ VELOX_HD inline Vec3 npPointVelocity(const Body& b, const Vec3& p) {
     return b.velocity + cross(b.angularVelocity, p - b.position);
 }
 
+VELOX_HD inline Vec3 contactAnchorWorld(const Body& b, const Vec3& localAnchor) {
+    return b.position + rotate(b.orientation, localAnchor);
+}
+
+VELOX_HD inline float contactLiveGap(const Body& a, const Body& b, const Contact& c) {
+    Vec3 pa = contactAnchorWorld(a, c.localAnchorA);
+    Vec3 pb = contactAnchorWorld(b, c.localAnchorB);
+    return c.bias0 + dot(c.normal, pa - pb);
+}
+
 // Re-applies the accumulated normal impulse carried over from the previous
 // frame (warm starting). Persistent contacts then converge in far fewer
 // iterations, which is what keeps tall stacks solid.
 VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
     if (c.normalImpulse <= 0.0f) return;
+    Vec3 pa = contactAnchorWorld(a, c.localAnchorA);
+    Vec3 pb = contactAnchorWorld(b, c.localAnchorB);
+    c.point = (pa + pb) * 0.5f;
     Vec3 impulse = c.normal * c.normalImpulse;
     if (!a.isStatic()) {
         a.velocity += impulse * a.invMass;
@@ -36,6 +49,9 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
 // CUDA solver (graph-colored parallel order). Static bodies are never
 // written, so contacts sharing only a static body may run concurrently.
 VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
+    Vec3 pa = contactAnchorWorld(a, c.localAnchorA);
+    Vec3 pb = contactAnchorWorld(b, c.localAnchorB);
+    c.point = (pa + pb) * 0.5f;
     Vec3 ra = c.point - a.position;
     Vec3 rb = c.point - b.position;
 
@@ -56,7 +72,7 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     // this is what lets several substeps reuse one detection pass), no
     // further. Penetration is fixed by the positional correction pass, never
     // by velocity bias (no energy gain).
-    float liveGap = c.bias0 + dot(c.normal, a.position - b.position);
+    float liveGap = c.bias0 + dot(c.normal, pa - pb);
     float target = liveGap > 0.0f ? -liveGap / dt : 0.0f;
     if (c.vn0 < -kRestitutionThreshold)
         target = vmax(target, -vmin(a.restitution, b.restitution) * c.vn0);
@@ -113,6 +129,7 @@ VELOX_HD inline void bodyAabb(const Body& b, float dt, Vec3& lo, Vec3& hi) {
     case ShapeType::Box:     ext = length(b.halfExtents); break;
     case ShapeType::Capsule: ext = b.capsuleHalfHeight + b.radius; break;
     case ShapeType::Sphere:  ext = b.radius; break;
+    case ShapeType::Hull:    ext = b.radius; break;
     default:                 ext = 0.0f; break; // plane/mesh handled separately
     }
     float reach = ext + b.maxPointSpeed() * dt + 1e-2f;
@@ -142,15 +159,37 @@ VELOX_HD inline void emit(const Body& a, const Body& b, BodyId ia, BodyId ib,
     float reach = (a.maxPointSpeed() + b.maxPointSpeed()) * dt + slop;
     if (gap > reach) return; // cannot touch this step
     float vn = dot(npPointVelocity(a, point) - npPointVelocity(b, point), normal);
-    float bias0 = gap - dot(normal, a.position - b.position);
-    out[n++] = {ia, ib, normal, point, gap, bias0, vn, 0.0f, 0.0f};
+    Vec3 localA = rotateInv(a.orientation, point - a.position);
+    Vec3 localB = rotateInv(b.orientation, point - b.position);
+    float bias0 = gap;
+    out[n++] = {ia, ib, normal, point, localA, localB, gap, bias0,
+                vn, 0.0f, 0.0f};
 }
 
 VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,
-                                 BodyId ic, BodyId ip, float dt,
-                                 Contact* out, int cap, int& n) {
+                                 BodyId ic, BodyId ip, const MeshSoupView& soup,
+                                 float dt, Contact* out, int cap, int& n) {
     const Vec3& pn = plane.planeNormal;
     switch (conv.shape) {
+    case ShapeType::Hull: {
+        // Up to 4 deepest hull vertices along the plane normal.
+        const Vec3* pts = soup.hullPoints + conv.hullFirst;
+        for (int pick = 0; pick < 4 && pick < (int)conv.hullCount; ++pick) {
+            float bestGap = 1e30f;
+            Vec3 bestP{};
+            for (uint32_t i = 0; i < conv.hullCount; ++i) {
+                Vec3 p = conv.position + rotate(conv.orientation, pts[i]);
+                float g = dot(pn, p) - plane.planeOffset;
+                bool taken = false;
+                for (int k = 0; k < n; ++k)
+                    if (out[k].a == ic && lengthSq(out[k].point - p) < 1e-8f) taken = true;
+                if (!taken && g < bestGap) { bestGap = g; bestP = p; }
+            }
+            if (bestGap > 0.1f) break; // rest are far from the plane
+            emit(conv, plane, ic, ip, pn, bestP, bestGap, dt, out, cap, n);
+        }
+        break;
+    }
     case ShapeType::Sphere:
         emit(conv, plane, ic, ip, pn, conv.position - pn * conv.radius,
              dot(pn, conv.position) - plane.planeOffset - conv.radius, dt, out, cap, n);
@@ -197,9 +236,51 @@ VELOX_HD inline void boxVertex(const Body& box, int i, Vec3& out) {
 }
 
 VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyId ia, BodyId ib,
+                                  const MeshSoupView& soup,
                                   float dt, Contact* out, int cap, int& n) {
-    Convex ca = makeConvex(a), cb = makeConvex(b);
+    Convex ca = makeConvex(a, soup), cb = makeConvex(b, soup);
     GjkResult r = gjkDistance(ca, cb);
+
+    // A single GJK witness is not a stable resting manifold for a hull face.
+    // Emit up to four hull vertices on the near-support plane. This keeps the
+    // response data-oriented (no face topology required) while giving both
+    // the sequential CPU solver and graph-colored GPU solver enough torque
+    // constraints to settle a face instead of repeatedly hitting one point.
+    if ((a.shape == ShapeType::Hull || b.shape == ShapeType::Hull) &&
+        r.distance < 0.05f) {
+        const bool hullIsA = a.shape == ShapeType::Hull;
+        const Body& hull = hullIsA ? a : b;
+        const Vec3* pts = soup.hullPoints + hull.hullFirst;
+        uint32_t selected[4]{};
+        int selectedCount = 0;
+        float reference = hullIsA ? dot(r.normal, cb.support(r.normal))
+                                  : dot(r.normal, ca.support(-r.normal));
+        for (int pick = 0; pick < 4 && pick < (int)hull.hullCount; ++pick) {
+            uint32_t best = 0;
+            float bestGap = 1e30f;
+            Vec3 bestPoint{};
+            bool found = false;
+            for (uint32_t i = 0; i < hull.hullCount; ++i) {
+                bool used = false;
+                for (int k = 0; k < selectedCount; ++k)
+                    if (selected[k] == i) used = true;
+                if (used) continue;
+                Vec3 p = hull.position + rotate(hull.orientation, pts[i]);
+                float gap = hullIsA ? dot(r.normal, p) - reference
+                                    : reference - dot(r.normal, p);
+                if (gap < bestGap) {
+                    best = i;
+                    bestGap = gap;
+                    bestPoint = p;
+                    found = true;
+                }
+            }
+            if (!found || bestGap > r.distance + 0.02f) break;
+            selected[selectedCount++] = best;
+            emit(a, b, ia, ib, r.normal, bestPoint, bestGap, dt, out, cap, n);
+        }
+        if (n > 0) return;
+    }
 
     if (a.shape == ShapeType::Box && b.shape == ShapeType::Box && r.distance < 0.05f) {
         // Between parallel box faces the GJK witness pair is ill-defined (any
@@ -209,8 +290,7 @@ VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyId ia, BodyI
         // snap the contact normal to it and build the manifold from vertices
         // against that face plane — deterministic geometry, no witness points.
         Vec3 nrm = r.normal;
-        float best = r.distance + 1e-4f;
-        bool face = false;
+        float best = -1e30f;
         for (int side = 0; side < 2; ++side) {
             const Body& box = side ? b : a;
             for (int ax = 0; ax < 3; ++ax) {
@@ -219,34 +299,44 @@ VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyId ia, BodyI
                                     ax == 2 ? 1.0f : 0.0f});
                 if (dot(axis, a.position - b.position) < 0.0f) axis = -axis;
                 float sep = dot(axis, ca.support(-axis) - cb.support(axis));
-                if (sep > best - 2e-3f && sep <= r.distance + 1e-3f) {
-                    best = sep; nrm = axis; face = true;
-                }
+                if (sep > best) { best = sep; nrm = axis; }
             }
         }
-        if (face) {
-            // Vertices of each box near the other's supporting plane,
-            // deduplicated (equal stacked boxes produce coincident vertices
-            // from both sides — emitting both doubles the impulse).
+        if (best < 0.05f) {
+            // Select one incident face. Emitting vertices from both boxes
+            // creates eight nearly duplicate constraints while speculative
+            // faces are still separated, biasing the sequential solver.
             float refB = dot(nrm, cb.support(nrm));   // B surface along +nrm
             float refA = dot(nrm, ca.support(-nrm));  // A surface along -nrm
-            Vec3 pts[16];
-            int np = 0;
-            auto addPoint = [&](const Vec3& v, float d) {
-                if (d >= r.distance + 0.02f || np >= 16) return;
-                for (int k = 0; k < np; ++k)
-                    if (lengthSq(pts[k] - v) < 1e-6f) return;
-                pts[np++] = v;
-                emit(a, b, ia, ib, nrm, v, d, dt, out, cap, n);
-            };
+            Vec3 ptsA[8], ptsB[8];
+            float gapsA[8], gapsB[8];
+            int countA = 0, countB = 0;
             for (int i = 0; i < 8; ++i) {
                 Vec3 v;
                 boxVertex(a, i, v);
-                addPoint(v, dot(nrm, v) - refB);
+                float gap = dot(nrm, v) - refB;
+                if (gap < best + 0.02f) {
+                    ptsA[countA] = v;
+                    gapsA[countA++] = gap;
+                }
                 boxVertex(b, i, v);
-                addPoint(v, refA - dot(nrm, v));
+                gap = refA - dot(nrm, v);
+                if (gap < best + 0.02f) {
+                    ptsB[countB] = v;
+                    gapsB[countB++] = gap;
+                }
             }
-            if (np > 0) return;
+            bool useA = countA >= countB;
+            int count = useA ? countA : countB;
+            const int balancedOrder[4] = {0, 3, 1, 2};
+            for (int k = 0; k < count && k < 4; ++k) {
+                int i = count >= 4 ? balancedOrder[k] : k;
+                float gap = useA ? gapsA[i] : gapsB[i];
+                Vec3 p = useA ? ptsA[i] - nrm * (gap * 0.5f)
+                              : ptsB[i] + nrm * (gap * 0.5f);
+                emit(a, b, ia, ib, nrm, p, gap, dt, out, cap, n);
+            }
+            if (count > 0) return;
         }
     }
 
@@ -259,7 +349,7 @@ VELOX_HD inline void meshConvex(const Body& conv, const Body& meshBody,
     const Mesh& m = soup.meshes[meshBody.meshIndex];
     Vec3 lo, hi;
     bodyAabb(conv, dt, lo, hi);
-    Convex cc = makeConvex(conv);
+    Convex cc = makeConvex(conv, soup);
 
     // Iterative BVH traversal with an explicit stack (device-friendly).
     uint32_t stack[48];
@@ -291,7 +381,8 @@ VELOX_HD inline void meshConvex(const Body& conv, const Body& meshBody,
 } // namespace np_detail
 
 VELOX_HD inline bool isConvexVolume(ShapeType t) {
-    return t == ShapeType::Sphere || t == ShapeType::Box || t == ShapeType::Capsule;
+    return t == ShapeType::Sphere || t == ShapeType::Box ||
+           t == ShapeType::Capsule || t == ShapeType::Hull;
 }
 
 // Narrow phase for one pair; returns the number of contacts written to out
@@ -302,11 +393,11 @@ VELOX_HD inline int collidePair(const Body& a, const Body& b, BodyId ia, BodyId 
     using namespace np_detail;
     int n = 0;
     if (isConvexVolume(a.shape) && isConvexVolume(b.shape))
-        convexConvex(a, b, ia, ib, dt, out, cap, n);
+        convexConvex(a, b, ia, ib, soup, dt, out, cap, n);
     else if (isConvexVolume(a.shape) && b.shape == ShapeType::Plane)
-        planeConvex(a, b, ia, ib, dt, out, cap, n);
+        planeConvex(a, b, ia, ib, soup, dt, out, cap, n);
     else if (a.shape == ShapeType::Plane && isConvexVolume(b.shape))
-        planeConvex(b, a, ib, ia, dt, out, cap, n);
+        planeConvex(b, a, ib, ia, soup, dt, out, cap, n);
     else if (isConvexVolume(a.shape) && b.shape == ShapeType::Mesh)
         meshConvex(a, b, ia, ib, soup, dt, out, cap, n);
     else if (a.shape == ShapeType::Mesh && isConvexVolume(b.shape))
@@ -323,7 +414,7 @@ VELOX_HD inline void meshGapProbe(const Body& conv, const Body& meshBody,
     const Mesh& m = soup.meshes[meshBody.meshIndex];
     Vec3 r{searchRadius, searchRadius, searchRadius};
     Vec3 lo = conv.position - r, hi = conv.position + r;
-    Convex cc = makeConvex(conv);
+    Convex cc = makeConvex(conv, soup);
 
     uint32_t stack[48];
     int sp = 0;

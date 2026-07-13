@@ -6,6 +6,14 @@
 
 namespace velox {
 
+// A body pair that began touching this step (fires once per pair; fires again
+// only after the pair separates and re-touches).
+struct ContactEvent {
+    BodyId a, b;
+    Vec3 point, normal;   // representative contact; normal points from b to a
+    float impulse;        // largest accumulated normal impulse in the manifold
+};
+
 struct RayHit {
     bool hit = false;
     BodyId body = 0;
@@ -30,6 +38,9 @@ public:
     BodyId addSphere(Vec3 position, float radius, float mass);
     BodyId addBox(Vec3 position, Vec3 halfExtents, float mass);
     BodyId addCapsule(Vec3 position, float radius, float halfHeight, float mass);
+    // Convex hull from a local-space point cloud (points should already be on
+    // the hull; interior points only cost support-function time).
+    BodyId addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass);
     BodyId addStaticPlane(Vec3 normal, float offset);
     // Static triangle mesh (level geometry). vertices: xyz triples,
     // indices: 3 per triangle.
@@ -44,6 +55,11 @@ public:
     JointId addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     JointId addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB);
     JointId addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
+    Joint& joint(JointId id) { return joints_[id]; }        // configure motors/limits
+    float hingeAngle(JointId id) const;                     // radians, 0 at creation
+
+    // Contact begin events from the most recent step().
+    const std::vector<ContactEvent>& contactEvents() const { return events_; }
 
     // --- sleeping -----------------------------------------------------------
     // Bodies whose island stays below the motion threshold for a while are
@@ -75,6 +91,8 @@ private:
     std::vector<Contact> prevContacts_;  // sorted by pair key (warm starting)
     std::vector<uint32_t> unionParent_;
     std::vector<float> islandTimer_;
+    std::vector<ContactEvent> events_;
+    std::vector<uint64_t> prevPairKeys_;
     MeshSoup meshes_;
     std::unique_ptr<Backend> backend_;
 };
