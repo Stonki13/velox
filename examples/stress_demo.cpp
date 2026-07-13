@@ -1235,6 +1235,45 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
+// 38. CPU integration and narrow phase may execute on persistent workers, but
+// pair-range merging preserves the exact serial contact order and trajectory.
+static void testDeterministicCpuWorkers() {
+    velox::World serial(velox::BackendType::Cpu);
+    velox::World parallel(velox::BackendType::Cpu);
+    serial.setWorkerCount(1);
+    parallel.setWorkerCount(4);
+    std::vector<velox::BodyId> serialBodies, parallelBodies;
+    serial.addStaticPlane({0, 1, 0}, 0.0f);
+    parallel.addStaticPlane({0, 1, 0}, 0.0f);
+    for (int i = 0; i < 512; ++i) {
+        int x = i % 16, z = i / 16;
+        velox::Vec3 position{(x - 8) * 2.0f, 0.5f, (z - 16) * 2.0f};
+        serialBodies.push_back(serial.addSphere(position, 0.5f, 1.0f));
+        parallelBodies.push_back(parallel.addSphere(position, 0.5f, 1.0f));
+    }
+    for (int i = 0; i < 3; ++i) {
+        serial.step(1.0f / 60.0f);
+        parallel.step(1.0f / 60.0f);
+    }
+    bool ok = serial.workerCount() == 1 && parallel.workerCount() == 4 &&
+              serial.lastStepStats().generatedContacts ==
+                  parallel.lastStepStats().generatedContacts;
+    for (size_t i = 0; i < serialBodies.size() && ok; ++i) {
+        const auto& a = serial.body(serialBodies[i]);
+        const auto& b = parallel.body(parallelBodies[i]);
+        ok &= velox::length(a.position - b.position) < 1e-7f &&
+              velox::length(a.velocity - b.velocity) < 1e-7f &&
+              velox::length(a.angularVelocity - b.angularVelocity) < 1e-7f &&
+              std::fabs(a.orientation.x - b.orientation.x) < 1e-7f &&
+              std::fabs(a.orientation.y - b.orientation.y) < 1e-7f &&
+              std::fabs(a.orientation.z - b.orientation.z) < 1e-7f &&
+              std::fabs(a.orientation.w - b.orientation.w) < 1e-7f;
+    }
+    parallel.setWorkerCount(2);
+    ok &= parallel.workerCount() == 2;
+    check(ok, "CPU workers (parallel integration/narrow phase, serial replay)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1273,6 +1312,7 @@ int main() {
     testBreakableJoints();
     testWorldSnapshots();
     testStepStats();
+    testDeterministicCpuWorkers();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

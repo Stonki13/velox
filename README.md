@@ -68,6 +68,13 @@ large scenes use GPU sweep-and-prune, overflow-safe candidate compaction, and
 a fully parallel narrow-phase pass. The measured crossover is 4096 bodies;
 the 8192-body all-pairs reference path takes 183.94 ms instead of 51.86 ms.
 
+The CPU backend uses a persistent worker pool for independent body integration
+and deterministic narrow-phase pair batches. `World::setWorkerCount(0)` selects
+hardware concurrency; `1` provides a serial reference. Contact batches are
+merged in original broad-phase order, so worker count does not change solver
+ordering or simulation results. The sequential-impulse solve itself remains
+serial on CPU; CUDA uses conflict-free graph coloring for that stage.
+
 ## Solver
 
 Box2D-v3-style TGS: detection runs **once per step**, then several solver

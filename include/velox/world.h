@@ -115,6 +115,8 @@ public:
     explicit World(BackendType type = BackendType::Auto);
 
     const char* backendName() const;
+    void setWorkerCount(uint32_t count) { backend_->setWorkerCount(count); }
+    uint32_t workerCount() const { return backend_->workerCount(); }
 
     Vec3 gravity{0, -9.81f, 0};
 

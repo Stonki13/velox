@@ -2,9 +2,11 @@
 //   A) N-sphere rain into a walled floor (dense dynamic-dynamic contact)
 //   B) sphere rain onto a procedurally bumpy triangle-mesh terrain (BVH)
 #include <velox/velox.h>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 using Clock = std::chrono::high_resolution_clock;
@@ -59,18 +61,32 @@ static void sceneMesh(velox::World& w, int n, int grid) {
     std::printf("  (terrain: %d triangles)\n", (int)idx.size() / 3);
 }
 
-int main() {
-    const int steps = 120;
+int main(int argc, char** argv) {
+    const int steps = argc > 1 ? std::max(1, std::atoi(argv[1])) : 120;
     std::printf("Velox benchmark — ms per step, %d steps, 60 Hz\n\n", steps);
+
+    struct Configuration {
+        velox::BackendType backend;
+        uint32_t workers;
+        const char* label;
+    };
+    const Configuration configurations[] = {
+        {velox::BackendType::Cpu, 1, "cpu-1"},
+        {velox::BackendType::Cpu, 0, "cpu-auto"},
+        {velox::BackendType::Auto, 0, "auto"}};
 
     for (int n : {512, 2048, 8192}) {
         std::printf("Scene A: %d-sphere rain\n", n);
-        for (auto type : {velox::BackendType::Cpu, velox::BackendType::Auto}) {
+        for (const Configuration& configuration : configurations) {
             try {
-                velox::World w(type);
+                velox::World w(configuration.backend);
+                if (configuration.backend == velox::BackendType::Cpu)
+                    w.setWorkerCount(configuration.workers);
                 sceneRain(w, n);
                 float ms = runScene(w, steps);
-                std::printf("  %-5s %8.3f ms/step\n", w.backendName(), ms);
+                std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
+                            configuration.label, w.backendName(),
+                            w.workerCount(), ms);
             } catch (const std::exception& e) {
                 std::printf("  (%s)\n", e.what());
             }
@@ -79,12 +95,16 @@ int main() {
 
     for (int n : {2048}) {
         std::printf("Scene B: %d spheres on mesh terrain\n", n);
-        for (auto type : {velox::BackendType::Cpu, velox::BackendType::Auto}) {
+        for (const Configuration& configuration : configurations) {
             try {
-                velox::World w(type);
+                velox::World w(configuration.backend);
+                if (configuration.backend == velox::BackendType::Cpu)
+                    w.setWorkerCount(configuration.workers);
                 sceneMesh(w, n, 100);
                 float ms = runScene(w, steps);
-                std::printf("  %-5s %8.3f ms/step\n", w.backendName(), ms);
+                std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
+                            configuration.label, w.backendName(),
+                            w.workerCount(), ms);
             } catch (const std::exception& e) {
                 std::printf("  (%s)\n", e.what());
             }

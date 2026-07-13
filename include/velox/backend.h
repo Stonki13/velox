@@ -104,6 +104,9 @@ public:
     virtual void fetchImpulses(std::vector<Contact>&) {}
     // Host state was restored or replaced; discard any backend-side mirrors.
     virtual void invalidateCaches() {}
+    // CPU backend: 0 selects hardware concurrency. GPU backends report 0.
+    virtual void setWorkerCount(uint32_t) {}
+    virtual uint32_t workerCount() const { return 0; }
 };
 
 Backend* createCpuBackend();
