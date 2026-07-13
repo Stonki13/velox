@@ -126,6 +126,9 @@ closed 3D polytope cannot exist.
   and event phase while invalidating CPU/CUDA backend caches for exact replay
 - **Frame diagnostics**: body/awake/contact/joint workload counters plus wall
   timings for setup, collision detection, solving, CCD recovery, and finalization
+- **Debug drawing**: renderer-agnostic colored line lists for collider
+  wireframes, compound children, mesh triangles, AABBs, contact normals, and
+  joint anchors/axes with independently selectable flags
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
   islands cost nothing and wake on impact
 - **Queries**: symmetrically filtered raycasts, sphere/box/capsule/convex-hull

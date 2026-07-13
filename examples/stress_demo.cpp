@@ -1274,6 +1274,49 @@ static void testDeterministicCpuWorkers() {
     check(ok, "CPU workers (parallel integration/narrow phase, serial replay)");
 }
 
+// 39. Debug geometry is renderer-agnostic and must safely traverse every
+// internal storage kind while allowing shapes, AABBs, contacts, and joints to
+// be requested independently.
+static void testDebugLines() {
+    velox::World w;
+    auto plane = w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto box = w.addBox({0, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    auto anchor = w.addSphere({3, 3, 0}, 0.2f, 0.0f);
+    auto capsule = w.addCapsule({3, 2, 0}, 0.3f, 0.6f, 1.0f);
+    w.addDistanceJoint(anchor, capsule, {3, 3, 0}, {3, 2, 0});
+    w.addCylinder({-3, 2, 0}, 0.4f, 0.6f, 1.0f);
+    w.addCone({-5, 2, 0}, 0.5f, 1.2f, 1.0f);
+    std::vector<velox::Vec3> hull = {
+        {-0.4f,-0.4f,-0.4f}, {0.4f,-0.4f,-0.4f},
+        {0,0.4f,-0.4f}, {0,0,0.4f}};
+    w.addConvexHull({5, 2, 0}, hull, 1.0f);
+    velox::CompoundShape child;
+    child.shape = velox::ShapeType::Sphere;
+    child.localPosition = {0.5f, 0, 0};
+    child.radius = 0.25f;
+    w.addCompound({7, 2, 0}, {child}, 1.0f);
+    w.addStaticMesh({{-1,0,3}, {1,0,3}, {0,1,3}}, {0,1,2});
+    w.step(1.0f / 60.0f);
+
+    std::vector<velox::DebugLine> lines;
+    w.debugLines(lines);
+    bool ok = lines.size() > 100;
+    for (const auto& line : lines)
+        ok &= std::isfinite(line.a.x) && std::isfinite(line.a.y) &&
+              std::isfinite(line.a.z) && std::isfinite(line.b.x) &&
+              std::isfinite(line.b.y) && std::isfinite(line.b.z);
+    w.debugLines(lines, velox::DebugDrawContacts);
+    ok &= !lines.empty();
+    w.debugLines(lines, velox::DebugDrawJoints);
+    ok &= !lines.empty();
+    w.debugLines(lines, velox::DebugDrawAabbs);
+    ok &= lines.size() >= 12;
+    lines.push_back({});
+    w.debugLines(lines, 0);
+    ok &= lines.empty() && w.isValid(plane) && w.isValid(box);
+    check(ok, "debug lines (shapes, AABBs, contacts, joints, flags)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1313,6 +1356,7 @@ int main() {
     testWorldSnapshots();
     testStepStats();
     testDeterministicCpuWorkers();
+    testDebugLines();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

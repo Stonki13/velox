@@ -49,6 +49,20 @@ struct ShapeCastHit {
     Vec3 point, normal; // normal points from the hit body toward the cast shape
 };
 
+struct DebugLine {
+    Vec3 a, b;
+    uint32_t color = 0xffffffffu; // 0xRRGGBBAA
+};
+
+enum DebugDrawFlags : uint32_t {
+    DebugDrawShapes = 1u << 0,
+    DebugDrawAabbs = 1u << 1,
+    DebugDrawContacts = 1u << 2,
+    DebugDrawJoints = 1u << 3,
+    DebugDrawAll = DebugDrawShapes | DebugDrawAabbs |
+                   DebugDrawContacts | DebugDrawJoints
+};
+
 struct ContactModifyData {
     BodyId a, b;
     Vec3 point, normal;
@@ -225,6 +239,8 @@ public:
     ShapeCastHit convexHullCast(Vec3 center, const std::vector<Vec3>& points,
                                 Quat orientation, Vec3 direction, float maxDist,
                                 const QueryFilter& filter = {}) const;
+    void debugLines(std::vector<DebugLine>& out,
+                    uint32_t flags = DebugDrawAll) const;
 
     // Advances the simulation using Predictive Contact Sweeping: speculative
     // contacts solved iteratively, backed by a conservative-advancement sweep
