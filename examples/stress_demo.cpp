@@ -963,6 +963,75 @@ static void testMaterialsAndContactModification() {
           "contact modification (handles, override, disable, validation)");
 }
 
+// 33. Fixed joints preserve a complete relative frame. Prismatic joints keep
+// two linear and all three angular degrees constrained while leaving signed
+// translation along the configured axis available to limits and a force motor.
+static void testFixedAndPrismaticJoints() {
+    velox::World fixed;
+    auto fixedBase = fixed.addBox({0, 2, 0}, {0.25f, 0.25f, 0.25f}, 0.0f);
+    auto welded = fixed.addBox({1, 2, 0}, {0.4f, 0.2f, 0.3f}, 1.0f);
+    fixed.setTransform(welded, {1, 2, 0}, velox::fromAxisAngle({0, 0, 1}, 0.35f));
+    velox::Vec3 initialDirection = velox::rotate(fixed.body(welded).orientation,
+                                                  {1, 0, 0});
+    auto fixedJoint = fixed.addFixedJoint(fixedBase, welded, {0.5f, 2, 0});
+    fixed.setLinearVelocity(welded, {5, -3, 2});
+    fixed.setAngularVelocity(welded, {4, 5, 6});
+    for (int i = 0; i < 180; ++i) fixed.step(1.0f / 60.0f);
+    velox::Vec3 finalDirection = velox::rotate(fixed.body(welded).orientation,
+                                                {1, 0, 0});
+    bool fixedOk = velox::length(fixed.body(welded).position -
+                                 velox::Vec3{1, 2, 0}) < 0.04f &&
+                   velox::length(finalDirection - initialDirection) < 0.04f &&
+                   fixed.isValid(fixedJoint);
+
+    velox::World freeSlider;
+    freeSlider.gravity = {0, 0, 0};
+    auto rail = freeSlider.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto carriage = freeSlider.addBox({}, {0.3f, 0.3f, 0.3f}, 1.0f);
+    auto freeJoint = freeSlider.addPrismaticJoint(rail, carriage, {}, {1, 0, 0});
+    freeSlider.setLinearVelocity(carriage, {3, 5, 2});
+    freeSlider.setAngularVelocity(carriage, {3, 4, 5});
+    for (int i = 0; i < 60; ++i) freeSlider.step(1.0f / 60.0f);
+    float freeTravel = freeSlider.prismaticTranslation(freeJoint);
+    velox::Vec3 freePosition = freeSlider.body(carriage).position;
+    velox::Vec3 freeAxis = velox::rotate(freeSlider.body(carriage).orientation,
+                                         {1, 0, 0});
+    bool freeOk = freeTravel > 2.5f && std::fabs(freePosition.y) < 0.03f &&
+                  std::fabs(freePosition.z) < 0.03f &&
+                  velox::length(freeAxis - velox::Vec3{1, 0, 0}) < 0.03f;
+
+    velox::World powered;
+    powered.gravity = {0, 0, 0};
+    auto poweredRail = powered.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto poweredCarriage = powered.addBox({}, {0.3f, 0.3f, 0.3f}, 1.0f);
+    auto poweredJoint = powered.addPrismaticJoint(
+        poweredRail, poweredCarriage, {}, {1, 0, 0});
+    auto& slider = powered.joint(poweredJoint);
+    slider.enableMotor = true;
+    slider.motorSpeed = 4.0f;
+    slider.maxMotorForce = 100.0f;
+    slider.enableLimit = true;
+    slider.lowerLimit = -1.0f;
+    slider.upperLimit = 2.0f;
+    for (int i = 0; i < 12; ++i) powered.step(1.0f / 60.0f);
+    bool motorOk = powered.body(poweredCarriage).velocity.x > 3.5f;
+    for (int i = 0; i < 120; ++i) powered.step(1.0f / 60.0f);
+    float limitedTravel = powered.prismaticTranslation(poweredJoint);
+    bool limitOk = limitedTravel >= -1.03f && limitedTravel <= 2.03f;
+
+    bool validationOk = throwsException([&] {
+        freeSlider.addPrismaticJoint(rail, carriage, {}, {});
+    });
+    validationOk &= throwsException([&] {
+        (void)fixed.prismaticTranslation(fixedJoint);
+    });
+    freeSlider.joint(freeJoint).localAxisA = {};
+    validationOk &= throwsException([&] { freeSlider.step(1.0f / 60.0f); });
+    check(fixedOk, "fixed joint (anchor and complete relative frame)");
+    check(freeOk && motorOk && limitOk && validationOk,
+          "prismatic joint (free axis, motor, limits, validation)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -996,6 +1065,7 @@ int main() {
     testCylinderConeAndHeightfield();
     testFilteredQueriesAndShapeCasts();
     testMaterialsAndContactModification();
+    testFixedAndPrismaticJoints();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

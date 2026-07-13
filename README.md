@@ -94,10 +94,11 @@ closed 3D polytope cannot exist.
   dynamic convex hull, static plane, static triangle mesh, and validated static
   heightfield**, plus locally transformed convex compound bodies under one
   rigid-body handle
-- **Joints**: ball, distance, hinge, and cone/twist; hinge motors, hinge limits,
-  and independent ragdoll swing/twist limits (iterative impulses, 3x3 block
-  solve for anchors, Baumgarte stabilization). Connected bodies ignore each
-  other by default; `Joint::collideConnected` opts back in.
+- **Joints**: ball, distance, hinge, cone/twist, fixed, and prismatic. Hinges
+  support torque motors and angle limits; prismatic joints support force motors
+  and signed translation limits; ragdolls have independent swing/twist limits
+  (iterative impulses, 3x3 block solves, Baumgarte stabilization). Connected
+  bodies ignore each other by default; `Joint::collideConnected` opts back in.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
   and torques, point impulses, per-body damping and gravity scaling
 - **Materials**: average/geometric/minimum/multiply/maximum combine modes,

@@ -18,7 +18,9 @@ struct JointId {
 inline bool operator==(JointId a, JointId b) { return a.value == b.value; }
 inline bool operator!=(JointId a, JointId b) { return !(a == b); }
 
-enum class JointType : uint8_t { Ball, Distance, Hinge, ConeTwist };
+enum class JointType : uint8_t {
+    Ball, Distance, Hinge, ConeTwist, Fixed, Prismatic
+};
 
 // Joints connect two bodies (b may be a static body). Anchors and axes are
 // stored in each body's local frame and solved with iterative impulses plus
@@ -27,17 +29,18 @@ struct Joint {
     JointType type;
     BodyIndex a, b;
     Vec3 localAnchorA, localAnchorB;
-    Vec3 localAxisA{0, 1, 0}, localAxisB{0, 1, 0}; // Hinge
-    Vec3 localRefA{1, 0, 0}, localRefB{1, 0, 0};   // Hinge angle reference (perp to axis)
+    Vec3 localAxisA{0, 1, 0}, localAxisB{0, 1, 0}; // Hinge/slider/frame axis
+    Vec3 localRefA{1, 0, 0}, localRefB{1, 0, 0};   // Perpendicular/frame reference
     float restLength = 0.0f;                       // Distance
     bool collideConnected = false;                 // Ignore contacts between linked bodies
 
     // Hinge motor: drives the relative angular velocity about the axis.
     bool enableMotor = false;
-    float motorSpeed = 0.0f;      // rad/s, positive = A relative to B about the axis
+    float motorSpeed = 0.0f;      // Hinge: rad/s A vs B; prismatic: m/s B vs A
     float maxMotorTorque = 0.0f;  // N*m budget
+    float maxMotorForce = 0.0f;   // Prismatic motor N budget
 
-    // Hinge limit: clamps the joint angle (radians, measured at creation = 0).
+    // Hinge angle (radians) or prismatic translation (meters), both zero at creation.
     bool enableLimit = false;
     float lowerLimit = 0.0f, upperLimit = 0.0f;
 

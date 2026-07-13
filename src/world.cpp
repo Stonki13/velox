@@ -20,6 +20,10 @@ bool validCombineMode(MaterialCombineMode mode) {
     return (uint8_t)mode <= (uint8_t)MaterialCombineMode::Maximum;
 }
 
+bool validJointType(JointType type) {
+    return (uint8_t)type <= (uint8_t)JointType::Prismatic;
+}
+
 void requireFiniteVec(const Vec3& value, const char* message) {
     if (!finiteVec(value)) throw std::invalid_argument(message);
 }
@@ -824,6 +828,49 @@ JointId World::addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worl
     return addJoint(j);
 }
 
+JointId World::addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchor, "velox: fixed-joint anchor must be finite");
+    Joint j;
+    j.type = JointType::Fixed;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchor - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, {1, 0, 0});
+    j.localAxisB = rotateInv(bodies_[ib].orientation, {1, 0, 0});
+    j.localRefA = rotateInv(bodies_[ia].orientation, {0, 1, 0});
+    j.localRefB = rotateInv(bodies_[ib].orientation, {0, 1, 0});
+    return addJoint(j);
+}
+
+JointId World::addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor,
+                                 Vec3 worldAxis) {
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchor, "velox: prismatic-joint anchor must be finite");
+    requireFiniteVec(worldAxis, "velox: prismatic-joint axis must be finite");
+    if (lengthSq(worldAxis) < 1e-12f)
+        throw std::invalid_argument("velox: prismatic-joint axis must be non-zero");
+    Vec3 axis = normalize(worldAxis);
+    Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    ref = normalize(cross(axis, ref));
+    Joint j;
+    j.type = JointType::Prismatic;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchor - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, axis);
+    j.localAxisB = rotateInv(bodies_[ib].orientation, axis);
+    j.localRefA = rotateInv(bodies_[ia].orientation, ref);
+    j.localRefB = rotateInv(bodies_[ib].orientation, ref);
+    return addJoint(j);
+}
+
 float World::hingeAngle(JointId id) const {
     const Joint& j = joint(id);
     if (j.type != JointType::Hinge)
@@ -859,6 +906,19 @@ float World::coneTwistAngle(JointId id) const {
     refB = normalize(refB - axis * dot(refB, axis));
     if (lengthSq(refA) < 1e-12f || lengthSq(refB) < 1e-12f) return 0.0f;
     return std::atan2(dot(cross(refA, refB), axis), dot(refA, refB));
+}
+
+float World::prismaticTranslation(JointId id) const {
+    const Joint& j = joint(id);
+    if (j.type != JointType::Prismatic)
+        throw std::invalid_argument(
+            "velox: prismaticTranslation requires a prismatic joint");
+    const Body& a = bodies_[j.a];
+    const Body& b = bodies_[j.b];
+    Vec3 pa = a.position + rotate(a.orientation, j.localAnchorA);
+    Vec3 pb = b.position + rotate(b.orientation, j.localAnchorB);
+    Vec3 axis = normalize(rotate(a.orientation, j.localAxisA));
+    return dot(pb - pa, axis);
 }
 
 void World::wake(BodyId id) {
@@ -976,6 +1036,26 @@ void applyImpulse(Body& x, const Vec3& r, const Vec3& P, float sign) {
     x.angularVelocity += x.invInertiaMul(cross(r, P)) * sign;
 }
 
+Mat3 angularMass(const Body& a, const Body& b) {
+    auto col = [&](Vec3 e) { return a.invInertiaMul(e) + b.invInertiaMul(e); };
+    return {col({1, 0, 0}), col({0, 1, 0}), col({0, 0, 1})};
+}
+
+void solveAngularFrame(const Joint& j, Body& a, Body& b, float biasScale) {
+    Vec3 xA = normalize(rotate(a.orientation, j.localAxisA));
+    Vec3 xB = normalize(rotate(b.orientation, j.localAxisB));
+    Vec3 yA = normalize(rotate(a.orientation, j.localRefA));
+    Vec3 yB = normalize(rotate(b.orientation, j.localRefB));
+    Vec3 zA = cross(xA, yA);
+    Vec3 zB = cross(xB, yB);
+    Vec3 error = (cross(xB, xA) + cross(yB, yA) + cross(zB, zA)) * 0.5f;
+    Vec3 relativeW = a.angularVelocity - b.angularVelocity;
+    Vec3 impulse = mul(inverse(angularMass(a, b)),
+                       -(relativeW + error * biasScale));
+    if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(impulse);
+    if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(impulse);
+}
+
 // Signed gap and contact normal (from B towards A) between two bodies with
 // their transforms overridden — the distance oracle for conservative
 // advancement.
@@ -1081,6 +1161,72 @@ void World::solveJoints(float dt) {
                 float lambda = -(dot(vel, n) + bias) / k;
                 applyImpulse(a, ra, n * lambda, +1.0f);
                 applyImpulse(b, rb, n * lambda, -1.0f);
+                break;
+            }
+            case JointType::Fixed: {
+                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
+                applyImpulse(a, ra, P, +1.0f);
+                applyImpulse(b, rb, P, -1.0f);
+                solveAngularFrame(j, a, b, kBeta / dt);
+                break;
+            }
+            case JointType::Prismatic: {
+                Vec3 axis = normalize(rotate(a.orientation, j.localAxisA));
+                Vec3 ref = rotate(a.orientation, j.localRefA);
+                Vec3 t1 = normalize(ref - axis * dot(ref, axis));
+                if (lengthSq(t1) < 1e-12f) {
+                    ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+                    t1 = normalize(cross(axis, ref));
+                }
+                Vec3 t2 = cross(axis, t1);
+                Mat3 pointK = pointMass(a, b, ra, rb);
+                Vec3 error = pa - pb;
+                for (Vec3 t : {t1, t2}) {
+                    float k = dot(t, mul(pointK, t));
+                    if (k <= 0.0f) continue;
+                    float lambda = -(dot(vel, t) + dot(error, t) * (kBeta / dt)) / k;
+                    applyImpulse(a, ra, t * lambda, +1.0f);
+                    applyImpulse(b, rb, t * lambda, -1.0f);
+                    vel = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+                }
+                solveAngularFrame(j, a, b, kBeta / dt);
+
+                float kAxis = dot(axis, mul(pointK, axis));
+                if (kAxis > 0.0f) {
+                    float axisSpeed = dot(anchorVelocity(b, rb) -
+                                          anchorVelocity(a, ra), axis);
+                    if (j.enableMotor) {
+                        float lambda = (j.motorSpeed - axisSpeed) / kAxis;
+                        float maxImpulse = j.maxMotorForce * dt;
+                        float oldImpulse = j.motorImpulse;
+                        j.motorImpulse = vclamp(oldImpulse + lambda,
+                                                -maxImpulse, maxImpulse);
+                        lambda = j.motorImpulse - oldImpulse;
+                        applyImpulse(a, ra, axis * lambda, -1.0f);
+                        applyImpulse(b, rb, axis * lambda, +1.0f);
+                        axisSpeed = dot(anchorVelocity(b, rb) -
+                                        anchorVelocity(a, ra), axis);
+                    }
+                    if (j.enableLimit) {
+                        float translation = dot(pb - pa, axis);
+                        float lambda = 0.0f;
+                        float oldImpulse = j.limitImpulse;
+                        if (translation < j.lowerLimit) {
+                            float bias = (translation - j.lowerLimit) * (kBeta / dt);
+                            lambda = -(axisSpeed + bias) / kAxis;
+                            j.limitImpulse = vmax(0.0f, oldImpulse + lambda);
+                            lambda = j.limitImpulse - oldImpulse;
+                        } else if (translation > j.upperLimit) {
+                            float bias = (translation - j.upperLimit) * (kBeta / dt);
+                            lambda = -(axisSpeed + bias) / kAxis;
+                            j.limitImpulse = vmin(0.0f, oldImpulse + lambda);
+                            lambda = j.limitImpulse - oldImpulse;
+                        }
+                        applyImpulse(a, ra, axis * lambda, -1.0f);
+                        applyImpulse(b, rb, axis * lambda, +1.0f);
+                    }
+                }
                 break;
             }
             case JointType::Hinge: {
@@ -1358,10 +1504,24 @@ void World::step(float dt) {
         body.orientation = normalize(body.orientation);
     }
     for (const Joint& joint : joints_) {
-        if (joint.a >= bodies_.size() || joint.b >= bodies_.size() || joint.a == joint.b)
+        if (!validJointType(joint.type) || joint.a >= bodies_.size() ||
+            joint.b >= bodies_.size() || joint.a == joint.b ||
+            !finiteVec(joint.localAnchorA) || !finiteVec(joint.localAnchorB) ||
+            !finiteVec(joint.localAxisA) || !finiteVec(joint.localAxisB) ||
+            !finiteVec(joint.localRefA) || !finiteVec(joint.localRefB))
             throw std::invalid_argument("velox: joint contains invalid body endpoints");
+        bool framed = joint.type == JointType::Hinge ||
+                      joint.type == JointType::ConeTwist ||
+                      joint.type == JointType::Fixed ||
+                      joint.type == JointType::Prismatic;
+        if (framed && (lengthSq(joint.localAxisA) < 1e-12f ||
+                       lengthSq(joint.localAxisB) < 1e-12f ||
+                       lengthSq(joint.localRefA) < 1e-12f ||
+                       lengthSq(joint.localRefB) < 1e-12f))
+            throw std::invalid_argument("velox: joint contains an invalid local frame");
         if (!finiteFloat(joint.motorSpeed) || !finiteFloat(joint.maxMotorTorque) ||
-            joint.maxMotorTorque < 0.0f || !finiteFloat(joint.lowerLimit) ||
+            joint.maxMotorTorque < 0.0f || !finiteFloat(joint.maxMotorForce) ||
+            joint.maxMotorForce < 0.0f || !finiteFloat(joint.lowerLimit) ||
             !finiteFloat(joint.upperLimit) || joint.lowerLimit > joint.upperLimit ||
             !finiteFloat(joint.swingLimit) || joint.swingLimit < 0.0f ||
             joint.swingLimit > 3.14159265f || !finiteFloat(joint.lowerTwistLimit) ||

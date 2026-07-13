@@ -108,6 +108,8 @@ public:
     JointId addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB);
     JointId addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     JointId addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
+    JointId addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor);
+    JointId addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     Joint& joint(JointId id);                              // configure motors/limits
     const Joint& joint(JointId id) const;
     bool isValid(JointId id) const noexcept;
@@ -115,6 +117,7 @@ public:
     float hingeAngle(JointId id) const;                     // radians, 0 at creation
     float coneSwingAngle(JointId id) const;
     float coneTwistAngle(JointId id) const;
+    float prismaticTranslation(JointId id) const;
 
     // Contact and sensor Begin/Persist/End events from the most recent step().
     const std::vector<ContactEvent>& contactEvents() const { return events_; }
