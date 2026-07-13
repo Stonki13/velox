@@ -151,6 +151,7 @@ VELOX_HD inline void bodyAabb(const Body& b, float dt, Vec3& lo, Vec3& hi) {
     case ShapeType::Capsule: ext = b.capsuleHalfHeight + b.radius; break;
     case ShapeType::Sphere:  ext = b.radius; break;
     case ShapeType::Hull:    ext = b.radius; break;
+    case ShapeType::Compound: ext = b.radius; break;
     default:                 ext = 0.0f; break; // plane/mesh handled separately
     }
     float reach = ext + b.maxPointSpeed() * dt + 1e-2f;
@@ -448,9 +449,10 @@ VELOX_HD inline bool isConvexVolume(ShapeType t) {
 
 // Narrow phase for one pair; returns the number of contacts written to out
 // (at most kMaxContactsPerPair).
-VELOX_HD inline int collidePair(const Body& a, const Body& b, BodyIndex ia, BodyIndex ib,
-                                const MeshSoupView& soup, float dt,
-                                Contact* out, int cap) {
+VELOX_HD inline int collideSimplePair(const Body& a, const Body& b,
+                                      BodyIndex ia, BodyIndex ib,
+                                      const MeshSoupView& soup, float dt,
+                                      Contact* out, int cap) {
     using namespace np_detail;
     int n = 0;
     if (isConvexVolume(a.shape) && isConvexVolume(b.shape))
@@ -466,12 +468,53 @@ VELOX_HD inline int collidePair(const Body& a, const Body& b, BodyIndex ia, Body
     return n;
 }
 
+// Compound dispatch expands locally transformed children but keeps contacts
+// owned by the parent dense indices. Anchors and relative velocity are
+// remapped from child frames to parent frames before the solver sees them.
+VELOX_HD inline int collidePair(const Body& a, const Body& b, BodyIndex ia, BodyIndex ib,
+                                const MeshSoupView& soup, float dt,
+                                Contact* out, int cap) {
+    if (a.shape != ShapeType::Compound && b.shape != ShapeType::Compound)
+        return collideSimplePair(a, b, ia, ib, soup, dt, out, cap);
+
+    int countA = a.shape == ShapeType::Compound ? (int)a.compoundCount : 1;
+    int countB = b.shape == ShapeType::Compound ? (int)b.compoundCount : 1;
+    int total = 0;
+    for (int ca = 0; ca < countA && total < cap; ++ca) {
+        Body geometryA = a.shape == ShapeType::Compound
+            ? compoundChildBody(a, soup.compoundChildren[a.compoundFirst + ca]) : a;
+        for (int cb = 0; cb < countB && total < cap; ++cb) {
+            Body geometryB = b.shape == ShapeType::Compound
+                ? compoundChildBody(b, soup.compoundChildren[b.compoundFirst + cb]) : b;
+            int added = collideSimplePair(geometryA, geometryB, ia, ib, soup, dt,
+                                          out + total, cap - total);
+            for (int k = 0; k < added; ++k) {
+                Contact& contact = out[total + k];
+                const Body& ownerA = contact.a == ia ? a : b;
+                const Body& ownerB = contact.b == ib ? b : a;
+                contact.localAnchorA = rotateInv(
+                    ownerA.orientation, contact.point - ownerA.position);
+                contact.localAnchorB = rotateInv(
+                    ownerB.orientation, contact.point - ownerB.position);
+                contact.vn0 = dot(npPointVelocity(ownerA, contact.point) -
+                                  npPointVelocity(ownerB, contact.point),
+                                  contact.normal);
+                uint64_t childTag = (uint64_t)(ca + 1) * 0x9e3779b185ebca87ull ^
+                                    (uint64_t)(cb + 1) * 0xc2b2ae3d27d4eb4full;
+                contact.featureKey ^= childTag;
+            }
+            total += added;
+        }
+    }
+    return total;
+}
+
 // Minimum gap + contact normal between a convex body and a mesh, BVH-pruned
 // but exact within an expanded search box — the distance oracle used by the
 // conservative-advancement safety net.
-VELOX_HD inline void meshGapProbe(const Body& conv, const Body& meshBody,
-                                  const MeshSoupView& soup, float searchRadius,
-                                  float& bestGap, Vec3& bestNormal) {
+VELOX_HD inline void meshSimpleGapProbe(const Body& conv, const Body& meshBody,
+                                        const MeshSoupView& soup, float searchRadius,
+                                        float& bestGap, Vec3& bestNormal) {
     const Mesh& m = soup.meshes[meshBody.meshIndex];
     Vec3 r{searchRadius, searchRadius, searchRadius};
     Vec3 lo = conv.position - r, hi = conv.position + r;
@@ -499,6 +542,20 @@ VELOX_HD inline void meshGapProbe(const Body& conv, const Body& meshBody,
                 soup.vertices[m.firstVertex + soup.indices[base + 2]]));
             if (g.distance < bestGap) { bestGap = g.distance; bestNormal = g.normal; }
         }
+    }
+}
+
+VELOX_HD inline void meshGapProbe(const Body& conv, const Body& meshBody,
+                                  const MeshSoupView& soup, float searchRadius,
+                                  float& bestGap, Vec3& bestNormal) {
+    if (conv.shape != ShapeType::Compound) {
+        meshSimpleGapProbe(conv, meshBody, soup, searchRadius, bestGap, bestNormal);
+        return;
+    }
+    for (uint32_t i = 0; i < conv.compoundCount; ++i) {
+        Body child = compoundChildBody(
+            conv, soup.compoundChildren[conv.compoundFirst + i]);
+        meshSimpleGapProbe(child, meshBody, soup, searchRadius, bestGap, bestNormal);
     }
 }
 

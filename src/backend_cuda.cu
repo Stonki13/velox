@@ -181,6 +181,7 @@ public:
         release(dNodes_);
         release(dTriRefs_);
         release(dHullPts_);
+        release(dCompoundChildren_);
     }
 
     const char* name() const override { return "cuda"; }
@@ -223,7 +224,8 @@ public:
         }
         aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, n, dt, dAabbs_,
                                              dSortKeys_, dSortedIndices_);
-        MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_, dHullPts_};
+        MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_,
+                          dHullPts_, dCompoundChildren_};
         int threads = 256;
         // The brute-force kernel has excellent occupancy for small scenes;
         // radix sorting and candidate compaction pay off only once quadratic
@@ -459,16 +461,19 @@ private:
     void uploadMeshes(const MeshSoup& m) {
         // Static geometry: upload once, re-upload only if it grew.
         if (m.vertices.size() == meshVerts_ && m.bvhNodes.size() == meshNodes_ &&
-            m.hullPoints.size() == hullPts_) return;
+            m.hullPoints.size() == hullPts_ &&
+            m.compoundChildren.size() == compoundChildren_) return;
         meshVerts_ = m.vertices.size();
         meshNodes_ = m.bvhNodes.size();
         hullPts_ = m.hullPoints.size();
+        compoundChildren_ = m.compoundChildren.size();
         upload(dVertices_, m.vertices);
         upload(dIndices_, m.indices);
         upload(dMeshes_, m.meshes);
         upload(dNodes_, m.bvhNodes);
         upload(dTriRefs_, m.bvhTriRefs);
         upload(dHullPts_, m.hullPoints);
+        upload(dCompoundChildren_, m.compoundChildren);
     }
 
     template <typename T>
@@ -511,7 +516,9 @@ private:
     BvhNode* dNodes_ = nullptr;
     uint32_t* dTriRefs_ = nullptr;
     Vec3* dHullPts_ = nullptr;
+    CompoundChild* dCompoundChildren_ = nullptr;
     size_t hullPts_ = ~size_t(0);
+    size_t compoundChildren_ = ~size_t(0);
     size_t bodyCap_ = 0;
     size_t contactCap_ = 0;
     size_t meshVerts_ = ~size_t(0), meshNodes_ = ~size_t(0);

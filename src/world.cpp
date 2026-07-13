@@ -272,6 +272,139 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     return addBody(b);
 }
 
+BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shapes,
+                          float mass) {
+    requireFiniteVec(position, "velox: compound position must be finite");
+    requireMass(mass);
+    if (shapes.empty())
+        throw std::invalid_argument("velox: compound requires at least one child shape");
+    if (shapes.size() > UINT32_MAX ||
+        meshes_.compoundChildren.size() > UINT32_MAX - shapes.size())
+        throw std::length_error("velox: compound child capacity exceeded");
+
+    std::vector<CompoundChild> children;
+    std::vector<Vec3> hullPoints;
+    children.reserve(shapes.size());
+    Vec3 aggregateLo{1e30f, 1e30f, 1e30f};
+    Vec3 aggregateHi{-1e30f, -1e30f, -1e30f};
+    float aggregateRadius = 0.0f;
+
+    for (const CompoundShape& shape : shapes) {
+        requireFiniteVec(shape.localPosition,
+                         "velox: compound child position must be finite");
+        if (!finiteQuat(shape.localOrientation))
+            throw std::invalid_argument("velox: compound child orientation must be finite");
+        float q2 = shape.localOrientation.x * shape.localOrientation.x +
+                   shape.localOrientation.y * shape.localOrientation.y +
+                   shape.localOrientation.z * shape.localOrientation.z +
+                   shape.localOrientation.w * shape.localOrientation.w;
+        if (q2 < 1e-12f)
+            throw std::invalid_argument("velox: compound child orientation must be non-zero");
+
+        CompoundChild child;
+        child.shape = shape.shape;
+        child.localPosition = shape.localPosition;
+        child.localOrientation = normalize(shape.localOrientation);
+        float bound = 0.0f;
+        switch (shape.shape) {
+        case ShapeType::Sphere:
+            requirePositive(shape.radius,
+                            "velox: compound sphere radius must be positive");
+            child.radius = shape.radius;
+            bound = shape.radius;
+            break;
+        case ShapeType::Box:
+            if (!finiteVec(shape.halfExtents) || shape.halfExtents.x <= 0.0f ||
+                shape.halfExtents.y <= 0.0f || shape.halfExtents.z <= 0.0f)
+                throw std::invalid_argument("velox: compound box half extents must be positive");
+            child.halfExtents = shape.halfExtents;
+            bound = length(shape.halfExtents);
+            break;
+        case ShapeType::Capsule:
+            requirePositive(shape.radius,
+                            "velox: compound capsule radius must be positive");
+            requireNonNegative(shape.capsuleHalfHeight,
+                               "velox: compound capsule half height must be non-negative");
+            child.radius = shape.radius;
+            child.capsuleHalfHeight = shape.capsuleHalfHeight;
+            bound = shape.radius + shape.capsuleHalfHeight;
+            break;
+        case ShapeType::Hull: {
+            if (shape.hullPoints.size() < 4)
+                throw std::invalid_argument("velox: compound hull requires at least four points");
+            if (shape.hullPoints.size() > UINT32_MAX ||
+                hullPoints.size() > UINT32_MAX - shape.hullPoints.size())
+                throw std::length_error("velox: compound hull point capacity exceeded");
+            for (const Vec3& p : shape.hullPoints) {
+                requireFiniteVec(p, "velox: compound hull points must be finite");
+                bound = vmax(bound, length(p));
+            }
+            const Vec3 p0 = shape.hullPoints[0];
+            float scale2 = 0.0f;
+            size_t i1 = 0;
+            for (size_t i = 1; i < shape.hullPoints.size(); ++i) {
+                float d2 = lengthSq(shape.hullPoints[i] - p0);
+                if (d2 > scale2) { scale2 = d2; i1 = i; }
+            }
+            if (scale2 < 1e-12f)
+                throw std::invalid_argument("velox: compound hull points are coincident");
+            Vec3 edge = shape.hullPoints[i1] - p0;
+            float bestArea2 = 0.0f;
+            size_t i2 = 0;
+            for (size_t i = 1; i < shape.hullPoints.size(); ++i) {
+                float area2 = lengthSq(cross(edge, shape.hullPoints[i] - p0));
+                if (area2 > bestArea2) { bestArea2 = area2; i2 = i; }
+            }
+            if (bestArea2 <= scale2 * scale2 * 1e-12f)
+                throw std::invalid_argument("velox: compound hull points are collinear");
+            Vec3 planeNormal = cross(edge, shape.hullPoints[i2] - p0);
+            float maxPlaneDistance = 0.0f;
+            for (const Vec3& p : shape.hullPoints)
+                maxPlaneDistance = vmax(
+                    maxPlaneDistance, fabsf(dot(planeNormal, p - p0)));
+            float scale = sqrtf(scale2);
+            if (maxPlaneDistance <= scale * scale * scale * 1e-6f)
+                throw std::invalid_argument("velox: compound hull points are coplanar");
+            child.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size() +
+                                                    hullPoints.size());
+            child.hullCount = static_cast<uint32_t>(shape.hullPoints.size());
+            hullPoints.insert(hullPoints.end(), shape.hullPoints.begin(),
+                              shape.hullPoints.end());
+            break;
+        }
+        default:
+            throw std::invalid_argument(
+                "velox: compound children must be sphere, box, capsule, or hull");
+        }
+        Vec3 r{bound, bound, bound};
+        aggregateLo = vmin(aggregateLo, shape.localPosition - r);
+        aggregateHi = vmax(aggregateHi, shape.localPosition + r);
+        aggregateRadius = vmax(aggregateRadius, length(shape.localPosition) + bound);
+        children.push_back(child);
+    }
+
+    Body body;
+    body.position = position;
+    body.shape = ShapeType::Compound;
+    body.compoundFirst = static_cast<uint32_t>(meshes_.compoundChildren.size());
+    body.compoundCount = static_cast<uint32_t>(children.size());
+    body.radius = aggregateRadius;
+    body.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
+    body.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    if (mass > 0.0f) {
+        Vec3 e = aggregateHi - aggregateLo;
+        float k = mass / 12.0f;
+        body.invInertia = {
+            1.0f / (k * (e.y * e.y + e.z * e.z) + 1e-9f),
+            1.0f / (k * (e.x * e.x + e.z * e.z) + 1e-9f),
+            1.0f / (k * (e.x * e.x + e.y * e.y) + 1e-9f)};
+    }
+    meshes_.hullPoints.insert(meshes_.hullPoints.end(), hullPoints.begin(), hullPoints.end());
+    meshes_.compoundChildren.insert(meshes_.compoundChildren.end(),
+                                    children.begin(), children.end());
+    return addBody(body);
+}
+
 BodyId World::addStaticPlane(Vec3 normal, float offset) {
     requireFiniteVec(normal, "velox: plane normal must be finite");
     if (lengthSq(normal) < 1e-12f)
@@ -742,6 +875,30 @@ GapProbe gapAt(const Body& a, const Vec3& pa, const Quat& qa,
     Body ta = a; ta.position = pa; ta.orientation = qa;
     Body tb = b; tb.position = pb; tb.orientation = qb;
 
+    if (ta.shape == ShapeType::Compound) {
+        GapProbe best{1e30f, {0, 1, 0}};
+        for (uint32_t i = 0; i < ta.compoundCount; ++i) {
+            Body child = compoundChildBody(
+                ta, soup.compoundChildren[ta.compoundFirst + i]);
+            GapProbe gap = gapAt(child, child.position, child.orientation,
+                                 tb, tb.position, tb.orientation, soup, searchRadius);
+            if (gap.gap < best.gap) best = gap;
+        }
+        return best;
+    }
+    if (tb.shape == ShapeType::Compound) {
+        GapProbe best{1e30f, {0, 1, 0}};
+        for (uint32_t i = 0; i < tb.compoundCount; ++i) {
+            Body child = compoundChildBody(
+                tb, soup.compoundChildren[tb.compoundFirst + i]);
+            GapProbe gap = gapAt(ta, ta.position, ta.orientation,
+                                 child, child.position, child.orientation,
+                                 soup, searchRadius);
+            if (gap.gap < best.gap) best = gap;
+        }
+        return best;
+    }
+
     if (tb.shape == ShapeType::Plane) {
         Convex c = makeConvex(ta, soup);
         Vec3 deep = c.support(-tb.planeNormal);
@@ -1058,6 +1215,22 @@ void World::step(float dt) {
             if (body.hullCount < 4 || (size_t)body.hullFirst + body.hullCount >
                                         meshes_.hullPoints.size())
                 throw std::out_of_range("velox: hull body references invalid point storage");
+            break;
+        case ShapeType::Compound:
+            if (body.compoundCount == 0 ||
+                (size_t)body.compoundFirst + body.compoundCount >
+                    meshes_.compoundChildren.size())
+                throw std::out_of_range(
+                    "velox: compound body references invalid child storage");
+            for (uint32_t i = 0; i < body.compoundCount; ++i) {
+                const CompoundChild& child =
+                    meshes_.compoundChildren[body.compoundFirst + i];
+                if (!finiteVec(child.localPosition) ||
+                    !finiteQuat(child.localOrientation) ||
+                    !isConvexVolume(child.shape))
+                    throw std::invalid_argument(
+                        "velox: compound child contains invalid state");
+            }
             break;
         }
         body.orientation = normalize(body.orientation);

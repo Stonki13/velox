@@ -1,6 +1,7 @@
 #pragma once
 #include "math.h"
 #include <cstdint>
+#include <vector>
 
 namespace velox {
 
@@ -25,8 +26,31 @@ VELOX_HD inline bool operator==(BodyId a, BodyId b) { return a.value == b.value;
 VELOX_HD inline bool operator!=(BodyId a, BodyId b) { return !(a == b); }
 VELOX_HD inline bool operator<(BodyId a, BodyId b) { return a.value < b.value; }
 
-enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh, Hull };
+enum class ShapeType : uint8_t { Sphere, Plane, Box, Capsule, Mesh, Hull, Compound };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
+
+// Host-side description of one locally transformed convex child. Compound
+// bodies accept spheres, boxes, capsules, and convex hulls.
+struct CompoundShape {
+    ShapeType shape = ShapeType::Sphere;
+    Vec3 localPosition;
+    Quat localOrientation;
+    float radius = 0.5f;
+    Vec3 halfExtents{0.5f, 0.5f, 0.5f};
+    float capsuleHalfHeight = 0.5f;
+    std::vector<Vec3> hullPoints;
+};
+
+// Flattened runtime child: pointer-free and shared unchanged with CUDA.
+struct CompoundChild {
+    ShapeType shape = ShapeType::Sphere;
+    Vec3 localPosition;
+    Quat localOrientation;
+    float radius = 0.5f;
+    Vec3 halfExtents{0.5f, 0.5f, 0.5f};
+    float capsuleHalfHeight = 0.5f;
+    uint32_t hullFirst = 0, hullCount = 0;
+};
 
 // Data-oriented body layout: plain structs in contiguous arrays so the same
 // data can be uploaded to a GPU backend unchanged.
@@ -60,6 +84,7 @@ struct Body {
     float planeOffset = 0.0f;
     uint32_t meshIndex = 0;     // Mesh: index into World's mesh storage
     uint32_t hullFirst = 0, hullCount = 0; // Hull: local-space points in soup
+    uint32_t compoundFirst = 0, compoundCount = 0;
 
     VELOX_HD bool isStatic() const { return motionType == MotionType::Static; }
     VELOX_HD bool isKinematic() const { return motionType == MotionType::Kinematic; }
@@ -87,6 +112,7 @@ struct Body {
         float r = radius;
         if (shape == ShapeType::Box) r = length(halfExtents);
         else if (shape == ShapeType::Capsule) r = capsuleHalfHeight + radius;
+        else if (shape == ShapeType::Compound) r = radius;
         return length(velocity) + length(angularVelocity) * r;
     }
 };

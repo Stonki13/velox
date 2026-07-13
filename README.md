@@ -90,7 +90,8 @@ closed 3D polytope cannot exist.
 - Full rigid body dynamics: linear + rotational (quaternions, world-space
   inverse inertia, contact torques)
 - Colliders: **sphere, box, capsule, dynamic convex hull, static plane, static
-  triangle mesh**
+  triangle mesh**, plus locally transformed sphere/box/capsule/hull compound
+  bodies under one rigid-body handle
 - **Joints**: ball, distance, hinge, and cone/twist; hinge motors, hinge limits,
   and independent ragdoll swing/twist limits (iterative impulses, 3x3 block
   solve for anchors, Baumgarte stabilization). Connected bodies ignore each

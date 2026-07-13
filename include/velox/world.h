@@ -45,6 +45,7 @@ public:
     // Convex hull from a local-space point cloud (points should already be on
     // the hull; interior points only cost support-function time).
     BodyId addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass);
+    BodyId addCompound(Vec3 position, const std::vector<CompoundShape>& shapes, float mass);
     BodyId addStaticPlane(Vec3 normal, float offset);
     // Static triangle mesh (level geometry). vertices: xyz triples,
     // indices: 3 per triangle.

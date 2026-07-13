@@ -677,6 +677,59 @@ static void testConeTwistJoint() {
     check(ok, "cone/twist joint (swing cone and axial limits)");
 }
 
+// 29. Compound bodies keep several locally transformed convex children under
+// one dynamic body and one stable public handle. Contacts must solve against
+// the parent frame, while queries and CCD still inspect every child.
+static void testCompoundBody() {
+    velox::CompoundShape left;
+    left.shape = velox::ShapeType::Sphere;
+    left.localPosition = {-1, 0, 0};
+    left.radius = 0.5f;
+    velox::CompoundShape right = left;
+    right.localPosition = {1, 0, 0};
+
+    velox::World w;
+    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto compound = w.addCompound({0, 3, 0}, {left, right}, 2.0f);
+    for (int i = 0; i < 360; ++i) w.step(1.0f / 60.0f);
+    bool ok = w.body(compound).position.y > 0.42f;
+
+    velox::Vec3 childCenter = w.body(compound).position +
+        velox::rotate(w.body(compound).orientation, right.localPosition);
+    auto hit = w.rayCast(childCenter + velox::Vec3{0, 3, 0},
+                         {0, -1, 0}, 10.0f);
+    ok &= hit.hit && hit.body == compound;
+    std::vector<velox::BodyId> overlaps;
+    w.overlapSphere(childCenter, 0.2f, overlaps);
+    ok &= overlaps.size() == 1 && overlaps[0] == compound;
+
+    size_t count = w.bodyCount();
+    velox::CompoundShape invalid;
+    invalid.shape = velox::ShapeType::Plane;
+    ok &= throwsException([&] { w.addCompound({}, {invalid}, 1.0f); });
+    ok &= w.bodyCount() == count;
+
+    velox::World bullet;
+    bullet.gravity = {0, 0, 0};
+    bullet.addStaticPlane({0, 1, 0}, 0.0f);
+    velox::CompoundShape fastBox;
+    fastBox.shape = velox::ShapeType::Box;
+    fastBox.localPosition = {1, 0, 0};
+    fastBox.localOrientation = velox::fromAxisAngle({0, 0, 1}, 0.4f);
+    fastBox.halfExtents = {0.2f, 0.2f, 0.2f};
+    auto projectile = bullet.addCompound({0, 2, 0}, {fastBox}, 1.0f);
+    bullet.setLinearVelocity(projectile, {0, -1500, 0});
+    bullet.setAngularVelocity(projectile, {20, 30, 10});
+    for (int i = 0; i < 10; ++i) {
+        bullet.step(1.0f / 60.0f);
+        velox::Vec3 center = bullet.body(projectile).position +
+            velox::rotate(bullet.body(projectile).orientation,
+                          fastBox.localPosition);
+        ok &= center.y > -0.5f;
+    }
+    check(ok, "compound body (local children, parent queries, CCD)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -706,6 +759,7 @@ int main() {
     testStableHandlesAndRemoval();
     testFiltersSensorsAndEventPhases();
     testConeTwistJoint();
+    testCompoundBody();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

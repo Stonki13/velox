@@ -189,6 +189,58 @@ LocalHit rayConvex(const Vec3& o, const Vec3& d, const Body& body,
     return {false};
 }
 
+LocalHit rayBody(const Vec3& origin, const Vec3& dir, const Body& body,
+                 const MeshSoupView& soup, float maxDist) {
+    if (body.shape == ShapeType::Compound) {
+        LocalHit best{false, maxDist, {}};
+        for (uint32_t i = 0; i < body.compoundCount; ++i) {
+            Body child = compoundChildBody(
+                body, soup.compoundChildren[body.compoundFirst + i]);
+            LocalHit hit = rayBody(origin, dir, child, soup, best.t);
+            if (hit.hit && hit.t < best.t) best = hit;
+        }
+        return best;
+    }
+    switch (body.shape) {
+    case ShapeType::Sphere:
+        return raySphere(origin, dir, body.position, body.radius);
+    case ShapeType::Box:
+        return rayBox(origin, dir, body);
+    case ShapeType::Capsule:
+        return rayCapsule(origin, dir, body);
+    case ShapeType::Plane:
+        return rayPlane(origin, dir, body.planeNormal, body.planeOffset);
+    case ShapeType::Mesh:
+        return rayMesh(origin, dir, soup.meshes[body.meshIndex], soup, maxDist);
+    case ShapeType::Hull:
+        return rayConvex(origin, dir, body, soup, maxDist);
+    default:
+        return {false};
+    }
+}
+
+float sphereBodyGap(const Body& probe, const Body& body,
+                    const MeshSoupView& soup, float radius) {
+    if (body.shape == ShapeType::Compound) {
+        float best = 1e30f;
+        for (uint32_t i = 0; i < body.compoundCount; ++i) {
+            Body child = compoundChildBody(
+                body, soup.compoundChildren[body.compoundFirst + i]);
+            best = vmin(best, sphereBodyGap(probe, child, soup, radius));
+        }
+        return best;
+    }
+    if (body.shape == ShapeType::Plane)
+        return dot(body.planeNormal, probe.position) - body.planeOffset - radius;
+    if (body.shape == ShapeType::Mesh) {
+        float gap = 1e30f;
+        Vec3 normal;
+        meshGapProbe(probe, body, soup, radius + 0.01f, gap, normal);
+        return gap;
+    }
+    return gjkDistance(makeConvex(probe, soup), makeConvex(body, soup)).distance;
+}
+
 } // namespace
 
 RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
@@ -204,16 +256,7 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
 
     for (BodyIndex i = 0; i < bodies_.size(); ++i) {
         const Body& b = bodies_[i];
-        LocalHit h{false, 0, {}};
-        switch (b.shape) {
-        case ShapeType::Sphere:  h = raySphere(origin, dir, b.position, b.radius); break;
-        case ShapeType::Box:     h = rayBox(origin, dir, b); break;
-        case ShapeType::Capsule: h = rayCapsule(origin, dir, b); break;
-        case ShapeType::Plane:   h = rayPlane(origin, dir, b.planeNormal, b.planeOffset); break;
-        case ShapeType::Mesh:    h = rayMesh(origin, dir, meshes_.meshes[b.meshIndex],
-                                             soup, best.t); break;
-        case ShapeType::Hull:    h = rayConvex(origin, dir, b, soup, best.t); break;
-        }
+        LocalHit h = rayBody(origin, dir, b, soup, best.t);
         if (h.hit && h.t < best.t) {
             best.hit = true;
             best.body = bodyHandle(i);
@@ -237,15 +280,7 @@ void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) c
 
     for (BodyIndex i = 0; i < bodies_.size(); ++i) {
         const Body& b = bodies_[i];
-        float gap = 1e30f;
-        if (b.shape == ShapeType::Plane) {
-            gap = dot(b.planeNormal, center) - b.planeOffset - radius;
-        } else if (b.shape == ShapeType::Mesh) {
-            Vec3 n;
-            meshGapProbe(probe, b, soup, radius + 0.01f, gap, n);
-        } else {
-            gap = gjkDistance(makeConvex(probe, soup), makeConvex(b, soup)).distance;
-        }
+        float gap = sphereBodyGap(probe, b, soup, radius);
         if (gap <= 0.0f) out.push_back(bodyHandle(i));
     }
 }

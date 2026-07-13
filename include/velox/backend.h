@@ -12,6 +12,7 @@ struct MeshSoup {
     std::vector<BvhNode> bvhNodes;   // all meshes' BVHs, concatenated
     std::vector<uint32_t> bvhTriRefs; // leaf -> triangle number within its mesh
     std::vector<Vec3> hullPoints;    // convex hull local-space points
+    std::vector<CompoundChild> compoundChildren;
 };
 
 // Raw-pointer view of MeshSoup, usable identically from host and device code.
@@ -22,11 +23,28 @@ struct MeshSoupView {
     const BvhNode* bvhNodes;
     const uint32_t* bvhTriRefs;
     const Vec3* hullPoints;
+    const CompoundChild* compoundChildren;
 };
 
 inline MeshSoupView view(const MeshSoup& s) {
     return {s.vertices.data(), s.indices.data(), s.meshes.data(),
-            s.bvhNodes.data(), s.bvhTriRefs.data(), s.hullPoints.data()};
+            s.bvhNodes.data(), s.bvhTriRefs.data(), s.hullPoints.data(),
+            s.compoundChildren.data()};
+}
+
+VELOX_HD inline Body compoundChildBody(const Body& parent,
+                                       const CompoundChild& child) {
+    Body result = parent;
+    result.shape = child.shape;
+    result.position = parent.position + rotate(parent.orientation, child.localPosition);
+    result.orientation = mul(parent.orientation, child.localOrientation);
+    result.radius = child.radius;
+    result.halfExtents = child.halfExtents;
+    result.capsuleHalfHeight = child.capsuleHalfHeight;
+    result.hullFirst = child.hullFirst;
+    result.hullCount = child.hullCount;
+    result.compoundFirst = result.compoundCount = 0;
+    return result;
 }
 
 // A speculative contact: generated while the pair is still separated, whenever
