@@ -867,7 +867,8 @@ void World::updateSleeping(float dt) {
         if (x != y) unionParent_[x] = y;
     };
     for (const Contact& c : contacts_)
-        if (bodies_[c.a].isDynamic() && bodies_[c.b].isDynamic()) unite(c.a, c.b);
+        if (!bodies_[c.a].isSensor() && !bodies_[c.b].isSensor() &&
+            bodies_[c.a].isDynamic() && bodies_[c.b].isDynamic()) unite(c.a, c.b);
     for (const Joint& j : joints_)
         if (bodies_[j.a].isDynamic() && bodies_[j.b].isDynamic()) unite(j.a, j.b);
 
@@ -992,6 +993,7 @@ void World::step(float dt) {
     for (const Contact& c : contacts_) {
         Body& a = bodies_[c.a];
         Body& b = bodies_[c.b];
+        if (a.isSensor() || b.isSensor()) continue;
         bool impact = c.vn0 < -0.1f;
         auto moving = [](const Body& x) {
             return lengthSq(x.velocity) + lengthSq(x.angularVelocity) > 1e-3f;
@@ -1080,6 +1082,7 @@ void World::step(float dt) {
         }
         Body& a = bodies_[i];
         Body& b = bodies_[j];
+        if (a.isSensor() || b.isSensor()) continue;
         if (!a.isDynamic()) continue;
         float search = a.maxPointSpeed() * dt + a.radius +
                        length(a.halfExtents) + a.capsuleHalfHeight + 0.1f;
@@ -1160,6 +1163,7 @@ void World::step(float dt) {
             for (const Contact& c : contacts_) {
                 Body& a = bodies_[c.a];
                 Body& b = bodies_[c.b];
+                if (a.isSensor() || b.isSensor()) continue;
                 float invMassSum = a.solverInvMass() + b.solverInvMass();
                 if (invMassSum <= 0.0f) continue;
                 float g = contactLiveGap(a, b, c);
@@ -1173,9 +1177,11 @@ void World::step(float dt) {
         }
     }
 
-    // --- contact begin events --------------------------------------------------
-    // A pair "touches" when the solver applied impulse through it. An event
-    // fires when a touching pair was not touching the previous step.
+    // --- contact and sensor events --------------------------------------------
+    // Physical pairs are active when solving produced an impulse or their
+    // live anchors are touching. Sensors additionally use the speculative
+    // sweep condition, so a fast body crossing an entire trigger in one step
+    // still produces a Begin followed by an End.
     {
         events_.clear();
         pairKeys_.clear();
@@ -1185,24 +1191,44 @@ void World::step(float dt) {
             return (uint64_t)lo << 32 | hi;
         };
         for (const Contact& c : contacts_) {
-            if (c.normalImpulse <= 1e-6f) continue;
+            const Body& a = bodies_[c.a];
+            const Body& b = bodies_[c.b];
+            bool sensor = a.isSensor() || b.isSensor();
+            float liveGap = contactLiveGap(a, b, c);
+            bool sweptSensorHit = sensor && c.vn0 < 0.0f &&
+                                  c.gap <= -c.vn0 * dt + 1e-3f;
+            if (c.normalImpulse <= 1e-6f && liveGap > 1e-3f && !sweptSensorHit)
+                continue;
             pairKeys_.push_back(canonicalKey(c.a, c.b));
         }
         std::sort(pairKeys_.begin(), pairKeys_.end());
         pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
         for (uint64_t key : pairKeys_) {
-            if (std::binary_search(prevPairKeys_.begin(), prevPairKeys_.end(), key))
-                continue;
             BodyIndex lo = (BodyIndex)(key >> 32);
             BodyIndex hi = (BodyIndex)key;
-            ContactEvent ev{bodyHandle(lo), bodyHandle(hi), {}, {}, 0.0f};
+            bool persisted = std::binary_search(prevPairKeys_.begin(), prevPairKeys_.end(), key);
+            ContactEvent ev{bodyHandle(lo), bodyHandle(hi), {}, {}, 0.0f,
+                            persisted ? ContactEventType::Persist : ContactEventType::Begin,
+                            bodies_[lo].isSensor() || bodies_[hi].isSensor()};
+            bool representativeSet = false;
             for (const Contact& c : contacts_)
-                if (canonicalKey(c.a, c.b) == key && c.normalImpulse > ev.impulse) {
+                if (canonicalKey(c.a, c.b) == key &&
+                    (!representativeSet || c.normalImpulse > ev.impulse)) {
+                    representativeSet = true;
                     ev.impulse = c.normalImpulse;
                     ev.point = c.point;
                     ev.normal = c.a == lo ? c.normal : -c.normal;
                 }
             events_.push_back(ev);
+        }
+        for (uint64_t key : prevPairKeys_) {
+            if (std::binary_search(pairKeys_.begin(), pairKeys_.end(), key)) continue;
+            BodyIndex lo = (BodyIndex)(key >> 32);
+            BodyIndex hi = (BodyIndex)key;
+            if (lo >= bodies_.size() || hi >= bodies_.size()) continue;
+            events_.push_back({bodyHandle(lo), bodyHandle(hi), {}, {}, 0.0f,
+                               ContactEventType::End,
+                               bodies_[lo].isSensor() || bodies_[hi].isSensor()});
         }
         prevPairKeys_ = pairKeys_;
     }

@@ -370,7 +370,10 @@ static void testEvents() {
         w.step(1.0f / 60.0f);
         for (const auto& ev : w.contactEvents()) {
             bool ours = (ev.a == ball && ev.b == floor) || (ev.a == floor && ev.b == ball);
-            if (ours) { ++began; impulse = std::fmax(impulse, ev.impulse); }
+            if (ours && ev.type == velox::ContactEventType::Begin) {
+                ++began;
+                impulse = std::fmax(impulse, ev.impulse);
+            }
         }
     }
     // Restitution can cause a couple of touch-bounce-touch cycles, but resting
@@ -602,6 +605,47 @@ static void testStableHandlesAndRemoval() {
     check(ok, "stable handles (removal, reuse, joint and query remap)");
 }
 
+// 27. Category/mask tests are symmetric and sensors report a complete event
+// lifecycle without changing velocity, position, sleeping, or CCD response.
+static void testFiltersSensorsAndEventPhases() {
+    velox::World filtered;
+    filtered.gravity = {0, 0, 0};
+    auto wall = filtered.addBox({0, 0, 0}, {0.5f, 2, 2}, 0.0f);
+    auto ghost = filtered.addSphere({-3, 0, 0}, 0.25f, 1.0f);
+    filtered.body(wall).categoryBits = 2u;
+    filtered.body(wall).maskBits = 2u;
+    filtered.body(ghost).categoryBits = 1u;
+    filtered.body(ghost).maskBits = 1u;
+    filtered.setLinearVelocity(ghost, {12, 0, 0});
+    filtered.step(0.5f);
+    bool ok = filtered.body(ghost).position.x > 2.9f &&
+              std::fabs(filtered.body(ghost).velocity.x - 12.0f) < 1e-4f &&
+              filtered.contactEvents().empty();
+
+    velox::World triggers;
+    triggers.gravity = {0, 0, 0};
+    auto sensor = triggers.addBox({0, 0, 0}, {0.5f, 1, 1}, 0.0f);
+    auto visitor = triggers.addSphere({-3, 0, 0}, 0.25f, 1.0f);
+    triggers.body(sensor).sensor = 1;
+    triggers.setLinearVelocity(visitor, {8, 0, 0});
+    int began = 0, persisted = 0, ended = 0;
+    for (int i = 0; i < 90; ++i) {
+        triggers.step(1.0f / 60.0f);
+        for (const auto& ev : triggers.contactEvents()) {
+            bool ours = (ev.a == sensor && ev.b == visitor) ||
+                        (ev.a == visitor && ev.b == sensor);
+            if (!ours || !ev.sensor) continue;
+            if (ev.type == velox::ContactEventType::Begin) ++began;
+            else if (ev.type == velox::ContactEventType::Persist) ++persisted;
+            else if (ev.type == velox::ContactEventType::End) ++ended;
+        }
+    }
+    ok &= began == 1 && persisted > 0 && ended == 1;
+    ok &= std::fabs(triggers.body(visitor).velocity.x - 8.0f) < 1e-4f;
+    ok &= triggers.body(visitor).position.x > 8.9f;
+    check(ok, "filters and sensors (begin, persist, end without response)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -629,6 +673,7 @@ int main() {
     testMotionTypes();
     testForcesAndStateApi();
     testStableHandlesAndRemoval();
+    testFiltersSensorsAndEventPhases();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

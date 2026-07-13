@@ -6,12 +6,16 @@
 
 namespace velox {
 
-// A body pair that began touching this step (fires once per pair; fires again
-// only after the pair separates and re-touches).
+enum class ContactEventType : uint8_t { Begin, Persist, End };
+
+// A body pair touching this step. End events carry handles and zero impulse;
+// point/normal retain their default values because the pair no longer meets.
 struct ContactEvent {
     BodyId a, b;
     Vec3 point, normal;   // representative contact; normal points from b to a
     float impulse;        // largest accumulated normal impulse in the manifold
+    ContactEventType type = ContactEventType::Begin;
+    bool sensor = false;
 };
 
 struct RayHit {
@@ -74,7 +78,7 @@ public:
     void removeJoint(JointId id);
     float hingeAngle(JointId id) const;                     // radians, 0 at creation
 
-    // Contact begin events from the most recent step().
+    // Contact and sensor Begin/Persist/End events from the most recent step().
     const std::vector<ContactEvent>& contactEvents() const { return events_; }
 
     // --- sleeping -----------------------------------------------------------

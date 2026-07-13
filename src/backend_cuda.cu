@@ -68,6 +68,7 @@ __global__ void contactsKernel(const Body* bodies, const Aabb* aabbs, int n,
     const Body& a = bodies[i];
     const Body& b = bodies[j];
     if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
+    if (!a.canCollideWith(b)) return;
 
     Contact buf[kMaxContactsPerPair];
     int count = collidePair(a, b, (BodyIndex)i, (BodyIndex)j, soup, dt,
@@ -85,6 +86,7 @@ __global__ void solveColorKernel(Body* bodies, Contact* contacts,
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= count) return;
     Contact& c = contacts[first + k];
+    if (bodies[c.a].isSensor() || bodies[c.b].isSensor()) return;
     solveContact(bodies[c.a], bodies[c.b], c, dt);
 }
 
@@ -93,6 +95,7 @@ __global__ void warmStartColorKernel(Body* bodies, Contact* contacts,
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= count) return;
     Contact& c = contacts[first + k];
+    if (bodies[c.a].isSensor() || bodies[c.b].isSensor()) return;
     warmStartContact(bodies[c.a], bodies[c.b], c);
 }
 
@@ -209,7 +212,9 @@ public:
             numColors_ = 0;
             for (int k = 0; k < m; ++k) {
                 const Contact& c = contacts[k];
-                bool sa = !bodies[c.a].isDynamic(), sb = !bodies[c.b].isDynamic();
+                bool sensor = bodies[c.a].isSensor() || bodies[c.b].isSensor();
+                bool sa = sensor || !bodies[c.a].isDynamic();
+                bool sb = sensor || !bodies[c.b].isDynamic();
                 uint64_t used = (sa ? 0 : colorMask_[c.a]) | (sb ? 0 : colorMask_[c.b]);
                 int color;
                 if (~used) {

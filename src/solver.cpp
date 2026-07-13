@@ -24,10 +24,12 @@ public:
                          bool warmStart) override {
         if (warmStart)
             for (Contact& c : contacts)
-                warmStartContact(bodies[c.a], bodies[c.b], c);
+                if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
+                    warmStartContact(bodies[c.a], bodies[c.b], c);
         for (int iter = 0; iter < kVelocityIterations; ++iter)
             for (Contact& c : contacts)
-                solveContact(bodies[c.a], bodies[c.b], c, dt);
+                if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
+                    solveContact(bodies[c.a], bodies[c.b], c, dt);
     }
 
     void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
@@ -61,8 +63,9 @@ public:
         for (BodyIndex i : sorted_)
             if (!inert(i))
                 for (BodyIndex j : boundless_)
-                    flush(collidePair(bodies[i], bodies[j], i, j, soup, dt,
-                                      buf, kMaxContactsPerPair));
+                    if (bodies[i].canCollideWith(bodies[j]))
+                        flush(collidePair(bodies[i], bodies[j], i, j, soup, dt,
+                                          buf, kMaxContactsPerPair));
 
         // Sweep-and-prune along X: sort by AABB min, only test while overlapping.
         std::sort(sorted_.begin(), sorted_.end(), [&](BodyIndex a, BodyIndex b) {
@@ -74,6 +77,7 @@ public:
                 BodyIndex j = sorted_[sj];
                 if (aabbs_[j].lo.x > aabbs_[i].hi.x) break; // pruned: sorted axis
                 if (inert(i) && inert(j)) continue;
+                if (!bodies[i].canCollideWith(bodies[j])) continue;
                 if (!aabbOverlap(aabbs_[i].lo, aabbs_[i].hi, aabbs_[j].lo, aabbs_[j].hi))
                     continue;
                 flush(collidePair(bodies[i], bodies[j], i, j, soup, dt,

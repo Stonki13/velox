@@ -45,6 +45,9 @@ struct Body {
     float angularDamping = 0.0f;
     float gravityScale = 1.0f;
     MotionType motionType = MotionType::Dynamic;
+    uint32_t categoryBits = 1u;
+    uint32_t maskBits = UINT32_MAX;
+    uint8_t sensor = 0;
 
     uint8_t asleep = 0;         // sleeping bodies skip integration and solving
     float sleepTimer = 0.0f;    // seconds below the motion threshold
@@ -61,6 +64,11 @@ struct Body {
     VELOX_HD bool isStatic() const { return motionType == MotionType::Static; }
     VELOX_HD bool isKinematic() const { return motionType == MotionType::Kinematic; }
     VELOX_HD bool isDynamic() const { return motionType == MotionType::Dynamic; }
+    VELOX_HD bool isSensor() const { return sensor != 0; }
+    VELOX_HD bool canCollideWith(const Body& other) const {
+        return (maskBits & other.categoryBits) != 0 &&
+               (other.maskBits & categoryBits) != 0;
+    }
     VELOX_HD float solverInvMass() const { return isDynamic() ? invMass : 0.0f; }
 
     // World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v))
