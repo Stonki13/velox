@@ -1032,6 +1032,52 @@ static void testFixedAndPrismaticJoints() {
           "prismatic joint (free axis, motor, limits, validation)");
 }
 
+// 34. Soft distance constraints use frequency and damping ratio rather than a
+// mass-specific stiffness. Equal tuning should therefore produce the same
+// motion for light and heavy bodies, and critical damping should settle cleanly.
+static void testDistanceSpring() {
+    auto sampleSpring = [](float mass, int steps, float dampingRatio) {
+        velox::World w;
+        w.gravity = {0, 0, 0};
+        auto base = w.addSphere({}, 0.2f, 0.0f);
+        auto bob = w.addSphere({2, 0, 0}, 0.2f, mass);
+        auto spring = w.addSpringJoint(base, bob, {}, {2, 0, 0},
+                                       2.0f, dampingRatio);
+        w.joint(spring).restLength = 1.0f;
+        for (int i = 0; i < steps; ++i) w.step(1.0f / 60.0f);
+        return w.body(bob).position.x;
+    };
+
+    float light = sampleSpring(1.0f, 15, 0.25f);
+    float heavy = sampleSpring(10.0f, 15, 0.25f);
+    bool massIndependent = std::fabs(light - heavy) < 0.02f;
+
+    velox::World settled;
+    settled.gravity = {0, 0, 0};
+    auto base = settled.addSphere({}, 0.2f, 0.0f);
+    auto bob = settled.addSphere({2, 0, 0}, 0.2f, 1.0f);
+    auto spring = settled.addSpringJoint(base, bob, {}, {2, 0, 0}, 2.0f, 1.0f);
+    settled.joint(spring).restLength = 1.0f;
+    settled.step(1.0f / 60.0f);
+    bool compliant = settled.body(bob).position.x > 1.5f;
+    for (int i = 0; i < 179; ++i) settled.step(1.0f / 60.0f);
+    bool settledOk = std::fabs(settled.body(bob).position.x - 1.0f) < 0.02f &&
+                     std::fabs(settled.body(bob).velocity.x) < 0.05f;
+
+    bool validationOk = throwsException([&] {
+        settled.addSpringJoint(base, bob, {}, {}, 0.0f, 1.0f);
+    });
+    validationOk &= throwsException([&] {
+        settled.addSpringJoint(base, bob, {}, {}, 2.0f, -0.1f);
+    });
+    settled.joint(spring).springFrequencyHz =
+        std::numeric_limits<float>::quiet_NaN();
+    validationOk &= throwsException([&] { settled.step(1.0f / 60.0f); });
+
+    check(massIndependent && compliant && settledOk && validationOk,
+          "distance spring (mass-independent frequency and damping)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1066,6 +1112,7 @@ int main() {
     testFilteredQueriesAndShapeCasts();
     testMaterialsAndContactModification();
     testFixedAndPrismaticJoints();
+    testDistanceSpring();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

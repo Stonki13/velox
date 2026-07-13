@@ -97,6 +97,7 @@ closed 3D polytope cannot exist.
 - **Joints**: ball, distance, hinge, cone/twist, fixed, and prismatic. Hinges
   support torque motors and angle limits; prismatic joints support force motors
   and signed translation limits; ragdolls have independent swing/twist limits
+  and distance constraints support mass-independent frequency/damping springs
   (iterative impulses, 3x3 block solves, Baumgarte stabilization). Connected
   bodies ignore each other by default; `Joint::collideConnected` opts back in.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces

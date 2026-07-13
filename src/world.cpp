@@ -782,6 +782,21 @@ JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worl
     return addJoint(j);
 }
 
+JointId World::addSpringJoint(BodyId a, BodyId b, Vec3 worldAnchorA,
+                              Vec3 worldAnchorB, float frequencyHz,
+                              float dampingRatio) {
+    requirePositive(frequencyHz,
+                    "velox: spring frequency must be finite and positive");
+    requireNonNegative(dampingRatio,
+                       "velox: spring damping ratio must be finite and non-negative");
+    JointId id = addDistanceJoint(a, b, worldAnchorA, worldAnchorB);
+    Joint& spring = joint(id);
+    spring.enableSpring = true;
+    spring.springFrequencyHz = frequencyHz;
+    spring.springDampingRatio = dampingRatio;
+    return id;
+}
+
 JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
@@ -1127,6 +1142,7 @@ void World::solveJoints(float dt) {
         j.limitImpulse = 0.0f;
         j.swingImpulse = 0.0f;
         j.twistImpulse = 0.0f;
+        j.springImpulse = 0.0f;
     }
 
     for (int iter = 0; iter < kJointIterations; ++iter) {
@@ -1157,8 +1173,24 @@ void World::solveJoints(float dt) {
                           dot(raxn, a.invInertiaMul(raxn)) +
                           dot(rbxn, b.invInertiaMul(rbxn));
                 if (k <= 0.0f) break;
-                float bias = (len - j.restLength) * (kBeta / dt);
-                float lambda = -(dot(vel, n) + bias) / k;
+                float lambda;
+                if (j.enableSpring) {
+                    constexpr float kTau = 6.28318530718f;
+                    float effectiveMass = 1.0f / k;
+                    float omega = kTau * j.springFrequencyHz;
+                    float stiffness = effectiveMass * omega * omega;
+                    float damping = 2.0f * effectiveMass *
+                                    j.springDampingRatio * omega;
+                    float softness = 1.0f /
+                        (dt * (damping + dt * stiffness));
+                    float bias = (len - j.restLength) * dt * stiffness * softness;
+                    lambda = -(dot(vel, n) + bias +
+                               softness * j.springImpulse) / (k + softness);
+                    j.springImpulse += lambda;
+                } else {
+                    float bias = (len - j.restLength) * (kBeta / dt);
+                    lambda = -(dot(vel, n) + bias) / k;
+                }
                 applyImpulse(a, ra, n * lambda, +1.0f);
                 applyImpulse(b, rb, n * lambda, -1.0f);
                 break;
@@ -1530,6 +1562,12 @@ void World::step(float dt) {
             joint.upperTwistLimit > 3.14159265f ||
             joint.lowerTwistLimit > joint.upperTwistLimit)
             throw std::invalid_argument("velox: joint contains invalid motor or limit settings");
+        if (!finiteFloat(joint.springFrequencyHz) ||
+            !finiteFloat(joint.springDampingRatio) ||
+            joint.springFrequencyHz < 0.0f || joint.springDampingRatio < 0.0f ||
+            (joint.enableSpring && (joint.type != JointType::Distance ||
+                                    joint.springFrequencyHz <= 0.0f)))
+            throw std::invalid_argument("velox: joint contains invalid spring settings");
     }
     const int nSub = substeps > 0 ? substeps : 1;
     const float h = dt / nSub;

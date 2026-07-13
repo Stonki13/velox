@@ -106,6 +106,8 @@ public:
     // --- joints -------------------------------------------------------------
     JointId addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     JointId addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB);
+    JointId addSpringJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB,
+                           float frequencyHz, float dampingRatio);
     JointId addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     JointId addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     JointId addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor);

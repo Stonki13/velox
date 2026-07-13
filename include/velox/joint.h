@@ -34,6 +34,12 @@ struct Joint {
     float restLength = 0.0f;                       // Distance
     bool collideConnected = false;                 // Ignore contacts between linked bodies
 
+    // Optional compliant distance constraint. Frequency is mass-independent;
+    // dampingRatio 1 is critical damping, 0 is undamped.
+    bool enableSpring = false;
+    float springFrequencyHz = 0.0f;
+    float springDampingRatio = 1.0f;
+
     // Hinge motor: drives the relative angular velocity about the axis.
     bool enableMotor = false;
     float motorSpeed = 0.0f;      // Hinge: rad/s A vs B; prismatic: m/s B vs A
@@ -57,6 +63,7 @@ struct Joint {
     float limitImpulse = 0.0f;
     float swingImpulse = 0.0f;
     float twistImpulse = 0.0f;
+    float springImpulse = 0.0f;
 };
 
 } // namespace velox
