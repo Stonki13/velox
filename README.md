@@ -48,17 +48,19 @@ CUDA toolkit; `World(BackendType::Auto)` picks the GPU when present.
 
 Per-color kernel sweeps are batched with CUDA Graphs (captured once per step,
 replayed per substep), and the coloring is greedy first-free-bit, which keeps
-the color count near the max contacts per body.
+the color count near the max contacts per body. Worlds without CPU-side joints
+keep velocity integration, contact solving, and transform integration on the
+device across the remaining solver substeps, then download body state once.
 
 `examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
 (60 Hz steps, full pipeline, 4 solver substeps):
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 3.80 ms | **1.95 ms** |
-| 2048-sphere rain | 18.04 ms | **6.26 ms** |
-| 8192-sphere rain | 119.82 ms | **51.86 ms** |
-| 2048 spheres on 20k-triangle terrain | 34.60 ms | **11.01 ms** |
+| 512-sphere rain | 3.92 ms | **1.60 ms** |
+| 2048-sphere rain | 18.07 ms | **5.11 ms** |
+| 8192-sphere rain | 120.30 ms | **52.50 ms** |
+| 2048 spheres on 20k-triangle terrain | 34.83 ms | **10.53 ms** |
 
 These are a current local Release run on an RTX 5080. The GPU broad phase is
 hybrid: compact all-pairs culling keeps small scenes highly occupied, while
@@ -114,10 +116,6 @@ closed 3D polytope cannot exist.
 
 Mesh colliders are static-only (level geometry), matching how game engines
 treat non-convex meshes.
-
-Roadmap:
-
-- [ ] Device-resident stepping (skip per-substep transfers when no joints)
 
 ## Build
 

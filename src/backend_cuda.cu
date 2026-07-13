@@ -33,6 +33,15 @@ __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     b.angularVelocity *= 1.0f / (1.0f + b.angularDamping * dt);
 }
 
+__global__ void integrateTransformsKernel(Body* bodies, int n, float dt) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    Body& b = bodies[i];
+    if (b.isStatic() || b.asleep) return;
+    b.position += b.velocity * dt;
+    b.orientation = integrate(b.orientation, b.angularVelocity, dt);
+}
+
 // Compact AABBs so the pair kernel can reject without touching Body structs.
 // Planes and meshes get infinite bounds (they are collided by every pair).
 struct Aabb { Vec3 lo, hi; };
@@ -281,6 +290,7 @@ public:
         int n = static_cast<int>(bodies.size());
         int m = static_cast<int>(contacts.size());
         if (m == 0) return;
+        if (bodiesDirty_) uploadBodies(bodies);
 
         // warmStart marks the first substep of a step: sort, color, and
         // upload contacts once; later substeps reuse the device-resident
@@ -355,8 +365,6 @@ public:
             solveCount_ = m;
         }
 
-        if (bodiesDirty_) uploadBodies(bodies);
-
         if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
 
         if (warmStart) {
@@ -391,6 +399,39 @@ public:
                                          cudaMemcpyDeviceToHost, stream_));
         VELOX_CUDA_CHECK(cudaStreamSynchronize(stream_));
         bodiesDirty_ = true; // host integrates positions before the next call
+    }
+
+    bool advanceSubsteps(std::vector<Body>& bodies,
+                         std::vector<Contact>& contacts,
+                         const Vec3& gravity, float dt,
+                         int substeps) override {
+        // Prepare/color contacts and complete substep zero through the regular
+        // path. This preserves identical ordering and warm-start behavior.
+        bool hasContacts = !contacts.empty();
+        solveVelocities(bodies, contacts, dt, true);
+        for (Body& b : bodies) {
+            if (b.isStatic() || b.asleep) continue;
+            b.position += b.velocity * dt;
+            b.orientation = velox::integrate(b.orientation, b.angularVelocity, dt);
+        }
+        if (substeps <= 1 || bodies.empty()) return true;
+
+        int n = static_cast<int>(bodies.size());
+        uploadBodies(bodies);
+        if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
+        for (int s = 1; s < substeps; ++s) {
+            integrateKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
+                dBodies_, n, gravity, dt);
+            if (hasContacts && solveGraph_)
+                VELOX_CUDA_CHECK(cudaGraphLaunch(solveGraph_, stream_));
+            integrateTransformsKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
+                dBodies_, n, dt);
+        }
+        VELOX_CUDA_CHECK(cudaMemcpyAsync(bodies.data(), dBodies_, n * sizeof(Body),
+                                         cudaMemcpyDeviceToHost, stream_));
+        VELOX_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        bodiesDirty_ = true;
+        return true;
     }
 
     void fetchImpulses(std::vector<Contact>& contacts) override {
