@@ -25,6 +25,21 @@ struct RayHit {
     Vec3 point, normal;
 };
 
+struct QueryFilter {
+    uint32_t categoryBits = UINT32_MAX;
+    uint32_t maskBits = UINT32_MAX;
+    bool includeSensors = true;
+    BodyId ignoredBody;
+};
+
+struct ShapeCastHit {
+    bool hit = false;
+    BodyId body;
+    float distance = 0.0f;
+    float fraction = 0.0f;
+    Vec3 point, normal; // normal points from the hit body toward the cast shape
+};
+
 class World {
 public:
     // Auto picks the CUDA backend when built with VELOX_ENABLE_CUDA and a
@@ -99,8 +114,24 @@ public:
     bool isAwake(BodyId id) const;
 
     // --- queries ------------------------------------------------------------
-    RayHit rayCast(Vec3 origin, Vec3 dir, float maxDist) const;
-    void overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) const;
+    RayHit rayCast(Vec3 origin, Vec3 dir, float maxDist,
+                   const QueryFilter& filter = {}) const;
+    void overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
+                       const QueryFilter& filter = {}) const;
+    void overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,
+                    std::vector<BodyId>& out,
+                    const QueryFilter& filter = {}) const;
+    void overlapCapsule(Vec3 center, float radius, float halfHeight,
+                        Quat orientation, std::vector<BodyId>& out,
+                        const QueryFilter& filter = {}) const;
+    ShapeCastHit sphereCast(Vec3 center, float radius, Vec3 direction,
+                            float maxDist, const QueryFilter& filter = {}) const;
+    ShapeCastHit boxCast(Vec3 center, Vec3 halfExtents, Quat orientation,
+                         Vec3 direction, float maxDist,
+                         const QueryFilter& filter = {}) const;
+    ShapeCastHit capsuleCast(Vec3 center, float radius, float halfHeight,
+                             Quat orientation, Vec3 direction, float maxDist,
+                             const QueryFilter& filter = {}) const;
 
     // Advances the simulation using Predictive Contact Sweeping: speculative
     // contacts solved iteratively, backed by a conservative-advancement sweep
@@ -119,6 +150,11 @@ private:
     BodyId addBody(Body body);
     JointId addJoint(Joint joint);
     BodyId bodyHandle(BodyIndex dense) const;
+    bool queryAllows(BodyIndex dense, const QueryFilter& filter) const;
+    void overlapShape(const Body& shape, std::vector<BodyId>& out,
+                      const QueryFilter& filter) const;
+    ShapeCastHit castShape(Body shape, Vec3 direction, float maxDist,
+                           const QueryFilter& filter) const;
     void removeJointDense(uint32_t dense);
     void solveJoints(float dt);
     void updateSleeping(float dt);

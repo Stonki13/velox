@@ -103,8 +103,9 @@ closed 3D polytope cannot exist.
   swap-removal, stale-handle rejection, and automatic attached-joint cleanup
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
   islands cost nothing and wake on impact
-- **Queries**: `rayCast` against every collider (BVH-accelerated for meshes),
-  `overlapSphere`
+- **Queries**: symmetrically filtered raycasts, sphere/box/capsule overlaps,
+  and conservative-advancement sphere/box/capsule casts against every
+  collider (BVH-accelerated for meshes), with sensor and ignored-body policy
 - **Collision policy**: symmetric category/mask filtering and non-responsive
   sensors, with pair-level Begin/Persist/End events, stable body handles,
   representative contact point/normal, and solved normal impulse

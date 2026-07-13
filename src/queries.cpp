@@ -11,6 +11,10 @@ bool finiteQueryFloat(float value) { return std::isfinite(value); }
 bool finiteQueryVec(const Vec3& v) {
     return finiteQueryFloat(v.x) && finiteQueryFloat(v.y) && finiteQueryFloat(v.z);
 }
+bool finiteQueryQuat(const Quat& q) {
+    return finiteQueryFloat(q.x) && finiteQueryFloat(q.y) &&
+           finiteQueryFloat(q.z) && finiteQueryFloat(q.w);
+}
 
 struct LocalHit { bool hit; float t; Vec3 normal; };
 
@@ -221,31 +225,51 @@ LocalHit rayBody(const Vec3& origin, const Vec3& dir, const Body& body,
     }
 }
 
-float sphereBodyGap(const Body& probe, const Body& body,
-                    const MeshSoupView& soup, float radius) {
-    if (body.shape == ShapeType::Compound) {
-        float best = 1e30f;
-        for (uint32_t i = 0; i < body.compoundCount; ++i) {
+struct QueryGap { float gap; Vec3 normal, point; };
+
+QueryGap queryGap(const Body& probe, const Body& target,
+                  const MeshSoupView& soup, float searchRadius) {
+    if (target.shape == ShapeType::Compound) {
+        QueryGap best{1e30f, {0, 1, 0}, {}};
+        for (uint32_t i = 0; i < target.compoundCount; ++i) {
             Body child = compoundChildBody(
-                body, soup.compoundChildren[body.compoundFirst + i]);
-            best = vmin(best, sphereBodyGap(probe, child, soup, radius));
+                target, soup.compoundChildren[target.compoundFirst + i]);
+            QueryGap gap = queryGap(probe, child, soup, searchRadius);
+            if (gap.gap < best.gap) best = gap;
         }
         return best;
     }
-    if (body.shape == ShapeType::Plane)
-        return dot(body.planeNormal, probe.position) - body.planeOffset - radius;
-    if (body.shape == ShapeType::Mesh) {
-        float gap = 1e30f;
-        Vec3 normal;
-        meshGapProbe(probe, body, soup, radius + 0.01f, gap, normal);
-        return gap;
+    Convex query = makeConvex(probe, soup);
+    if (target.shape == ShapeType::Plane) {
+        Vec3 point = query.support(-target.planeNormal);
+        float gap = dot(target.planeNormal, point) - target.planeOffset;
+        return {gap, target.planeNormal, point - target.planeNormal * (0.5f * gap)};
     }
-    return gjkDistance(makeConvex(probe, soup), makeConvex(body, soup)).distance;
+    if (target.shape == ShapeType::Mesh) {
+        float gap = 1e30f;
+        Vec3 normal{0, 1, 0};
+        meshGapProbe(probe, target, soup, searchRadius, gap, normal);
+        Vec3 point = query.support(-normal) - normal * (0.5f * gap);
+        return {gap, normal, point};
+    }
+    GjkResult result = gjkDistance(query, makeConvex(target, soup));
+    return {result.distance, result.normal,
+            (result.pointA + result.pointB) * 0.5f};
 }
 
 } // namespace
 
-RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
+bool World::queryAllows(BodyIndex dense, const QueryFilter& filter) const {
+    const Body& body = bodies_[dense];
+    BodyId handle = bodyHandle(dense);
+    if (handle == filter.ignoredBody) return false;
+    if (!filter.includeSensors && body.isSensor()) return false;
+    return (filter.maskBits & body.categoryBits) != 0 &&
+           (body.maskBits & filter.categoryBits) != 0;
+}
+
+RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
+                      const QueryFilter& filter) const {
     if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
         throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
@@ -257,6 +281,7 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
     const MeshSoupView soup = view(meshes_);
 
     for (BodyIndex i = 0; i < bodies_.size(); ++i) {
+        if (!queryAllows(i, filter)) continue;
         const Body& b = bodies_[i];
         LocalHit h = rayBody(origin, dir, b, soup, best.t);
         if (h.hit && h.t < best.t) {
@@ -270,21 +295,157 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist) const {
     return best;
 }
 
-void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out) const {
-    if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
-        throw std::invalid_argument("velox: overlap sphere requires a finite center and positive radius");
+void World::overlapShape(const Body& shape, std::vector<BodyId>& out,
+                         const QueryFilter& filter) const {
     out.clear();
     const MeshSoupView soup = view(meshes_);
+    float searchRadius = shape.radius + length(shape.halfExtents) +
+                         shape.capsuleHalfHeight + 0.1f;
+    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
+        if (!queryAllows(i, filter)) continue;
+        QueryGap gap = queryGap(shape, bodies_[i], soup, searchRadius);
+        if (gap.gap <= 0.0f) out.push_back(bodyHandle(i));
+    }
+}
+
+void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
+                          const QueryFilter& filter) const {
+    if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
+        throw std::invalid_argument("velox: overlap sphere requires a finite center and positive radius");
     Body probe;
     probe.shape = ShapeType::Sphere;
     probe.position = center;
     probe.radius = radius;
+    overlapShape(probe, out, filter);
+}
+
+void World::overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,
+                       std::vector<BodyId>& out, const QueryFilter& filter) const {
+    if (!finiteQueryVec(center) || !finiteQueryVec(halfExtents) ||
+        halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f ||
+        !finiteQueryQuat(orientation))
+        throw std::invalid_argument("velox: overlap box requires finite positive geometry");
+    float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
+               orientation.z * orientation.z + orientation.w * orientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument("velox: overlap box orientation must be non-zero");
+    Body probe;
+    probe.shape = ShapeType::Box;
+    probe.position = center;
+    probe.orientation = normalize(orientation);
+    probe.halfExtents = halfExtents;
+    overlapShape(probe, out, filter);
+}
+
+void World::overlapCapsule(Vec3 center, float radius, float halfHeight,
+                           Quat orientation, std::vector<BodyId>& out,
+                           const QueryFilter& filter) const {
+    if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f ||
+        !finiteQueryFloat(halfHeight) || halfHeight < 0.0f ||
+        !finiteQueryQuat(orientation))
+        throw std::invalid_argument("velox: overlap capsule requires finite positive geometry");
+    float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
+               orientation.z * orientation.z + orientation.w * orientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument("velox: overlap capsule orientation must be non-zero");
+    Body probe;
+    probe.shape = ShapeType::Capsule;
+    probe.position = center;
+    probe.orientation = normalize(orientation);
+    probe.radius = radius;
+    probe.capsuleHalfHeight = halfHeight;
+    overlapShape(probe, out, filter);
+}
+
+ShapeCastHit World::castShape(Body shape, Vec3 direction, float maxDist,
+                              const QueryFilter& filter) const {
+    if (!finiteQueryVec(direction) || lengthSq(direction) < 1e-12f ||
+        !finiteQueryFloat(maxDist) || maxDist < 0.0f)
+        throw std::invalid_argument(
+            "velox: shape cast requires a non-zero finite direction and non-negative distance");
+    direction = normalize(direction);
+    Vec3 start = shape.position;
+    float bound = shape.radius + length(shape.halfExtents) +
+                  shape.capsuleHalfHeight + 0.1f;
+    float searchRadius = maxDist + bound;
+    const MeshSoupView soup = view(meshes_);
+    ShapeCastHit best;
+    best.distance = maxDist;
 
     for (BodyIndex i = 0; i < bodies_.size(); ++i) {
-        const Body& b = bodies_[i];
-        float gap = sphereBodyGap(probe, b, soup, radius);
-        if (gap <= 0.0f) out.push_back(bodyHandle(i));
+        if (!queryAllows(i, filter)) continue;
+        float distance = 0.0f;
+        QueryGap last{1e30f, {0, 1, 0}, {}};
+        bool hit = false;
+        for (int iteration = 0; iteration < 64; ++iteration) {
+            shape.position = start + direction * distance;
+            last = queryGap(shape, bodies_[i], soup, searchRadius);
+            if (last.gap <= 1e-4f) { hit = true; break; }
+            float closingSpeed = -dot(last.normal, direction);
+            if (closingSpeed <= 1e-6f) break;
+            distance += last.gap / closingSpeed;
+            if (distance > best.distance || distance > maxDist) break;
+        }
+        if (hit && distance <= best.distance) {
+            best.hit = true;
+            best.body = bodyHandle(i);
+            best.distance = distance;
+            best.fraction = maxDist > 0.0f ? distance / maxDist : 0.0f;
+            best.point = last.point;
+            best.normal = last.normal;
+        }
     }
+    return best;
+}
+
+ShapeCastHit World::sphereCast(Vec3 center, float radius, Vec3 direction,
+                               float maxDist, const QueryFilter& filter) const {
+    if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
+        throw std::invalid_argument("velox: sphere cast requires a finite center and radius");
+    Body shape;
+    shape.shape = ShapeType::Sphere;
+    shape.position = center;
+    shape.radius = radius;
+    return castShape(shape, direction, maxDist, filter);
+}
+
+ShapeCastHit World::boxCast(Vec3 center, Vec3 halfExtents, Quat orientation,
+                            Vec3 direction, float maxDist,
+                            const QueryFilter& filter) const {
+    if (!finiteQueryVec(center) || !finiteQueryVec(halfExtents) ||
+        halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f ||
+        !finiteQueryQuat(orientation))
+        throw std::invalid_argument("velox: box cast requires finite positive geometry");
+    float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
+               orientation.z * orientation.z + orientation.w * orientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument("velox: box cast orientation must be non-zero");
+    Body shape;
+    shape.shape = ShapeType::Box;
+    shape.position = center;
+    shape.orientation = normalize(orientation);
+    shape.halfExtents = halfExtents;
+    return castShape(shape, direction, maxDist, filter);
+}
+
+ShapeCastHit World::capsuleCast(Vec3 center, float radius, float halfHeight,
+                                Quat orientation, Vec3 direction, float maxDist,
+                                const QueryFilter& filter) const {
+    if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f ||
+        !finiteQueryFloat(halfHeight) || halfHeight < 0.0f ||
+        !finiteQueryQuat(orientation))
+        throw std::invalid_argument("velox: capsule cast requires finite positive geometry");
+    float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
+               orientation.z * orientation.z + orientation.w * orientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument("velox: capsule cast orientation must be non-zero");
+    Body shape;
+    shape.shape = ShapeType::Capsule;
+    shape.position = center;
+    shape.orientation = normalize(orientation);
+    shape.radius = radius;
+    shape.capsuleHalfHeight = halfHeight;
+    return castShape(shape, direction, maxDist, filter);
 }
 
 } // namespace velox
