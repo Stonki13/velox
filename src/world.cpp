@@ -1,6 +1,7 @@
 #include "velox/world.h"
 #include "narrowphase.h"
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 
 namespace velox {
@@ -785,6 +786,7 @@ WorldSnapshot World::saveSnapshot() const {
     snapshot.contactEvents_ = events_;
     snapshot.jointBreakEvents_ = jointBreakEvents_;
     snapshot.meshes_ = meshes_;
+    snapshot.lastStepStats_ = lastStepStats_;
     return snapshot;
 }
 
@@ -829,6 +831,7 @@ void World::restoreSnapshot(const WorldSnapshot& snapshot) {
     events_.swap(staged.contactEvents_);
     jointBreakEvents_.swap(staged.jointBreakEvents_);
     std::swap(meshes_, staged.meshes_);
+    lastStepStats_ = staged.lastStepStats_;
     backend_->invalidateCaches();
 }
 
@@ -1570,9 +1573,22 @@ void World::updateSleeping(float dt) {
 //    (rotation included) to the moment of first contact. Tunneling stays
 //    impossible regardless of linear or angular speed.
 void World::step(float dt) {
+    using Clock = std::chrono::steady_clock;
+    const auto stepStart = Clock::now();
+    lastStepStats_ = {};
+    lastStepStats_.dt = dt;
+    lastStepStats_.bodyCount = bodies_.size();
+    lastStepStats_.jointCount = joints_.size();
     if (!finiteFloat(dt) || dt < 0.0f)
         throw std::invalid_argument("velox: timestep must be finite and non-negative");
-    if (dt == 0.0f) return;
+    if (dt == 0.0f) {
+        for (const Body& body : bodies_)
+            if (body.isDynamic() && !body.asleep)
+                ++lastStepStats_.awakeDynamicBodies;
+        lastStepStats_.totalMs = std::chrono::duration<double, std::milli>(
+            Clock::now() - stepStart).count();
+        return;
+    }
     jointBreakEvents_.clear();
     if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
     if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
@@ -1678,8 +1694,11 @@ void World::step(float dt) {
     // Detect ONCE per step, with a speculative reach covering the full dt.
     // The solver substeps below re-evaluate each contact's live gap from
     // current body positions (Contact::bias0), Box2D-v3 style.
+    const auto detectionStart = Clock::now();
     backend_->integrate(bodies_, gravity, h); // first substep's gravity
     backend_->findContacts(bodies_, meshes_, dt, contacts_);
+    const auto detectionEnd = Clock::now();
+    lastStepStats_.generatedContacts = contacts_.size();
 
     // Joint-connected bodies do not collide by default. Without this filter,
     // contacts at a hinge anchor fight the joint and CCD repeatedly rewinds the
@@ -1807,6 +1826,11 @@ void World::step(float dt) {
     for (size_t i = 0; i < bodies_.size(); ++i)
         prev_[i] = {bodies_[i].position, bodies_[i].orientation};
 
+    for (const Contact& contact : contacts_)
+        if (!bodies_[contact.a].isSensor() && !bodies_[contact.b].isSensor())
+            ++lastStepStats_.solvedContacts;
+    const auto solverStart = Clock::now();
+
     // --- solver substeps -------------------------------------------------------
     // Each substep: gravity, velocity solve against live gaps, joints, and
     // position integration. Warm starting applies only on the first substep;
@@ -1825,6 +1849,7 @@ void World::step(float dt) {
             }
         }
     }
+    const auto solverEnd = Clock::now();
 
     // --- conservative-advancement safety net ---------------------------------
     // Only pairs that ended the step interpenetrating need rescue. Speculative
@@ -1916,6 +1941,7 @@ void World::step(float dt) {
     }
 
     backend_->fetchImpulses(contacts_); // GPU-resident impulses -> host contacts
+    const auto ccdEnd = Clock::now();
 
     // --- positional correction (split-impulse style) --------------------------
     // Resolve residual penetration by translating bodies apart directly.
@@ -2011,6 +2037,23 @@ void World::step(float dt) {
               [](const Contact& x, const Contact& y) {
                   return ((uint64_t)x.a << 32 | x.b) < ((uint64_t)y.a << 32 | y.b);
               });
+
+    const auto stepEnd = Clock::now();
+    for (const Body& body : bodies_)
+        if (body.isDynamic() && !body.asleep)
+            ++lastStepStats_.awakeDynamicBodies;
+    lastStepStats_.bodyCount = bodies_.size();
+    lastStepStats_.jointCount = joints_.size();
+    auto milliseconds = [](auto duration) {
+        return std::chrono::duration<double, std::milli>(duration).count();
+    };
+    lastStepStats_.collisionDetectionMs = milliseconds(detectionEnd - detectionStart);
+    lastStepStats_.solverMs = milliseconds(solverEnd - solverStart);
+    lastStepStats_.ccdMs = milliseconds(ccdEnd - solverEnd);
+    lastStepStats_.setupMs = milliseconds(detectionStart - stepStart) +
+                             milliseconds(solverStart - detectionEnd);
+    lastStepStats_.finalizeMs = milliseconds(stepEnd - ccdEnd);
+    lastStepStats_.totalMs = milliseconds(stepEnd - stepStart);
 }
 
 } // namespace velox

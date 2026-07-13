@@ -112,6 +112,8 @@ closed 3D polytope cannot exist.
 - **Rollback snapshots**: copyable same-world checkpoints restore bodies,
   joints, geometry, stable-handle generations, warm starts, sleeping state,
   and event phase while invalidating CPU/CUDA backend caches for exact replay
+- **Frame diagnostics**: body/awake/contact/joint workload counters plus wall
+  timings for setup, collision detection, solving, CCD recovery, and finalization
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
   islands cost nothing and wake on impact
 - **Queries**: symmetrically filtered raycasts, sphere/box/capsule/convex-hull

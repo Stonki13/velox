@@ -1205,6 +1205,36 @@ static void testWorldSnapshots() {
           "world snapshot (topology, caches, deterministic replay)");
 }
 
+// 37. Built-in frame diagnostics expose enough phase and workload data to
+// profile collision/solver/CCD regressions without an external timing harness.
+static void testStepStats() {
+    velox::World w;
+    auto ground = w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto ball = w.addSphere({0, 0.5f, 0}, 0.5f, 1.0f);
+    auto anchor = w.addSphere({2, 1, 0}, 0.2f, 0.0f);
+    w.addDistanceJoint(anchor, ball, {2, 1, 0}, {0, 0.5f, 0});
+    w.step(1.0f / 60.0f);
+    const velox::StepStats stats = w.lastStepStats();
+    double phases = stats.setupMs + stats.collisionDetectionMs + stats.solverMs +
+                    stats.ccdMs + stats.finalizeMs;
+    bool ok = stats.dt == 1.0f / 60.0f && stats.bodyCount == 3 &&
+              stats.awakeDynamicBodies == 1 && stats.generatedContacts >= 1 &&
+              stats.solvedContacts >= 1 && stats.jointCount == 1 &&
+              stats.setupMs >= 0.0 && stats.collisionDetectionMs >= 0.0 &&
+              stats.solverMs >= 0.0 && stats.ccdMs >= 0.0 &&
+              stats.finalizeMs >= 0.0 && stats.totalMs > 0.0 &&
+              std::fabs(stats.totalMs - phases) < 0.1;
+    auto snapshot = w.saveSnapshot();
+    w.step(0.0f);
+    ok &= w.lastStepStats().dt == 0.0f && w.lastStepStats().bodyCount == 3;
+    w.restoreSnapshot(snapshot);
+    ok &= w.lastStepStats().dt == stats.dt &&
+          w.lastStepStats().generatedContacts == stats.generatedContacts;
+    auto hit = w.rayCast({0, 3, 0}, {0, -1, 0}, 10.0f);
+    ok &= hit.hit && (hit.body == ball || hit.body == ground);
+    check(ok, "step diagnostics (workload counters and phase timings)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1242,6 +1272,7 @@ int main() {
     testDistanceSpring();
     testBreakableJoints();
     testWorldSnapshots();
+    testStepStats();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

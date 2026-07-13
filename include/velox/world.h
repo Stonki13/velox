@@ -60,6 +60,21 @@ struct ContactModifyData {
 
 using ContactModifier = std::function<void(ContactModifyData&)>;
 
+struct StepStats {
+    float dt = 0.0f;
+    size_t bodyCount = 0;
+    size_t awakeDynamicBodies = 0;
+    size_t generatedContacts = 0;
+    size_t solvedContacts = 0;
+    size_t jointCount = 0;
+    double setupMs = 0.0;
+    double collisionDetectionMs = 0.0;
+    double solverMs = 0.0;
+    double ccdMs = 0.0;
+    double finalizeMs = 0.0;
+    double totalMs = 0.0;
+};
+
 class World;
 
 // Copyable rollback point owned by the World that created it. Its contents are
@@ -90,6 +105,7 @@ private:
     std::vector<ContactEvent> contactEvents_;
     std::vector<JointBreakEvent> jointBreakEvents_;
     MeshSoup meshes_;
+    StepStats lastStepStats_;
 };
 
 class World {
@@ -143,6 +159,7 @@ public:
     void clearForces(BodyId id);
     WorldSnapshot saveSnapshot() const;
     void restoreSnapshot(const WorldSnapshot& snapshot);
+    const StepStats& lastStepStats() const { return lastStepStats_; }
 
     // --- joints -------------------------------------------------------------
     JointId addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor);
@@ -258,6 +275,7 @@ private:
     std::vector<JointBreakEvent> jointBreakEvents_;
     std::vector<uint64_t> prevPairKeys_;
     ContactModifier contactModifier_;
+    StepStats lastStepStats_;
     MeshSoup meshes_;
     std::unique_ptr<Backend> backend_;
 };
