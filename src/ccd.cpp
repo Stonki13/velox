@@ -1,22 +1,24 @@
 #include "ccd.h"
+#include <cmath>
 
 namespace velox {
 
-float sweepSpherePlane(const Body& s, const Body& p, float dt) {
-    // Signed distance of the sphere surface from the plane along its motion.
-    float dist = dot(p.planeNormal, s.position) - p.planeOffset - s.radius;
-    float speed = dot(p.planeNormal, s.velocity) * dt; // motion over the step
-    if (dist <= 0.0f) return 0.0f;      // already touching/penetrating
-    if (speed >= -1e-9f) return -1.0f;  // moving away or parallel
-    float toi = dist / -speed;
+float sweepSpherePlane(const Vec3& p0, const Vec3& disp, float radius,
+                       const Vec3& planeNormal, float planeOffset) {
+    float dist = dot(planeNormal, p0) - planeOffset - radius;
+    float motion = dot(planeNormal, disp);
+    if (dist <= 0.0f) return 0.0f;        // already touching/penetrating
+    if (motion >= -1e-9f) return -1.0f;   // moving away or parallel
+    float toi = dist / -motion;
     return toi <= 1.0f ? toi : -1.0f;
 }
 
-float sweepSphereSphere(const Body& a, const Body& b, float dt) {
-    // Relative motion: solve |(p + v t)| = r as a quadratic in t, t in [0, dt].
-    Vec3 p = a.position - b.position;
-    Vec3 v = (a.velocity - b.velocity) * dt;
-    float r = a.radius + b.radius;
+float sweepSphereSphere(const Vec3& pa, const Vec3& dispA, float ra,
+                        const Vec3& pb, const Vec3& dispB, float rb) {
+    // Relative motion: solve |p + v t| = r as a quadratic in t, t in [0, 1].
+    Vec3 p = pa - pb;
+    Vec3 v = dispA - dispB;
+    float r = ra + rb;
 
     float c = lengthSq(p) - r * r;
     if (c <= 0.0f) return 0.0f;          // already overlapping

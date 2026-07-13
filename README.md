@@ -11,20 +11,38 @@ Velox (Latin: *swift*) is built around two core promises:
    hot loops can run on the GPU (CUDA / compute-shader backend) as well as
    wide-SIMD CPU.
 
+## Predictive Contact Sweeping (PCS)
+
+Classic CCD picks one of two designs and inherits its flaws: event-driven
+time-of-impact stepping (exact, but stalls on piles and makes grazing contact
+sticky) or speculative contacts alone (smooth, but an iterative solver can
+still let extreme cases slip). Velox layers them:
+
+1. **Speculative detection** — contacts are created while pairs are still
+   apart, whenever relative motion could close the gap this step.
+2. **Iterative velocity solve** — each contact removes only approach velocity
+   in excess of `gap/dt`. Grazing bodies keep their speed; piles are resolved
+   by solver iterations, so there is no event queue to stall.
+3. **Exact sweep safety net** — after integration, every body is swept along
+   the displacement it actually made; anything the solver let slip is clamped
+   to its exact time of impact. Tunneling is impossible by construction.
+
+`examples/stress_demo` locks all of this in: a 2 km/s bullet, a grazing skim,
+a 125-sphere pile, a 3 km/s head-on impact, and long-run resting stability.
+
 ## Status
 
 Early development. Working today:
 
 - Rigid body dynamics (semi-implicit Euler integrator)
 - Sphere and static-plane colliders
-- **Swept-sphere CCD** — a sphere moving at any speed cannot tunnel through a plane
-- Impulse-based collision response with restitution and friction
+- PCS collision pipeline (above) with restitution and accumulated-impulse friction
 - Clean backend interface (`velox::Backend`) so a GPU solver can drop in
 
 Roadmap:
 
 - [ ] Boxes, capsules, convex hulls (GJK/EPA)
-- [ ] Conservative-advancement CCD for rotating bodies
+- [ ] Rotational dynamics + conservative-advancement sweeps for spinning bodies
 - [ ] Broad phase: sweep-and-prune → GPU BVH
 - [ ] CUDA backend for integration + narrow phase
 - [ ] Constraint solver (joints), islands, sleeping

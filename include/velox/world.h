@@ -18,13 +18,15 @@ public:
     const Body& body(BodyId id) const { return bodies_[id]; }
     size_t bodyCount() const { return bodies_.size(); }
 
-    // Advances the simulation. CCD is always on: bodies are swept along their
-    // motion for the full substep, so no velocity can tunnel through geometry.
+    // Advances the simulation using Predictive Contact Sweeping: speculative
+    // contacts solved iteratively, backed by an exact sweep safety net, so no
+    // velocity can tunnel through geometry and grazing contact stays smooth.
     void step(float dt);
 
 private:
     std::vector<Body> bodies_;
     std::vector<Contact> contacts_;
+    std::vector<Vec3> prevPositions_;
     std::unique_ptr<Backend> backend_;
 };
 

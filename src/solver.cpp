@@ -1,5 +1,4 @@
 #include "velox/backend.h"
-#include "ccd.h"
 
 namespace velox {
 
@@ -29,6 +28,16 @@ public:
     }
 
 private:
+    // A pair becomes a speculative contact when the gap could close within the
+    // step: gap < closing_speed * dt + slop.
+    static void emit(const Body& a, const Body& b, BodyId ia, BodyId ib,
+                     Vec3 normal, float gap, float dt, std::vector<Contact>& out) {
+        float vn = dot(a.velocity - b.velocity, normal);
+        constexpr float slop = 1e-3f;
+        if (gap > -vn * dt + slop && gap > slop) return; // cannot touch this step
+        out.push_back({ia, ib, normal, gap, vn, 0.0f, 0.0f});
+    }
+
     static void collide(const Body& a, const Body& b, BodyId ia, BodyId ib,
                         float dt, std::vector<Contact>& out) {
         if (a.shape == ShapeType::Sphere && b.shape == ShapeType::Plane) {
@@ -36,23 +45,17 @@ private:
         } else if (a.shape == ShapeType::Plane && b.shape == ShapeType::Sphere) {
             spherePlane(b, a, ib, ia, dt, out);
         } else if (a.shape == ShapeType::Sphere && b.shape == ShapeType::Sphere) {
-            float toi = sweepSphereSphere(a, b, dt);
-            if (toi < 0.0f) return;
-            Vec3 pa = a.position + a.velocity * (dt * toi);
-            Vec3 pb = b.position + b.velocity * (dt * toi);
-            Vec3 n = normalize(pa - pb);
-            float depth = (a.radius + b.radius) - length(pa - pb);
-            out.push_back({ia, ib, n, depth > 0 ? depth : 0, toi});
+            Vec3 d = a.position - b.position;
+            float dist = length(d);
+            Vec3 n = dist > 1e-8f ? d * (1.0f / dist) : Vec3{0, 1, 0};
+            emit(a, b, ia, ib, n, dist - (a.radius + b.radius), dt, out);
         }
     }
 
     static void spherePlane(const Body& s, const Body& p, BodyId is, BodyId ip,
                             float dt, std::vector<Contact>& out) {
-        float toi = sweepSpherePlane(s, p, dt);
-        if (toi < 0.0f) return;
-        Vec3 pos = s.position + s.velocity * (dt * toi);
-        float depth = s.radius - (dot(p.planeNormal, pos) - p.planeOffset);
-        out.push_back({is, ip, p.planeNormal, depth > 0 ? depth : 0, toi});
+        float gap = dot(p.planeNormal, s.position) - p.planeOffset - s.radius;
+        emit(s, p, is, ip, p.planeNormal, gap, dt, out);
     }
 };
 
