@@ -73,8 +73,9 @@ the 8192-body all-pairs reference path takes 183.94 ms instead of 51.86 ms.
 Box2D-v3-style TGS: detection runs **once per step**, then several solver
 substeps re-evaluate every contact's live gap from persistent local anchors and
 the bodies' current transforms. Sequential impulses with warm starting
-(normal and two-axis Coulomb friction impulses persist through stable contact
-feature keys, with proximity fallback for topology-free GJK contacts),
+(normal, two-axis Coulomb friction, rolling, and spinning impulses persist
+through stable contact feature keys, with proximity fallback for topology-free
+GJK contacts),
 face-snapped box and convex-hull manifolds for deterministic stacking,
 split-impulse positional correction (penetration is resolved by translation,
 never by velocity bias — no energy injection), and whole-island sleeping. A
@@ -99,6 +100,9 @@ closed 3D polytope cannot exist.
   other by default; `Joint::collideConnected` opts back in.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
   and torques, point impulses, per-body damping and gravity scaling
+- **Materials**: average/geometric/minimum/multiply/maximum combine modes,
+  body-local anisotropic friction, restitution, and load-bounded rolling and
+  spinning resistance; all coefficients are shared by the CPU and CUDA solvers
 - **Safe object lifetime**: generation-checked body/joint handles, dense
   swap-removal, stale-handle rejection, and automatic attached-joint cleanup
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
@@ -108,7 +112,9 @@ closed 3D polytope cannot exist.
   collider (BVH-accelerated for meshes), with sensor and ignored-body policy
 - **Collision policy**: symmetric category/mask filtering and non-responsive
   sensors, with pair-level Begin/Persist/End events, stable body handles,
-  representative contact point/normal, and solved normal impulse
+  representative contact point/normal, and solved normal impulse. A validated
+  host contact modifier can alter contact geometry/materials or disable
+  individual manifold points before either backend solves them.
 - GJK narrow phase over support functions (one code path for all convex
   pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
 - **CUDA backend**: integration, narrow phase, and graph-colored contact

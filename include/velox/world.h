@@ -1,7 +1,9 @@
 #pragma once
 #include "backend.h"
 #include "joint.h"
+#include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace velox {
@@ -39,6 +41,17 @@ struct ShapeCastHit {
     float fraction = 0.0f;
     Vec3 point, normal; // normal points from the hit body toward the cast shape
 };
+
+struct ContactModifyData {
+    BodyId a, b;
+    Vec3 point, normal;
+    float restitution = 0.0f;
+    float friction1 = 0.0f, friction2 = 0.0f;
+    float rollingFriction = 0.0f, spinningFriction = 0.0f;
+    bool enabled = true;
+};
+
+using ContactModifier = std::function<void(ContactModifyData&)>;
 
 class World {
 public:
@@ -105,6 +118,12 @@ public:
 
     // Contact and sensor Begin/Persist/End events from the most recent step().
     const std::vector<ContactEvent>& contactEvents() const { return events_; }
+    // Runs once per generated contact before waking, warm starting, and solving.
+    // The callback may change the point, normal, resolved material values, or
+    // disable the contact. Throwing aborts step() before body transforms advance.
+    void setContactModifier(ContactModifier modifier) {
+        contactModifier_ = std::move(modifier);
+    }
 
     // --- sleeping -----------------------------------------------------------
     // Bodies whose island stays below the motion threshold for a while are
@@ -176,6 +195,7 @@ private:
     std::vector<float> islandTimer_;
     std::vector<ContactEvent> events_;
     std::vector<uint64_t> prevPairKeys_;
+    ContactModifier contactModifier_;
     MeshSoup meshes_;
     std::unique_ptr<Backend> backend_;
 };

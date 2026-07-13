@@ -16,6 +16,10 @@ bool finiteQuat(const Quat& q) {
            finiteFloat(q.z) && finiteFloat(q.w);
 }
 
+bool validCombineMode(MaterialCombineMode mode) {
+    return (uint8_t)mode <= (uint8_t)MaterialCombineMode::Maximum;
+}
+
 void requireFiniteVec(const Vec3& value, const char* message) {
     if (!finiteVec(value)) throw std::invalid_argument(message);
 }
@@ -42,6 +46,12 @@ void validateRuntimeBody(const Body& body) {
         body.invInertia.y < 0.0f || body.invInertia.z < 0.0f ||
         !finiteFloat(body.restitution) ||
         body.restitution < 0.0f || !finiteFloat(body.friction) || body.friction < 0.0f ||
+        !finiteVec(body.frictionScale) || body.frictionScale.x < 0.0f ||
+        body.frictionScale.y < 0.0f || body.frictionScale.z < 0.0f ||
+        !finiteFloat(body.rollingFriction) || body.rollingFriction < 0.0f ||
+        !finiteFloat(body.spinningFriction) || body.spinningFriction < 0.0f ||
+        !validCombineMode(body.frictionCombine) ||
+        !validCombineMode(body.restitutionCombine) ||
         !finiteFloat(body.linearDamping) || body.linearDamping < 0.0f ||
         !finiteFloat(body.angularDamping) || body.angularDamping < 0.0f ||
         !finiteFloat(body.gravityScale))
@@ -1392,6 +1402,47 @@ void World::step(float dt) {
             }), contacts_.end());
     }
 
+    if (contactModifier_ && !contacts_.empty()) {
+        contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+            [&](Contact& c) {
+                ContactModifyData data;
+                data.a = bodyHandle(c.a);
+                data.b = bodyHandle(c.b);
+                data.point = c.point;
+                data.normal = c.normal;
+                data.restitution = c.restitution;
+                data.friction1 = c.friction1;
+                data.friction2 = c.friction2;
+                data.rollingFriction = c.rollingFriction;
+                data.spinningFriction = c.spinningFriction;
+                contactModifier_(data);
+                if (!data.enabled) return true;
+                if (!finiteVec(data.point) || !finiteVec(data.normal) ||
+                    lengthSq(data.normal) < 1e-12f ||
+                    !finiteFloat(data.restitution) || data.restitution < 0.0f ||
+                    !finiteFloat(data.friction1) || data.friction1 < 0.0f ||
+                    !finiteFloat(data.friction2) || data.friction2 < 0.0f ||
+                    !finiteFloat(data.rollingFriction) || data.rollingFriction < 0.0f ||
+                    !finiteFloat(data.spinningFriction) || data.spinningFriction < 0.0f)
+                    throw std::invalid_argument(
+                        "velox: contact modifier returned invalid contact state");
+
+                c.point = data.point;
+                c.normal = normalize(data.normal);
+                c.localAnchorA = contactAnchorLocal(bodies_[c.a], c.point);
+                c.localAnchorB = contactAnchorLocal(bodies_[c.b], c.point);
+                c.bias0 = c.gap;
+                c.vn0 = dot(npPointVelocity(bodies_[c.a], c.point) -
+                            npPointVelocity(bodies_[c.b], c.point), c.normal);
+                c.restitution = data.restitution;
+                c.friction1 = data.friction1;
+                c.friction2 = data.friction2;
+                c.rollingFriction = data.rollingFriction;
+                c.spinningFriction = data.spinningFriction;
+                return false;
+            }), contacts_.end());
+    }
+
     // --- wake pass ------------------------------------------------------------
     // A sleeping body is woken when something awake and moving (or actually
     // striking it) shares a contact with it.
@@ -1427,6 +1478,9 @@ void World::step(float dt) {
                         c.normalImpulse = it->normalImpulse;
                         c.tangentImpulse1 = it->tangentImpulse1;
                         c.tangentImpulse2 = it->tangentImpulse2;
+                        c.rollingImpulse1 = it->rollingImpulse1;
+                        c.rollingImpulse2 = it->rollingImpulse2;
+                        c.spinningImpulse = it->spinningImpulse;
                         matched = true;
                         break;
                     }
@@ -1440,6 +1494,9 @@ void World::step(float dt) {
                     c.normalImpulse = it->normalImpulse;
                     c.tangentImpulse1 = it->tangentImpulse1;
                     c.tangentImpulse2 = it->tangentImpulse2;
+                    c.rollingImpulse1 = it->rollingImpulse1;
+                    c.rollingImpulse2 = it->rollingImpulse2;
+                    c.spinningImpulse = it->spinningImpulse;
                 }
             }
         }

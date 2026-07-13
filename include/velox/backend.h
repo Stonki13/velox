@@ -63,9 +63,14 @@ struct Contact {
                           // lets the solver evaluate the live translational and
                           // rotational gap over several solver substeps
     float vn0;            // normal approach velocity at detection (for restitution)
+    float restitution;    // resolved material values (modifiable before solve)
+    float friction1, friction2;
+    float rollingFriction, spinningFriction;
     float normalImpulse;  // accumulated by the solver
     float tangentImpulse1;
     float tangentImpulse2;
+    float rollingImpulse1, rollingImpulse2;
+    float spinningImpulse;
 };
 
 enum class BackendType { Auto, Cpu, Cuda };

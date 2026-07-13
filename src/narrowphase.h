@@ -16,7 +16,13 @@ VELOX_HD inline Vec3 npPointVelocity(const Body& b, const Vec3& p) {
 }
 
 VELOX_HD inline Vec3 contactAnchorWorld(const Body& b, const Vec3& localAnchor) {
-    return b.position + rotate(b.orientation, localAnchor);
+    return b.position + (b.shape == ShapeType::Sphere
+        ? localAnchor : rotate(b.orientation, localAnchor));
+}
+
+VELOX_HD inline Vec3 contactAnchorLocal(const Body& b, const Vec3& worldAnchor) {
+    Vec3 offset = worldAnchor - b.position;
+    return b.shape == ShapeType::Sphere ? offset : rotateInv(b.orientation, offset);
 }
 
 VELOX_HD inline float contactLiveGap(const Body& a, const Body& b, const Contact& c) {
@@ -34,12 +40,38 @@ VELOX_HD inline void contactTangents(const Vec3& normal, Vec3& tangent1, Vec3& t
     tangent2 = cross(normal, tangent1);
 }
 
+VELOX_HD inline float combineMaterial(float a, float b,
+                                      MaterialCombineMode modeA,
+                                      MaterialCombineMode modeB) {
+    MaterialCombineMode mode = (uint8_t)modeA >= (uint8_t)modeB ? modeA : modeB;
+    switch (mode) {
+    case MaterialCombineMode::Average: return 0.5f * a + 0.5f * b;
+    case MaterialCombineMode::GeometricMean: return sqrtf(a) * sqrtf(b);
+    case MaterialCombineMode::Minimum: return vmin(a, b);
+    case MaterialCombineMode::Multiply:
+        return b > 0.0f && a > 3.402823466e+38F / b
+            ? 3.402823466e+38F : a * b;
+    case MaterialCombineMode::Maximum: return vmax(a, b);
+    }
+    return 0.0f;
+}
+
+VELOX_HD inline float directionalFrictionScale(const Body& body,
+                                                const Vec3& worldDirection) {
+    Vec3 local = rotateInv(body.orientation, worldDirection);
+    Vec3 scaled{local.x * body.frictionScale.x,
+                local.y * body.frictionScale.y,
+                local.z * body.frictionScale.z};
+    return length(scaled);
+}
+
 // Re-applies the accumulated normal impulse carried over from the previous
 // frame (warm starting). Persistent contacts then converge in far fewer
 // iterations, which is what keeps tall stacks solid.
 VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
     if (c.normalImpulse <= 0.0f && c.tangentImpulse1 == 0.0f &&
-        c.tangentImpulse2 == 0.0f) return;
+        c.tangentImpulse2 == 0.0f && c.rollingImpulse1 == 0.0f &&
+        c.rollingImpulse2 == 0.0f && c.spinningImpulse == 0.0f) return;
     Vec3 pa = contactAnchorWorld(a, c.localAnchorA);
     Vec3 pb = contactAnchorWorld(b, c.localAnchorB);
     c.point = (pa + pb) * 0.5f;
@@ -48,13 +80,18 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
     Vec3 impulse = c.normal * c.normalImpulse +
                    tangent1 * c.tangentImpulse1 +
                    tangent2 * c.tangentImpulse2;
+    Vec3 angularImpulse = tangent1 * c.rollingImpulse1 +
+                          tangent2 * c.rollingImpulse2 +
+                          c.normal * c.spinningImpulse;
     if (a.isDynamic()) {
         a.velocity += impulse * a.solverInvMass();
         a.angularVelocity += a.invInertiaMul(cross(c.point - a.position, impulse));
+        a.angularVelocity += a.invInertiaMul(angularImpulse);
     }
     if (b.isDynamic()) {
         b.velocity -= impulse * b.solverInvMass();
         b.angularVelocity -= b.invInertiaMul(cross(c.point - b.position, impulse));
+        b.angularVelocity -= b.invInertiaMul(angularImpulse);
     }
 }
 
@@ -89,7 +126,7 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     float liveGap = c.bias0 + dot(c.normal, pa - pb);
     float target = liveGap > 0.0f ? -liveGap / dt : 0.0f;
     if (c.vn0 < -kRestitutionThreshold)
-        target = vmax(target, -vmin(a.restitution, b.restitution) * c.vn0);
+        target = vmax(target, -c.restitution * c.vn0);
 
     float jn = (target - vn) / kNormal;
     float newImpulse = vmax(c.normalImpulse + jn, 0.0f);
@@ -122,12 +159,15 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
         float old1 = c.tangentImpulse1, old2 = c.tangentImpulse2;
         float next1 = old1 - dot(rv, tangent1) / k1;
         float next2 = old2 - dot(rv, tangent2) / k2;
-        float maxFriction = sqrtf(a.friction * b.friction) * c.normalImpulse;
-        float magnitude = sqrtf(next1 * next1 + next2 * next2);
-        if (magnitude > maxFriction && magnitude > 1e-9f) {
-            float scale = maxFriction / magnitude;
-            next1 *= scale;
-            next2 *= scale;
+        float max1 = c.friction1 * c.normalImpulse;
+        float max2 = c.friction2 * c.normalImpulse;
+        if (max1 <= 0.0f) next1 = 0.0f;
+        if (max2 <= 0.0f) next2 = 0.0f;
+        float ellipse = (max1 > 0.0f ? next1 * next1 / (max1 * max1) : 0.0f) +
+                        (max2 > 0.0f ? next2 * next2 / (max2 * max2) : 0.0f);
+        if (ellipse > 1.0f) {
+            float scale = 1.0f / sqrtf(ellipse);
+            next1 *= scale; next2 *= scale;
         }
         c.tangentImpulse1 = next1;
         c.tangentImpulse2 = next2;
@@ -140,6 +180,44 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
             b.velocity -= fImpulse * b.solverInvMass();
             b.angularVelocity -= b.invInertiaMul(cross(rb, fImpulse));
         }
+    }
+
+    // Rolling and spinning resistance are angular impulses bounded by the
+    // normal load. Coefficients have length units, matching common rigid-body
+    // rolling-friction models (torque impulse <= coefficient * normal impulse).
+    Vec3 wr = a.angularVelocity - b.angularVelocity;
+    float kr1 = dot(tangent1, a.invInertiaMul(tangent1)) +
+                dot(tangent1, b.invInertiaMul(tangent1));
+    float kr2 = dot(tangent2, a.invInertiaMul(tangent2)) +
+                dot(tangent2, b.invInertiaMul(tangent2));
+    if (c.rollingFriction > 0.0f && kr1 > 0.0f && kr2 > 0.0f) {
+        float old1 = c.rollingImpulse1, old2 = c.rollingImpulse2;
+        float next1 = old1 - dot(wr, tangent1) / kr1;
+        float next2 = old2 - dot(wr, tangent2) / kr2;
+        float limit = c.rollingFriction * c.normalImpulse;
+        float magnitude = sqrtf(next1 * next1 + next2 * next2);
+        if (magnitude > limit && magnitude > 1e-9f) {
+            float scale = limit / magnitude;
+            next1 *= scale; next2 *= scale;
+        }
+        c.rollingImpulse1 = next1;
+        c.rollingImpulse2 = next2;
+        Vec3 torque = tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
+        if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(torque);
+        if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(torque);
+    }
+    wr = a.angularVelocity - b.angularVelocity;
+    float ks = dot(c.normal, a.invInertiaMul(c.normal)) +
+               dot(c.normal, b.invInertiaMul(c.normal));
+    if (c.spinningFriction > 0.0f && ks > 0.0f) {
+        float old = c.spinningImpulse;
+        float next = old - dot(wr, c.normal) / ks;
+        float limit = c.spinningFriction * c.normalImpulse;
+        next = vclamp(next, -limit, limit);
+        c.spinningImpulse = next;
+        Vec3 torque = c.normal * (next - old);
+        if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(torque);
+        if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(torque);
     }
 }
 
@@ -203,11 +281,26 @@ VELOX_HD inline void emit(const Body& a, const Body& b, BodyIndex ia, BodyIndex 
     float reach = (a.maxPointSpeed() + b.maxPointSpeed()) * dt + slop;
     if (gap > reach) return; // cannot touch this step
     float vn = dot(npPointVelocity(a, point) - npPointVelocity(b, point), normal);
-    Vec3 localA = rotateInv(a.orientation, point - a.position);
-    Vec3 localB = rotateInv(b.orientation, point - b.position);
+    Vec3 localA = contactAnchorLocal(a, point);
+    Vec3 localB = contactAnchorLocal(b, point);
     float bias0 = gap;
-    out[n++] = {ia, ib, featureKey, normal, point, localA, localB, gap, bias0,
-                vn, 0.0f, 0.0f, 0.0f};
+    Vec3 tangent1, tangent2;
+    contactTangents(normal, tangent1, tangent2);
+    float friction = combineMaterial(a.friction, b.friction,
+                                     a.frictionCombine, b.frictionCombine);
+    float scale1 = sqrtf(directionalFrictionScale(a, tangent1) *
+                         directionalFrictionScale(b, tangent1));
+    float scale2 = sqrtf(directionalFrictionScale(a, tangent2) *
+                         directionalFrictionScale(b, tangent2));
+    float restitution = combineMaterial(a.restitution, b.restitution,
+                                        a.restitutionCombine, b.restitutionCombine);
+    float rolling = combineMaterial(a.rollingFriction, b.rollingFriction,
+                                    a.frictionCombine, b.frictionCombine);
+    float spinning = combineMaterial(a.spinningFriction, b.spinningFriction,
+                                     a.frictionCombine, b.frictionCombine);
+    out[n++] = {ia, ib, featureKey, normal, point, localA, localB, gap, bias0, vn,
+                restitution, friction * scale1, friction * scale2, rolling, spinning,
+                0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 }
 
 VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,

@@ -834,6 +834,135 @@ static void testFilteredQueriesAndShapeCasts() {
     check(ok, "filtered queries and shape casts (sphere, box, capsule)");
 }
 
+// 32. Material coefficients are resolved once per contact for both backends.
+// Combine modes, body-local anisotropy, angular resistance, and host contact
+// modification must all affect the same shared solver rows.
+static void testMaterialsAndContactModification() {
+    auto resolvedFriction = [](velox::MaterialCombineMode mode) {
+        velox::World w;
+        w.gravity = {0, 0, 0};
+        auto floor = w.addStaticPlane({0, 1, 0}, 0.0f);
+        auto ball = w.addSphere({0, 0.5f, 0}, 0.5f, 1.0f);
+        w.body(floor).friction = 0.25f;
+        w.body(ball).friction = 0.5f;
+        w.body(floor).frictionCombine = w.body(ball).frictionCombine = mode;
+        float resolved = -1.0f;
+        w.setContactModifier([&](velox::ContactModifyData& contact) {
+            resolved = contact.friction1;
+        });
+        w.step(1.0f / 60.0f);
+        return resolved;
+    };
+    bool allCombinesOk =
+        std::fabs(resolvedFriction(velox::MaterialCombineMode::Average) - 0.375f) < 1e-5f &&
+        std::fabs(resolvedFriction(velox::MaterialCombineMode::GeometricMean) -
+                  std::sqrt(0.125f)) < 1e-5f &&
+        std::fabs(resolvedFriction(velox::MaterialCombineMode::Minimum) - 0.25f) < 1e-5f &&
+        std::fabs(resolvedFriction(velox::MaterialCombineMode::Multiply) - 0.125f) < 1e-5f &&
+        std::fabs(resolvedFriction(velox::MaterialCombineMode::Maximum) - 0.5f) < 1e-5f;
+
+    auto bounceVelocity = [](velox::MaterialCombineMode sphereMode) {
+        velox::World w;
+        w.gravity = {0, 0, 0};
+        auto floor = w.addStaticPlane({0, 1, 0}, 0.0f);
+        auto ball = w.addSphere({0, 1, 0}, 0.5f, 1.0f);
+        w.body(floor).restitution = 0.0f;
+        w.body(ball).restitution = 1.0f;
+        w.body(ball).restitutionCombine = sphereMode;
+        w.setLinearVelocity(ball, {0, -5, 0});
+        for (int i = 0; i < 15; ++i) w.step(1.0f / 60.0f);
+        return w.body(ball).velocity.y;
+    };
+    float minimumBounce = bounceVelocity(velox::MaterialCombineMode::Minimum);
+    float maximumBounce = bounceVelocity(velox::MaterialCombineMode::Maximum);
+    bool combineOk = allCombinesOk && minimumBounce < 0.1f && maximumBounce > 4.0f;
+
+    velox::World directional;
+    auto floor = directional.addStaticPlane({0, 1, 0}, 0.0f);
+    directional.body(floor).friction = 1.0f;
+    auto alongX = directional.addBox({0, 0.5f, -50}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    auto alongZ = directional.addBox({-50, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    for (auto id : {alongX, alongZ}) {
+        directional.body(id).friction = 1.0f;
+        directional.body(id).frictionScale = {0, 1, 4};
+    }
+    directional.setLinearVelocity(alongX, {10, 0, 0});
+    directional.setLinearVelocity(alongZ, {0, 0, 10});
+    for (int i = 0; i < 120; ++i) directional.step(1.0f / 60.0f);
+    bool anisotropyOk = directional.body(alongX).velocity.x > 9.0f &&
+                        std::fabs(directional.body(alongZ).velocity.z) < 0.5f;
+
+    auto angularSpeed = [](bool rolling, float coefficient) {
+        velox::World w;
+        auto ground = w.addStaticPlane({0, 1, 0}, 0.0f);
+        auto sphere = w.addSphere({0, 0.5f, 0}, 0.5f, 1.0f);
+        w.body(ground).friction = w.body(sphere).friction = 0.0f;
+        w.body(ground).rollingFriction = w.body(sphere).rollingFriction = coefficient;
+        w.body(ground).spinningFriction = w.body(sphere).spinningFriction = coefficient;
+        w.setAngularVelocity(sphere, rolling ? velox::Vec3{20, 0, 0}
+                                             : velox::Vec3{0, 20, 0});
+        for (int i = 0; i < 60; ++i) w.step(1.0f / 60.0f);
+        return rolling ? std::fabs(w.body(sphere).angularVelocity.x)
+                       : std::fabs(w.body(sphere).angularVelocity.y);
+    };
+    float rollingFree = angularSpeed(true, 0.0f);
+    float rollingResisted = angularSpeed(true, 0.5f);
+    float spinningFree = angularSpeed(false, 0.0f);
+    float spinningResisted = angularSpeed(false, 0.5f);
+    bool angularOk = rollingFree > 19.0f && rollingResisted < 0.5f &&
+                     spinningFree > 19.0f && spinningResisted < 0.5f;
+
+    velox::World disabled;
+    auto disabledFloor = disabled.addStaticPlane({0, 1, 0}, 0.0f);
+    auto falling = disabled.addSphere({0, 1, 0}, 0.5f, 1.0f);
+    int callbackCount = 0;
+    bool handlesOk = true;
+    disabled.setContactModifier([&](velox::ContactModifyData& contact) {
+        ++callbackCount;
+        handlesOk &= (contact.a == falling && contact.b == disabledFloor) ||
+                     (contact.a == disabledFloor && contact.b == falling);
+        contact.enabled = false;
+    });
+    for (int i = 0; i < 40; ++i) disabled.step(1.0f / 60.0f);
+    bool disableOk = callbackCount > 0 && handlesOk &&
+                     disabled.body(falling).position.y < -0.5f;
+
+    velox::World modified;
+    modified.gravity = {0, 0, 0};
+    modified.addStaticPlane({0, 1, 0}, 0.0f);
+    auto modifiedBall = modified.addSphere({0, 1, 0}, 0.5f, 1.0f);
+    modified.setLinearVelocity(modifiedBall, {0, -5, 0});
+    modified.setContactModifier([](velox::ContactModifyData& contact) {
+        contact.restitution = 1.0f;
+        contact.friction1 = contact.friction2 = 0.0f;
+    });
+    for (int i = 0; i < 15; ++i) modified.step(1.0f / 60.0f);
+    bool overrideOk = modified.body(modifiedBall).velocity.y > 4.0f;
+    modified.setContactModifier([](velox::ContactModifyData& contact) {
+        contact.friction1 = std::numeric_limits<float>::quiet_NaN();
+    });
+    modified.setLinearVelocity(modifiedBall, {0, -20, 0});
+    bool validationOk = throwsException([&] {
+        for (int i = 0; i < 30; ++i) modified.step(1.0f / 60.0f);
+    });
+
+    velox::World invalidMaterial;
+    invalidMaterial.gravity = {0, 0, 0};
+    auto invalidBody = invalidMaterial.addSphere({}, 0.5f, 1.0f);
+    invalidMaterial.body(invalidBody).frictionScale.x = -1.0f;
+    validationOk &= throwsException([&] { invalidMaterial.step(1.0f / 60.0f); });
+    invalidMaterial.body(invalidBody).frictionScale = {1, 1, 1};
+    invalidMaterial.body(invalidBody).frictionCombine =
+        static_cast<velox::MaterialCombineMode>(255);
+    validationOk &= throwsException([&] { invalidMaterial.step(1.0f / 60.0f); });
+
+    check(combineOk, "material combine modes (all rules and restitution)");
+    check(anisotropyOk, "anisotropic friction (body-local directional scales)");
+    check(angularOk, "rolling and spinning friction (warm-started torque rows)");
+    check(disableOk && overrideOk && validationOk,
+          "contact modification (handles, override, disable, validation)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -866,6 +995,7 @@ int main() {
     testCompoundBody();
     testCylinderConeAndHeightfield();
     testFilteredQueriesAndShapeCasts();
+    testMaterialsAndContactModification();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

@@ -30,6 +30,10 @@ enum class ShapeType : uint8_t {
     Sphere, Plane, Box, Capsule, Mesh, Hull, Compound, Cylinder, Cone
 };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
+// When two modes differ, the mode later in this enum takes precedence.
+enum class MaterialCombineMode : uint8_t {
+    Average, GeometricMean, Minimum, Multiply, Maximum
+};
 
 // Host-side description of one locally transformed convex child. Compound
 // bodies accept spheres, boxes, capsules, cylinders, cones, and convex hulls.
@@ -67,6 +71,11 @@ struct Body {
     Vec3 invInertia;            // body-space diagonal inverse inertia tensor
     float restitution = 0.3f;
     float friction = 0.5f;
+    Vec3 frictionScale{1, 1, 1}; // local-space anisotropic multiplier
+    float rollingFriction = 0.0f;  // angular resistance length scale
+    float spinningFriction = 0.0f; // angular resistance length scale
+    MaterialCombineMode frictionCombine = MaterialCombineMode::GeometricMean;
+    MaterialCombineMode restitutionCombine = MaterialCombineMode::Minimum;
     float linearDamping = 0.0f;
     float angularDamping = 0.0f;
     float gravityScale = 1.0f;
