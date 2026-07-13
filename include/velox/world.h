@@ -192,6 +192,9 @@ public:
     void overlapCapsule(Vec3 center, float radius, float halfHeight,
                         Quat orientation, std::vector<BodyId>& out,
                         const QueryFilter& filter = {}) const;
+    void overlapConvexHull(Vec3 center, const std::vector<Vec3>& points,
+                           Quat orientation, std::vector<BodyId>& out,
+                           const QueryFilter& filter = {}) const;
     ShapeCastHit sphereCast(Vec3 center, float radius, Vec3 direction,
                             float maxDist, const QueryFilter& filter = {}) const;
     ShapeCastHit boxCast(Vec3 center, Vec3 halfExtents, Quat orientation,
@@ -200,6 +203,9 @@ public:
     ShapeCastHit capsuleCast(Vec3 center, float radius, float halfHeight,
                              Quat orientation, Vec3 direction, float maxDist,
                              const QueryFilter& filter = {}) const;
+    ShapeCastHit convexHullCast(Vec3 center, const std::vector<Vec3>& points,
+                                Quat orientation, Vec3 direction, float maxDist,
+                                const QueryFilter& filter = {}) const;
 
     // Advances the simulation using Predictive Contact Sweeping: speculative
     // contacts solved iteratively, backed by a conservative-advancement sweep
@@ -221,8 +227,14 @@ private:
     bool queryAllows(BodyIndex dense, const QueryFilter& filter) const;
     void overlapShape(const Body& shape, std::vector<BodyId>& out,
                       const QueryFilter& filter) const;
+    void overlapShapeWithSoup(const Body& shape, std::vector<BodyId>& out,
+                              const QueryFilter& filter,
+                              const MeshSoupView& soup) const;
     ShapeCastHit castShape(Body shape, Vec3 direction, float maxDist,
                            const QueryFilter& filter) const;
+    ShapeCastHit castShapeWithSoup(Body shape, Vec3 direction, float maxDist,
+                                   const QueryFilter& filter,
+                                   const MeshSoupView& soup) const;
     void removeJointDense(uint32_t dense);
     void solveJoints(float dt);
     void updateSleeping(float dt);

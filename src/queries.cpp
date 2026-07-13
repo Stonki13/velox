@@ -16,6 +16,51 @@ bool finiteQueryQuat(const Quat& q) {
            finiteQueryFloat(q.z) && finiteQueryFloat(q.w);
 }
 
+float validateQueryHull(const std::vector<Vec3>& points, Quat orientation) {
+    if (points.size() < 4 || points.size() > UINT32_MAX)
+        throw std::invalid_argument(
+            "velox: convex hull query requires at least four points");
+    if (!finiteQueryQuat(orientation))
+        throw std::invalid_argument("velox: convex hull query orientation must be finite");
+    float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
+               orientation.z * orientation.z + orientation.w * orientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument("velox: convex hull query orientation must be non-zero");
+    for (const Vec3& point : points)
+        if (!finiteQueryVec(point))
+            throw std::invalid_argument("velox: convex hull query points must be finite");
+
+    const Vec3 p0 = points[0];
+    float scale2 = 0.0f;
+    size_t i1 = 0;
+    for (size_t i = 1; i < points.size(); ++i) {
+        float d2 = lengthSq(points[i] - p0);
+        if (d2 > scale2) { scale2 = d2; i1 = i; }
+    }
+    if (scale2 < 1e-12f)
+        throw std::invalid_argument("velox: convex hull query points are coincident");
+    Vec3 edge = points[i1] - p0;
+    float bestArea2 = 0.0f;
+    size_t i2 = 0;
+    for (size_t i = 1; i < points.size(); ++i) {
+        float area2 = lengthSq(cross(edge, points[i] - p0));
+        if (area2 > bestArea2) { bestArea2 = area2; i2 = i; }
+    }
+    if (bestArea2 <= scale2 * scale2 * 1e-12f)
+        throw std::invalid_argument("velox: convex hull query points are collinear");
+    Vec3 normal = cross(edge, points[i2] - p0);
+    float planeDistance = 0.0f;
+    float radius2 = 0.0f;
+    for (const Vec3& point : points) {
+        planeDistance = vmax(planeDistance, fabsf(dot(normal, point - p0)));
+        radius2 = vmax(radius2, lengthSq(point));
+    }
+    float scale = sqrtf(scale2);
+    if (planeDistance <= scale * scale * scale * 1e-6f)
+        throw std::invalid_argument("velox: convex hull query points are coplanar");
+    return sqrtf(radius2);
+}
+
 struct LocalHit { bool hit; float t; Vec3 normal; };
 
 LocalHit raySphere(const Vec3& o, const Vec3& d, const Vec3& center, float r) {
@@ -297,8 +342,14 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
 
 void World::overlapShape(const Body& shape, std::vector<BodyId>& out,
                          const QueryFilter& filter) const {
-    out.clear();
     const MeshSoupView soup = view(meshes_);
+    overlapShapeWithSoup(shape, out, filter, soup);
+}
+
+void World::overlapShapeWithSoup(const Body& shape, std::vector<BodyId>& out,
+                                 const QueryFilter& filter,
+                                 const MeshSoupView& soup) const {
+    out.clear();
     float searchRadius = shape.radius + length(shape.halfExtents) +
                          shape.capsuleHalfHeight + 0.1f;
     for (BodyIndex i = 0; i < bodies_.size(); ++i) {
@@ -306,6 +357,27 @@ void World::overlapShape(const Body& shape, std::vector<BodyId>& out,
         QueryGap gap = queryGap(shape, bodies_[i], soup, searchRadius);
         if (gap.gap <= 0.0f) out.push_back(bodyHandle(i));
     }
+}
+
+void World::overlapConvexHull(Vec3 center, const std::vector<Vec3>& points,
+                              Quat orientation, std::vector<BodyId>& out,
+                              const QueryFilter& filter) const {
+    if (!finiteQueryVec(center))
+        throw std::invalid_argument("velox: convex hull query center must be finite");
+    Body probe;
+    probe.shape = ShapeType::Hull;
+    probe.position = center;
+    probe.orientation = normalize(orientation);
+    probe.radius = validateQueryHull(points, orientation);
+    if (meshes_.hullPoints.size() > UINT32_MAX - points.size())
+        throw std::length_error("velox: convex hull query point capacity exceeded");
+    probe.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
+    probe.hullCount = static_cast<uint32_t>(points.size());
+    std::vector<Vec3> hullPoints = meshes_.hullPoints;
+    hullPoints.insert(hullPoints.end(), points.begin(), points.end());
+    MeshSoupView soup = view(meshes_);
+    soup.hullPoints = hullPoints.data();
+    overlapShapeWithSoup(probe, out, filter, soup);
 }
 
 void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
@@ -359,6 +431,13 @@ void World::overlapCapsule(Vec3 center, float radius, float halfHeight,
 
 ShapeCastHit World::castShape(Body shape, Vec3 direction, float maxDist,
                               const QueryFilter& filter) const {
+    const MeshSoupView soup = view(meshes_);
+    return castShapeWithSoup(shape, direction, maxDist, filter, soup);
+}
+
+ShapeCastHit World::castShapeWithSoup(Body shape, Vec3 direction, float maxDist,
+                                      const QueryFilter& filter,
+                                      const MeshSoupView& soup) const {
     if (!finiteQueryVec(direction) || lengthSq(direction) < 1e-12f ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
         throw std::invalid_argument(
@@ -368,7 +447,6 @@ ShapeCastHit World::castShape(Body shape, Vec3 direction, float maxDist,
     float bound = shape.radius + length(shape.halfExtents) +
                   shape.capsuleHalfHeight + 0.1f;
     float searchRadius = maxDist + bound;
-    const MeshSoupView soup = view(meshes_);
     ShapeCastHit best;
     best.distance = maxDist;
 
@@ -396,6 +474,29 @@ ShapeCastHit World::castShape(Body shape, Vec3 direction, float maxDist,
         }
     }
     return best;
+}
+
+ShapeCastHit World::convexHullCast(Vec3 center,
+                                   const std::vector<Vec3>& points,
+                                   Quat orientation, Vec3 direction,
+                                   float maxDist,
+                                   const QueryFilter& filter) const {
+    if (!finiteQueryVec(center))
+        throw std::invalid_argument("velox: convex hull cast center must be finite");
+    Body shape;
+    shape.shape = ShapeType::Hull;
+    shape.position = center;
+    shape.orientation = normalize(orientation);
+    shape.radius = validateQueryHull(points, orientation);
+    if (meshes_.hullPoints.size() > UINT32_MAX - points.size())
+        throw std::length_error("velox: convex hull cast point capacity exceeded");
+    shape.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
+    shape.hullCount = static_cast<uint32_t>(points.size());
+    std::vector<Vec3> hullPoints = meshes_.hullPoints;
+    hullPoints.insert(hullPoints.end(), points.begin(), points.end());
+    MeshSoupView soup = view(meshes_);
+    soup.hullPoints = hullPoints.data();
+    return castShapeWithSoup(shape, direction, maxDist, filter, soup);
 }
 
 ShapeCastHit World::sphereCast(Vec3 center, float radius, Vec3 direction,

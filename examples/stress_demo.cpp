@@ -805,11 +805,20 @@ static void testFilteredQueriesAndShapeCasts() {
     ok &= overlaps.size() == 1 && overlaps[0] == target;
     w.overlapCapsule({5, 0, 0}, 0.3f, 0.8f, {}, overlaps, filter);
     ok &= overlaps.size() == 1 && overlaps[0] == target;
+    std::vector<velox::Vec3> queryHull = {
+        {-0.25f, -0.25f, -0.25f}, {0.25f, -0.25f, -0.25f},
+        {-0.25f,  0.25f, -0.25f}, {0.25f,  0.25f, -0.25f},
+        {-0.25f, -0.25f,  0.25f}, {0.25f, -0.25f,  0.25f},
+        {-0.25f,  0.25f,  0.25f}, {0.25f,  0.25f,  0.25f}};
+    w.overlapConvexHull({5, 0, 0}, queryHull, {}, overlaps, filter);
+    ok &= overlaps.size() == 1 && overlaps[0] == target;
 
     auto sphereHit = w.sphereCast({0, 0, 0}, 0.25f, {1, 0, 0}, 10.0f, filter);
     auto boxHit = w.boxCast({0, 0, 0}, {0.25f, 0.25f, 0.25f}, {},
                             {1, 0, 0}, 10.0f, filter);
     auto capsuleHit = w.capsuleCast({0, 0, 0}, 0.25f, 0.5f, {},
+                                    {1, 0, 0}, 10.0f, filter);
+    auto hullHit = w.convexHullCast({0, 0, 0}, queryHull, {},
                                     {1, 0, 0}, 10.0f, filter);
     ok &= sphereHit.hit && sphereHit.body == target &&
           std::fabs(sphereHit.distance - 4.25f) < 0.02f;
@@ -817,6 +826,8 @@ static void testFilteredQueriesAndShapeCasts() {
           std::fabs(boxHit.distance - 4.25f) < 0.02f;
     ok &= capsuleHit.hit && capsuleHit.body == target &&
           std::fabs(capsuleHit.distance - 4.25f) < 0.02f;
+    ok &= hullHit.hit && hullHit.body == target &&
+          std::fabs(hullHit.distance - 4.25f) < 0.02f;
     ok &= std::fabs(sphereHit.fraction - 0.425f) < 0.003f;
 
     filter.ignoredBody = target;
@@ -826,12 +837,20 @@ static void testFilteredQueriesAndShapeCasts() {
     auto ground = terrain.addStaticHeightfield(
         2, 2, 5.0f, {0, 0, 0, 0}, {-2.5f, 0, -2.5f});
     auto groundHit = terrain.sphereCast({0, 5, 0}, 0.5f, {0, -1, 0}, 10.0f);
+    auto hullGroundHit = terrain.convexHullCast(
+        {0, 5, 0}, queryHull, {}, {0, -1, 0}, 10.0f);
     ok &= groundHit.hit && groundHit.body == ground &&
           std::fabs(groundHit.distance - 4.5f) < 0.02f;
+    ok &= hullGroundHit.hit && hullGroundHit.body == ground &&
+          std::fabs(hullGroundHit.distance - 4.75f) < 0.02f;
     ok &= throwsException([&] {
         (void)terrain.boxCast({}, {1, 1, 1}, {}, {}, 10.0f);
     });
-    check(ok, "filtered queries and shape casts (sphere, box, capsule)");
+    ok &= throwsException([&] {
+        terrain.overlapConvexHull({}, {{0, 0, 0}, {1, 0, 0},
+                                      {0, 1, 0}, {1, 1, 0}}, {}, overlaps);
+    });
+    check(ok, "filtered queries and casts (sphere, box, capsule, hull)");
 }
 
 // 32. Material coefficients are resolved once per contact for both backends.
