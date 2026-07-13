@@ -368,6 +368,70 @@ static void testEvents() {
           "contact events (begin fires once per touch)");
 }
 
+// 20. Deep hull overlap: the minimum translation is vertical (1.2 m) while
+// the center delta is diagonal. EPA must recover the face normal instead of
+// using the old center-based fallback, which would incorrectly add X drift.
+static void testDeepHullPenetration() {
+    velox::World w;
+    w.gravity = {0, 0, 0};
+    std::vector<velox::Vec3> cube = {
+        {-1, -1, -1}, {1, -1, -1}, {-1, 1, -1}, {1, 1, -1},
+        {-1, -1, 1},  {1, -1, 1},  {-1, 1, 1},  {1, 1, 1}};
+    w.addConvexHull({0, 0, 0}, cube, 0.0f);
+    auto moving = w.addConvexHull({0.2f, 0.8f, 0}, cube, 1.0f);
+    for (int i = 0; i < 10; ++i) w.step(1.0f / 60.0f);
+    const auto& b = w.body(moving);
+    bool ok = std::fabs(b.position.x - 0.2f) < 0.05f &&
+              b.position.y > 1.95f && std::fabs(b.position.z) < 0.05f;
+    check(ok, "EPA deep hull overlap (exact minimum translation)");
+}
+
+// 21. Unequal-mass dynamic CCD must preserve linear momentum and the
+// center-of-mass trajectory while preventing the pair from crossing.
+static void testDynamicCcdMomentum() {
+    velox::World w;
+    w.gravity = {0, 0, 0};
+    w.substeps = 1;
+    auto a = w.addSphere({-5, 0, 0}, 0.5f, 1.0f);
+    auto b = w.addSphere({5, 0, 0}, 0.5f, 3.0f);
+    w.body(a).velocity = {1000, 0, 0};
+    w.body(b).velocity = {-500, 0, 0};
+    w.body(a).restitution = w.body(b).restitution = 0.0f;
+    const float initialMomentum = -500.0f;
+    const float initialCom = 2.5f;
+    const float dt = 1.0f / 60.0f;
+    w.step(dt);
+    const auto& ba = w.body(a);
+    const auto& bb = w.body(b);
+    float momentum = ba.velocity.x * 1.0f + bb.velocity.x * 3.0f;
+    float com = (ba.position.x + bb.position.x * 3.0f) * 0.25f;
+    float expectedCom = initialCom + (initialMomentum * 0.25f) * dt;
+    bool ok = ba.position.x <= bb.position.x &&
+              std::fabs(momentum - initialMomentum) < 0.05f &&
+              std::fabs(com - expectedCom) < 0.02f;
+    check(ok, "dynamic CCD (symmetric, momentum + COM preserved)");
+}
+
+// 22. Friction must be isotropic in the contact plane. A diagonal slide on a
+// flat plane should lose both tangent components equally and settle without
+// veering toward either solver basis axis.
+static void testTwoAxisFriction() {
+    velox::World w;
+    auto floor = w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto box = w.addBox({0, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    w.body(floor).friction = 0.8f;
+    w.body(box).friction = 0.8f;
+    w.body(box).restitution = 0.0f;
+    w.body(box).velocity = {4.0f, 0, 4.0f};
+    for (int i = 0; i < 180; ++i) w.step(1.0f / 60.0f);
+    const auto& b = w.body(box);
+    float horizontalSpeed = std::sqrt(b.velocity.x * b.velocity.x +
+                                      b.velocity.z * b.velocity.z);
+    bool ok = horizontalSpeed < 0.15f &&
+              std::fabs(b.position.x - b.position.z) < 0.05f;
+    check(ok, "two-axis friction (isotropic diagonal slide)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -388,6 +452,9 @@ int main() {
     testMotor();
     testLimit();
     testEvents();
+    testDeepHullPenetration();
+    testDynamicCcdMomentum();
+    testTwoAxisFriction();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

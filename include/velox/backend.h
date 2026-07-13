@@ -35,6 +35,7 @@ inline MeshSoupView view(const MeshSoup& s) {
 // gap/dt, so grazing bodies are never artificially stopped.
 struct Contact {
     BodyId a, b;
+    uint64_t featureKey;  // stable shape-feature pair; 0 when unavailable
     Vec3 normal;          // from b towards a
     Vec3 point;           // world-space contact point (torque arm for rotation)
     Vec3 localAnchorA;    // contact anchor in A's local frame
@@ -45,7 +46,8 @@ struct Contact {
                           // rotational gap over several solver substeps
     float vn0;            // normal approach velocity at detection (for restitution)
     float normalImpulse;  // accumulated by the solver
-    float tangentImpulse;
+    float tangentImpulse1;
+    float tangentImpulse2;
 };
 
 enum class BackendType { Auto, Cpu, Cuda };

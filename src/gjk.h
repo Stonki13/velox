@@ -117,6 +117,15 @@ struct SupportVert {
     Vec3 b;  // witness on B's core
 };
 
+VELOX_HD inline SupportVert supportVertex(const Convex& A, const Convex& B,
+                                          const Vec3& dir) {
+    SupportVert v;
+    v.a = A.support(dir);
+    v.b = B.support(-dir);
+    v.p = v.a - v.b;
+    return v;
+}
+
 struct Simplex {
     SupportVert v[4];
     float bary[4];
@@ -218,23 +227,210 @@ VELOX_HD inline bool solveTetrahedron(Simplex& s) {
     return inside;
 }
 
+VELOX_HD inline bool originInsideTetrahedron(const SupportVert& a,
+                                             const SupportVert& b,
+                                             const SupportVert& c,
+                                             const SupportVert& d) {
+    Vec3 v[4] = {a.p, b.p, c.p, d.p};
+    float volume = dot(v[1] - v[0], cross(v[2] - v[0], v[3] - v[0]));
+    if (fabsf(volume) < 1e-10f) return false;
+    const int faces[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+    for (int f = 0; f < 4; ++f) {
+        int i0 = faces[f][0], i1 = faces[f][1], i2 = faces[f][2];
+        int opposite = 6 - i0 - i1 - i2;
+        Vec3 n = cross(v[i1] - v[i0], v[i2] - v[i0]);
+        float originSide = dot(n, -v[i0]);
+        float oppositeSide = dot(n, v[opposite] - v[i0]);
+        // EPA needs the origin strictly inside its seed polytope. A tetrahedron
+        // with the origin on a face can make a zero-distance face look
+        // converged and return an arbitrary penetration axis.
+        if (originSide * oppositeSide <= 1e-8f) return false;
+    }
+    return true;
+}
+
+// Lower-dimensional GJK simplexes are common when the origin lies exactly on
+// a search segment or triangle. Sample support directions and find a
+// tetrahedron containing the origin so EPA can start from a closed polytope.
+VELOX_HD inline bool expandOverlapSimplex(const Convex& A, const Convex& B,
+                                          Simplex& s) {
+    SupportVert candidates[18];
+    int count = 0;
+    for (int i = 0; i < s.count; ++i) candidates[count++] = s.v[i];
+    const Vec3 dirs[14] = {
+        {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+        {1, 1, 1}, {-1, 1, 1}, {1, -1, 1}, {1, 1, -1},
+        {-1, -1, 1}, {-1, 1, -1}, {1, -1, -1}, {-1, -1, -1}};
+    for (int d = 0; d < 14 && count < 18; ++d) {
+        SupportVert w = supportVertex(A, B, dirs[d]);
+        bool duplicate = false;
+        for (int i = 0; i < count; ++i)
+            if (lengthSq(w.p - candidates[i].p) < 1e-12f) duplicate = true;
+        if (!duplicate) candidates[count++] = w;
+    }
+    for (int i = 0; i < count - 3; ++i)
+        for (int j = i + 1; j < count - 2; ++j)
+            for (int k = j + 1; k < count - 1; ++k)
+                for (int l = k + 1; l < count; ++l)
+                    if (originInsideTetrahedron(candidates[i], candidates[j],
+                                                candidates[k], candidates[l])) {
+                        s.count = 4;
+                        s.v[0] = candidates[i]; s.v[1] = candidates[j];
+                        s.v[2] = candidates[k]; s.v[3] = candidates[l];
+                        return true;
+                    }
+    return false;
+}
+
+struct EpaFace {
+    int a, b, c;
+    Vec3 normal;
+    float distance;
+    bool valid;
+};
+
+VELOX_HD inline bool makeEpaFace(const SupportVert* vertices, int ia, int ib, int ic,
+                                 EpaFace& face) {
+    Vec3 a = vertices[ia].p, b = vertices[ib].p, c = vertices[ic].p;
+    Vec3 n = cross(b - a, c - a);
+    float n2 = lengthSq(n);
+    if (n2 < 1e-16f) return false;
+    n *= 1.0f / sqrtf(n2);
+    float distance = dot(n, a);
+    if (distance < 0.0f) {
+        int tmp = ib; ib = ic; ic = tmp;
+        n = -n;
+        distance = -distance;
+    }
+    face = {ia, ib, ic, n, distance, true};
+    return true;
+}
+
+VELOX_HD inline void epaWitness(const SupportVert* vertices, const EpaFace& face,
+                                Vec3& pointA, Vec3& pointB) {
+    Simplex tri{};
+    tri.count = 3;
+    tri.v[0] = vertices[face.a];
+    tri.v[1] = vertices[face.b];
+    tri.v[2] = vertices[face.c];
+    solveTriangle(tri);
+    pointA = {};
+    pointB = {};
+    for (int i = 0; i < tri.count; ++i) {
+        pointA += tri.v[i].a * tri.bary[i];
+        pointB += tri.v[i].b * tri.bary[i];
+    }
+}
+
+// Expanding Polytope Algorithm. Fixed-size storage keeps this callable from
+// CUDA kernels and makes failure explicit instead of allocating unpredictably.
+VELOX_HD inline bool epaPenetration(const Convex& A, const Convex& B,
+                                    const Simplex& simplex, GjkResult& result) {
+    constexpr int kMaxVertices = 64;
+    constexpr int kMaxFaces = 128;
+    constexpr int kMaxEdges = 192;
+    SupportVert vertices[kMaxVertices];
+    EpaFace faces[kMaxFaces];
+    int vertexCount = 4, faceCount = 0;
+    for (int i = 0; i < 4; ++i) vertices[i] = simplex.v[i];
+
+    const int initialFaces[4][3] = {{0, 1, 2}, {0, 3, 1}, {0, 2, 3}, {1, 3, 2}};
+    for (int i = 0; i < 4; ++i) {
+        EpaFace face;
+        if (makeEpaFace(vertices, initialFaces[i][0], initialFaces[i][1],
+                        initialFaces[i][2], face))
+            faces[faceCount++] = face;
+    }
+    if (faceCount < 4) return false;
+
+    int bestFace = 0;
+    for (int iteration = 0; iteration < 48; ++iteration) {
+        bestFace = -1;
+        float bestDistance = 1e30f;
+        for (int i = 0; i < faceCount; ++i)
+            if (faces[i].valid && faces[i].distance < bestDistance) {
+                bestDistance = faces[i].distance;
+                bestFace = i;
+            }
+        if (bestFace < 0) return false;
+
+        EpaFace closest = faces[bestFace];
+        SupportVert w = supportVertex(A, B, closest.normal);
+        float supportDistance = dot(closest.normal, w.p);
+        float tolerance = 1e-4f * vmax(1.0f, supportDistance);
+        bool duplicate = false;
+        for (int i = 0; i < vertexCount; ++i)
+            if (lengthSq(w.p - vertices[i].p) < 1e-12f) duplicate = true;
+        if (supportDistance - closest.distance <= tolerance || duplicate) {
+            Vec3 coreA, coreB;
+            epaWitness(vertices, closest, coreA, coreB);
+            result.normal = -closest.normal;
+            result.distance = -(closest.distance + A.radius + B.radius);
+            result.pointA = coreA - result.normal * A.radius;
+            result.pointB = coreB + result.normal * B.radius;
+            result.overlapping = true;
+            return true;
+        }
+        if (vertexCount >= kMaxVertices) break;
+        int newVertex = vertexCount++;
+        vertices[newVertex] = w;
+
+        struct Edge { int a, b; } edges[kMaxEdges];
+        int edgeCount = 0;
+        for (int i = 0; i < faceCount; ++i) {
+            if (!faces[i].valid) continue;
+            const EpaFace& face = faces[i];
+            if (dot(face.normal, w.p - vertices[face.a].p) <= tolerance) continue;
+            faces[i].valid = false;
+            int faceEdges[3][2] = {{face.a, face.b}, {face.b, face.c}, {face.c, face.a}};
+            for (int e = 0; e < 3; ++e) {
+                int reverse = -1;
+                for (int k = 0; k < edgeCount; ++k)
+                    if (edges[k].a == faceEdges[e][1] && edges[k].b == faceEdges[e][0]) {
+                        reverse = k;
+                        break;
+                    }
+                if (reverse >= 0) edges[reverse] = edges[--edgeCount];
+                else if (edgeCount < kMaxEdges)
+                    edges[edgeCount++] = {faceEdges[e][0], faceEdges[e][1]};
+            }
+        }
+
+        for (int e = 0; e < edgeCount; ++e) {
+            EpaFace face;
+            if (!makeEpaFace(vertices, edges[e].a, edges[e].b, newVertex, face)) continue;
+            int slot = -1;
+            for (int i = 0; i < faceCount; ++i)
+                if (!faces[i].valid) { slot = i; break; }
+            if (slot >= 0) faces[slot] = face;
+            else if (faceCount < kMaxFaces) faces[faceCount++] = face;
+            else return false;
+        }
+    }
+
+    if (bestFace >= 0 && faces[bestFace].valid) {
+        Vec3 coreA, coreB;
+        epaWitness(vertices, faces[bestFace], coreA, coreB);
+        result.normal = -faces[bestFace].normal;
+        result.distance = -(faces[bestFace].distance + A.radius + B.radius);
+        result.pointA = coreA - result.normal * A.radius;
+        result.pointB = coreB + result.normal * B.radius;
+        result.overlapping = true;
+        return true;
+    }
+    return false;
+}
+
 } // namespace gjk_detail
 
 VELOX_HD inline GjkResult gjkDistance(const Convex& A, const Convex& B) {
     using namespace gjk_detail;
-    auto supportMD = [&](const Vec3& dir) {
-        SupportVert v;
-        v.a = A.support(dir);
-        v.b = B.support(-dir);
-        v.p = v.a - v.b;
-        return v;
-    };
 
     Simplex s{};
     Vec3 dir = A.position - B.position;
     if (A.kind == Convex::Triangle) dir = A.segA - B.position;
     if (lengthSq(dir) < 1e-12f) dir = {1, 0, 0};
-    s.v[0] = supportMD(dir);
+    s.v[0] = supportVertex(A, B, dir);
     s.count = 1;
     s.bary[0] = 1.0f;
 
@@ -243,10 +439,14 @@ VELOX_HD inline GjkResult gjkDistance(const Convex& A, const Convex& B) {
         Vec3 closest{};
         for (int i = 0; i < s.count; ++i) closest += s.v[i].p * s.bary[i];
         float distSq = lengthSq(closest);
-        if (distSq < 1e-10f) { r.overlapping = true; break; }
+        if (distSq < 1e-10f) {
+            if (s.count < 4) expandOverlapSimplex(A, B, s);
+            r.overlapping = true;
+            break;
+        }
 
         Vec3 d = -closest;
-        SupportVert w = supportMD(d);
+        SupportVert w = supportVertex(A, B, d);
         // No more progress towards the origin => converged.
         float progress = dot(w.p, d) - dot(closest, d);
         if (progress < 1e-6f * sqrtf(distSq) + 1e-9f) break;
@@ -271,10 +471,11 @@ VELOX_HD inline GjkResult gjkDistance(const Convex& A, const Convex& B) {
     }
 
     if (r.overlapping) {
+        if (s.count == 4 && epaPenetration(A, B, s, r)) return r;
         // Core overlap (rare: cores are points/segments/boxes kept apart by
-        // the speculative solver). Fall back to a center-based normal; depth
-        // is estimated from the support extents along it, which is
-        // conservative but keeps the response pointing the right way.
+        // the speculative solver). Lower-dimensional core intersections (for
+        // example coincident capsule segments) cannot seed a 3D EPA polytope,
+        // so retain a conservative center-based fallback for those cases.
         Vec3 n = A.position - B.position;
         if (A.kind == Convex::Triangle)
             n = (A.segA + A.segB + A.triC) * (1.0f / 3.0f) - B.position;

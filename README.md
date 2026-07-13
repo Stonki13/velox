@@ -27,8 +27,10 @@ still let extreme cases slip). Velox layers them:
 3. **Conservative-advancement safety net** — after integration, any pair that
    ended the step interpenetrating is rewound along its actual motion
    (rotation included) to the moment of first contact, using GJK distance as
-   the oracle. Supported collider paths are protected without a velocity
-   threshold, for both linear and angular motion.
+   the oracle. Dynamic pairs rewind to the same TOI, receive a
+   momentum-preserving impulse, and finish the remaining frame together.
+   Supported collider paths are protected without a velocity threshold, for
+   both linear and angular motion.
 
 `examples/stress_demo` locks all of this in: 2 km/s bullets, grazing skims,
 a 125-sphere pile, 3 km/s head-on impacts, a 1.5 km/s spinning box, resting
@@ -53,26 +55,31 @@ the color count near the max contacts per body.
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 1.93 ms | **1.42 ms** |
-| 2048-sphere rain | 8.63 ms | **2.80 ms** |
-| 8192-sphere rain | **46.03 ms** | 66.76 ms |
-| 2048 spheres on 20k-triangle terrain | 23.26 ms | **8.63 ms** |
+| 512-sphere rain | 3.42 ms | **1.67 ms** |
+| 2048-sphere rain | 14.50 ms | **2.90 ms** |
+| 8192-sphere rain | 68.05 ms | **26.18 ms** |
+| 2048 spheres on 20k-triangle terrain | 27.28 ms | **7.13 ms** |
 
 These are a current local Release run on an RTX 5080. The GPU broad phase
-still scans the compact all-pairs matrix, so it becomes the bottleneck in the
-8192-body scene; replacing that path with a hierarchical GPU broad phase is
-the next major performance target.
+still scans the compact all-pairs matrix, so replacing that path with a
+hierarchical GPU broad phase remains the next major performance target.
 
 ## Solver
 
 Box2D-v3-style TGS: detection runs **once per step**, then several solver
 substeps re-evaluate every contact's live gap from persistent local anchors and
 the bodies' current transforms. Sequential impulses with warm starting
-(accumulated impulses persist across frames via persistent contact matching),
+(normal and two-axis Coulomb friction impulses persist through stable contact
+feature keys, with proximity fallback for topology-free GJK contacts),
 face-snapped box and convex-hull manifolds for deterministic stacking,
 split-impulse positional correction (penetration is resolved by translation,
 never by velocity bias — no energy injection), and whole-island sleeping. A
 10-box tower remains standing in the regression suite on both CPU and CUDA.
+
+Deep convex-core overlaps use a fixed-capacity **EPA** solver shared by CPU and
+CUDA. EPA returns the minimum translation normal, penetration depth, and core
+witness points; lower-dimensional cores retain a conservative fallback when a
+closed 3D polytope cannot exist.
 
 ## Features
 
@@ -101,7 +108,6 @@ treat non-convex meshes.
 
 Roadmap:
 
-- [ ] EPA for exact deep-penetration recovery (rarely hit thanks to PCS)
 - [ ] Cone/twist joints for ragdolls
 - [ ] Hierarchical GPU broad phase (replace the current all-pairs scan)
 - [ ] Device-resident stepping (skip per-substep transfers when no joints)

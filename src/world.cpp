@@ -579,18 +579,35 @@ void World::step(float dt) {
     }
 
     // --- warm starting ---------------------------------------------------------
-    // Carry accumulated normal impulses from last frame's matching contacts
-    // (same body pair, nearby contact point).
+    // Carry accumulated normal impulses from last frame. Explicit manifold
+    // features match exactly; generic GJK contacts fall back to proximity.
     if (!prevContacts_.empty()) {
         auto keyOf = [](const Contact& c) { return (uint64_t)c.a << 32 | c.b; };
         for (Contact& c : contacts_) {
             uint64_t key = keyOf(c);
             auto lo = std::lower_bound(prevContacts_.begin(), prevContacts_.end(), key,
                 [&](const Contact& p, uint64_t k) { return keyOf(p) < k; });
+            if (c.featureKey != 0) {
+                bool matched = false;
+                for (auto it = lo; it != prevContacts_.end() && keyOf(*it) == key; ++it)
+                    if (it->featureKey == c.featureKey) {
+                        c.normalImpulse = it->normalImpulse;
+                        c.tangentImpulse1 = it->tangentImpulse1;
+                        c.tangentImpulse2 = it->tangentImpulse2;
+                        matched = true;
+                        break;
+                    }
+                if (matched) continue;
+            }
             float bestDistSq = 2.5e-3f; // 5 cm matching radius
             for (auto it = lo; it != prevContacts_.end() && keyOf(*it) == key; ++it) {
                 float d = lengthSq(it->point - c.point);
-                if (d < bestDistSq) { bestDistSq = d; c.normalImpulse = it->normalImpulse; }
+                if (d < bestDistSq) {
+                    bestDistSq = d;
+                    c.normalImpulse = it->normalImpulse;
+                    c.tangentImpulse1 = it->tangentImpulse1;
+                    c.tangentImpulse2 = it->tangentImpulse2;
+                }
             }
         }
     }
@@ -630,7 +647,8 @@ void World::step(float dt) {
 
     for (uint64_t key : pairKeys_) {
         BodyId i = (BodyId)(key >> 32), j = (BodyId)key;
-        // The clamp below rewinds A only; make A the dynamic one.
+        // Keep A dynamic for the static-dynamic case. Dynamic-dynamic pairs
+        // are rewound symmetrically below.
         if (bodies_[i].isStatic()) { BodyId t = i; i = j; j = t; }
         Body& a = bodies_[i];
         Body& b = bodies_[j];
@@ -665,12 +683,37 @@ void World::step(float dt) {
             }
             if (t >= 1.0f) continue; // never actually touched (false alarm)
 
-            // Clamp A back to the time of impact and kill its approach speed
-            // along the true contact normal at that moment.
+            // Rewind both dynamic trajectories to the same impact time. This
+            // preserves their shared timeline instead of arbitrarily clamping
+            // one participant and leaving the other at the end of the step.
             a.position = pa0 + da * t;
             a.orientation = integrate(qa0, a.angularVelocity, dt * t);
+            if (!b.isStatic()) {
+                b.position = pb0 + db * t;
+                b.orientation = integrate(qb0, b.angularVelocity, dt * t);
+            }
+
+            // Remove only the remaining approach velocity with an
+            // inverse-mass impulse. Linear momentum is conserved for two
+            // dynamic bodies; static geometry receives no velocity update.
             float vn = dot(a.velocity - b.velocity, n);
-            if (vn < 0.0f) a.velocity -= n * (vn * (b.isStatic() ? 1.0f : 0.5f));
+            float invMassSum = a.invMass + b.invMass;
+            if (vn < 0.0f && invMassSum > 0.0f) {
+                float impulse = -vn / invMassSum;
+                a.velocity += n * (impulse * a.invMass);
+                if (!b.isStatic()) b.velocity -= n * (impulse * b.invMass);
+            }
+
+            // Finish the frame from TOI using the corrected velocities. The
+            // normal approach component is now zero, so this cannot recreate
+            // the crossing, and tangential/center-of-mass motion is retained.
+            float remaining = dt * (1.0f - t);
+            a.position += a.velocity * remaining;
+            a.orientation = integrate(a.orientation, a.angularVelocity, remaining);
+            if (!b.isStatic()) {
+                b.position += b.velocity * remaining;
+                b.orientation = integrate(b.orientation, b.angularVelocity, remaining);
+            }
         }
     }
 
