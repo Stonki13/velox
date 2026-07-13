@@ -87,15 +87,21 @@ closed 3D polytope cannot exist.
   inverse inertia, contact torques)
 - Colliders: **sphere, box, capsule, dynamic convex hull, static plane, static
   triangle mesh**
-- **Joints**: ball, distance, hinge, hinge motors and angular limits (iterative
-  impulses, 3x3 block solve for anchors, Baumgarte stabilization). Connected
-  bodies ignore each other by default; `Joint::collideConnected` opts back in.
+- **Joints**: ball, distance, hinge, and cone/twist; hinge motors, hinge limits,
+  and independent ragdoll swing/twist limits (iterative impulses, 3x3 block
+  solve for anchors, Baumgarte stabilization). Connected bodies ignore each
+  other by default; `Joint::collideConnected` opts back in.
+- **Body control**: static/kinematic/dynamic motion types, accumulated forces
+  and torques, point impulses, per-body damping and gravity scaling
+- **Safe object lifetime**: generation-checked body/joint handles, dense
+  swap-removal, stale-handle rejection, and automatic attached-joint cleanup
 - **Sleeping & islands**: union-find islands over contacts + joints; settled
   islands cost nothing and wake on impact
 - **Queries**: `rayCast` against every collider (BVH-accelerated for meshes),
   `overlapSphere`
-- **Contact events**: canonicalized pair-level begin events with representative
-  contact point, normal, and solved normal impulse
+- **Collision policy**: symmetric category/mask filtering and non-responsive
+  sensors, with pair-level Begin/Persist/End events, stable body handles,
+  representative contact point/normal, and solved normal impulse
 - GJK narrow phase over support functions (one code path for all convex
   pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
 - **CUDA backend**: integration, narrow phase, and graph-colored contact
@@ -108,10 +114,8 @@ treat non-convex meshes.
 
 Roadmap:
 
-- [ ] Cone/twist joints for ragdolls
 - [ ] Hierarchical GPU broad phase (replace the current all-pairs scan)
 - [ ] Device-resident stepping (skip per-substep transfers when no joints)
-- [ ] End/persist contact callbacks and collision filtering layers
 
 ## Build
 

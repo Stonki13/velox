@@ -556,6 +556,29 @@ JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxi
     return addJoint(j);
 }
 
+JointId World::addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchor, "velox: cone/twist anchor must be finite");
+    requireFiniteVec(worldAxis, "velox: cone/twist axis must be finite");
+    if (lengthSq(worldAxis) < 1e-12f)
+        throw std::invalid_argument("velox: cone/twist axis must be non-zero");
+    Vec3 axis = normalize(worldAxis);
+    Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    ref = normalize(cross(axis, ref));
+
+    Joint j;
+    j.type = JointType::ConeTwist;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation, worldAnchor - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, axis);
+    j.localAxisB = rotateInv(bodies_[ib].orientation, axis);
+    j.localRefA = rotateInv(bodies_[ia].orientation, ref);
+    j.localRefB = rotateInv(bodies_[ib].orientation, ref);
+    return addJoint(j);
+}
+
 float World::hingeAngle(JointId id) const {
     const Joint& j = joint(id);
     if (j.type != JointType::Hinge)
@@ -569,6 +592,28 @@ float World::hingeAngle(JointId id) const {
     float s = dot(cross(refA, refB), axis);
     float c = dot(refA, refB);
     return std::atan2(s, c);
+}
+
+float World::coneSwingAngle(JointId id) const {
+    const Joint& j = joint(id);
+    if (j.type != JointType::ConeTwist)
+        throw std::invalid_argument("velox: coneSwingAngle requires a cone/twist joint");
+    Vec3 axisA = normalize(rotate(bodies_[j.a].orientation, j.localAxisA));
+    Vec3 axisB = normalize(rotate(bodies_[j.b].orientation, j.localAxisB));
+    return std::acos(vclamp(dot(axisA, axisB), -1.0f, 1.0f));
+}
+
+float World::coneTwistAngle(JointId id) const {
+    const Joint& j = joint(id);
+    if (j.type != JointType::ConeTwist)
+        throw std::invalid_argument("velox: coneTwistAngle requires a cone/twist joint");
+    Vec3 axis = normalize(rotate(bodies_[j.a].orientation, j.localAxisA));
+    Vec3 refA = rotate(bodies_[j.a].orientation, j.localRefA);
+    Vec3 refB = rotate(bodies_[j.b].orientation, j.localRefB);
+    refA = normalize(refA - axis * dot(refA, axis));
+    refB = normalize(refB - axis * dot(refB, axis));
+    if (lengthSq(refA) < 1e-12f || lengthSq(refB) < 1e-12f) return 0.0f;
+    return std::atan2(dot(cross(refA, refB), axis), dot(refA, refB));
 }
 
 void World::wake(BodyId id) {
@@ -731,6 +776,8 @@ void World::solveJoints(float dt) {
     for (Joint& j : joints_) {
         j.motorImpulse = 0.0f;
         j.limitImpulse = 0.0f;
+        j.swingImpulse = 0.0f;
+        j.twistImpulse = 0.0f;
     }
 
     for (int iter = 0; iter < kJointIterations; ++iter) {
@@ -831,6 +878,73 @@ void World::solveJoints(float dt) {
                             lambda = (target - wAxis) / kAxis;
                             j.limitImpulse = vmax(0.0f, oldImpulse + lambda);
                             lambda = j.limitImpulse - oldImpulse;
+                        }
+                        if (lambda != 0.0f) {
+                            if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
+                            if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                        }
+                    }
+                }
+                break;
+            }
+            case JointType::ConeTwist: {
+                // Ball anchor at the joint center.
+                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
+                applyImpulse(a, ra, P, +1.0f);
+                applyImpulse(b, rb, P, -1.0f);
+
+                Vec3 axisA = normalize(rotate(a.orientation, j.localAxisA));
+                Vec3 axisB = normalize(rotate(b.orientation, j.localAxisB));
+                Vec3 wr = a.angularVelocity - b.angularVelocity;
+
+                if (j.enableSwingLimit) {
+                    float angle = std::acos(vclamp(dot(axisA, axisB), -1.0f, 1.0f));
+                    if (angle > j.swingLimit) {
+                        Vec3 n = cross(axisB, axisA);
+                        if (lengthSq(n) < 1e-10f) {
+                            Vec3 refA = rotate(a.orientation, j.localRefA);
+                            n = cross(axisA, refA);
+                        }
+                        n = normalize(n);
+                        float k = dot(n, a.invInertiaMul(n)) + dot(n, b.invInertiaMul(n));
+                        if (k > 0.0f) {
+                            float error = angle - j.swingLimit;
+                            float lambda = -(dot(wr, n) + error * (kBeta / dt)) / k;
+                            float oldImpulse = j.swingImpulse;
+                            j.swingImpulse = vmin(0.0f, oldImpulse + lambda);
+                            lambda = j.swingImpulse - oldImpulse;
+                            if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(n * lambda);
+                            if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(n * lambda);
+                            wr = a.angularVelocity - b.angularVelocity;
+                        }
+                    }
+                }
+
+                if (j.enableTwistLimit) {
+                    Vec3 refA = rotate(a.orientation, j.localRefA);
+                    Vec3 refB = rotate(b.orientation, j.localRefB);
+                    refA = normalize(refA - axisA * dot(refA, axisA));
+                    refB = normalize(refB - axisA * dot(refB, axisA));
+                    if (lengthSq(refA) < 1e-10f || lengthSq(refB) < 1e-10f) break;
+                    float angle = std::atan2(dot(cross(refA, refB), axisA),
+                                             dot(refA, refB));
+                    float k = dot(axisA, a.invInertiaMul(axisA)) +
+                              dot(axisA, b.invInertiaMul(axisA));
+                    if (k > 0.0f) {
+                        float wAxis = dot(a.angularVelocity - b.angularVelocity, axisA);
+                        float lambda = 0.0f;
+                        float oldImpulse = j.twistImpulse;
+                        if (angle < j.lowerTwistLimit) {
+                            float target = (angle - j.lowerTwistLimit) * (kBeta / dt);
+                            lambda = (target - wAxis) / k;
+                            j.twistImpulse = vmin(0.0f, oldImpulse + lambda);
+                            lambda = j.twistImpulse - oldImpulse;
+                        } else if (angle > j.upperTwistLimit) {
+                            float target = (angle - j.upperTwistLimit) * (kBeta / dt);
+                            lambda = (target - wAxis) / k;
+                            j.twistImpulse = vmax(0.0f, oldImpulse + lambda);
+                            lambda = j.twistImpulse - oldImpulse;
                         }
                         if (lambda != 0.0f) {
                             if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
@@ -953,7 +1067,13 @@ void World::step(float dt) {
             throw std::invalid_argument("velox: joint contains invalid body endpoints");
         if (!finiteFloat(joint.motorSpeed) || !finiteFloat(joint.maxMotorTorque) ||
             joint.maxMotorTorque < 0.0f || !finiteFloat(joint.lowerLimit) ||
-            !finiteFloat(joint.upperLimit) || joint.lowerLimit > joint.upperLimit)
+            !finiteFloat(joint.upperLimit) || joint.lowerLimit > joint.upperLimit ||
+            !finiteFloat(joint.swingLimit) || joint.swingLimit < 0.0f ||
+            joint.swingLimit > 3.14159265f || !finiteFloat(joint.lowerTwistLimit) ||
+            !finiteFloat(joint.upperTwistLimit) ||
+            joint.lowerTwistLimit < -3.14159265f ||
+            joint.upperTwistLimit > 3.14159265f ||
+            joint.lowerTwistLimit > joint.upperTwistLimit)
             throw std::invalid_argument("velox: joint contains invalid motor or limit settings");
     }
     const int nSub = substeps > 0 ? substeps : 1;

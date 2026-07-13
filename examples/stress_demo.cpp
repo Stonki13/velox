@@ -646,6 +646,37 @@ static void testFiltersSensorsAndEventPhases() {
     check(ok, "filters and sensors (begin, persist, end without response)");
 }
 
+// 28. Cone/twist joints provide a ball anchor plus independent ragdoll-style
+// swing and axial limits. Start outside each envelope and require recovery.
+static void testConeTwistJoint() {
+    velox::World swingWorld;
+    swingWorld.gravity = {0, 0, 0};
+    auto swingBase = swingWorld.addBox({}, {0.5f, 0.5f, 0.5f}, 0.0f);
+    auto swingBody = swingWorld.addBox({}, {0.4f, 0.7f, 0.3f}, 1.0f);
+    auto swingJoint = swingWorld.addConeTwistJoint(
+        swingBase, swingBody, {}, {0, 1, 0});
+    swingWorld.joint(swingJoint).enableSwingLimit = true;
+    swingWorld.joint(swingJoint).swingLimit = 0.35f;
+    swingWorld.setTransform(swingBody, {}, velox::fromAxisAngle({1, 0, 0}, 1.0f));
+    for (int i = 0; i < 120; ++i) swingWorld.step(1.0f / 60.0f);
+
+    velox::World twistWorld;
+    twistWorld.gravity = {0, 0, 0};
+    auto twistBase = twistWorld.addBox({}, {0.5f, 0.5f, 0.5f}, 0.0f);
+    auto twistBody = twistWorld.addBox({}, {0.4f, 0.7f, 0.3f}, 1.0f);
+    auto twistJoint = twistWorld.addConeTwistJoint(
+        twistBase, twistBody, {}, {0, 1, 0});
+    twistWorld.joint(twistJoint).enableTwistLimit = true;
+    twistWorld.joint(twistJoint).lowerTwistLimit = -0.3f;
+    twistWorld.joint(twistJoint).upperTwistLimit = 0.3f;
+    twistWorld.setTransform(twistBody, {}, velox::fromAxisAngle({0, 1, 0}, 1.0f));
+    for (int i = 0; i < 120; ++i) twistWorld.step(1.0f / 60.0f);
+
+    bool ok = swingWorld.coneSwingAngle(swingJoint) < 0.38f &&
+              std::fabs(twistWorld.coneTwistAngle(twistJoint)) < 0.33f;
+    check(ok, "cone/twist joint (swing cone and axial limits)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -674,6 +705,7 @@ int main() {
     testForcesAndStateApi();
     testStableHandlesAndRemoval();
     testFiltersSensorsAndEventPhases();
+    testConeTwistJoint();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;
