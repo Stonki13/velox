@@ -1078,6 +1078,51 @@ static void testDistanceSpring() {
           "distance spring (mass-independent frequency and damping)");
 }
 
+// 35. Joint reactions are measured as impulse/dt. Breaking is deferred until
+// the solver pass completes, then emits stable body handles and the now-stale
+// joint handle before generation-safe slot reuse.
+static void testBreakableJoints() {
+    velox::World forceWorld;
+    forceWorld.gravity = {0, 0, 0};
+    auto base = forceWorld.addSphere({}, 0.2f, 0.0f);
+    auto payload = forceWorld.addSphere({1, 0, 0}, 0.2f, 1.0f);
+    auto rope = forceWorld.addDistanceJoint(base, payload, {}, {1, 0, 0});
+    forceWorld.joint(rope).breakForce = 10.0f;
+    forceWorld.setLinearVelocity(payload, {100, 0, 0});
+    forceWorld.step(1.0f / 60.0f);
+    bool forceOk = !forceWorld.isValid(rope) &&
+                   forceWorld.jointBreakEvents().size() == 1;
+    if (forceOk) {
+        const auto& event = forceWorld.jointBreakEvents()[0];
+        forceOk &= event.joint == rope && event.a == base && event.b == payload &&
+                   event.force > 10.0f;
+    }
+    auto replacement = forceWorld.addDistanceJoint(base, payload, {}, {1, 0, 0});
+    forceOk &= replacement != rope && forceWorld.isValid(replacement);
+    forceWorld.step(1.0f / 60.0f);
+    forceOk &= forceWorld.jointBreakEvents().empty();
+
+    velox::World torqueWorld;
+    torqueWorld.gravity = {0, 0, 0};
+    auto torqueBase = torqueWorld.addBox({}, {0.2f, 0.2f, 0.2f}, 0.0f);
+    auto rotor = torqueWorld.addBox({}, {0.3f, 0.3f, 0.3f}, 1.0f);
+    auto weld = torqueWorld.addFixedJoint(torqueBase, rotor, {});
+    torqueWorld.joint(weld).breakTorque = 1.0f;
+    torqueWorld.setAngularVelocity(rotor, {0, 100, 0});
+    torqueWorld.step(1.0f / 60.0f);
+    bool torqueOk = !torqueWorld.isValid(weld) &&
+                    torqueWorld.jointBreakEvents().size() == 1 &&
+                    torqueWorld.jointBreakEvents()[0].torque > 1.0f;
+
+    auto invalid = torqueWorld.addFixedJoint(torqueBase, rotor, {});
+    torqueWorld.joint(invalid).breakForce = -1.0f;
+    bool validationOk = throwsException([&] {
+        torqueWorld.step(1.0f / 60.0f);
+    });
+    check(forceOk && torqueOk && validationOk,
+          "breakable joints (force, torque, events, handle reuse)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1113,6 +1158,7 @@ int main() {
     testMaterialsAndContactModification();
     testFixedAndPrismaticJoints();
     testDistanceSpring();
+    testBreakableJoints();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

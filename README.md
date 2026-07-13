@@ -100,6 +100,8 @@ closed 3D polytope cannot exist.
   and distance constraints support mass-independent frequency/damping springs
   (iterative impulses, 3x3 block solves, Baumgarte stabilization). Connected
   bodies ignore each other by default; `Joint::collideConnected` opts back in.
+  Per-joint force/torque thresholds support deferred breaking with observable
+  break events and generation-safe stale handles.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
   and torques, point impulses, per-body damping and gravity scaling
 - **Materials**: average/geometric/minimum/multiply/maximum combine modes,

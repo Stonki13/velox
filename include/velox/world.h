@@ -20,6 +20,13 @@ struct ContactEvent {
     bool sensor = false;
 };
 
+struct JointBreakEvent {
+    JointId joint; // stale immediately after the break, identifies the removed joint
+    BodyId a, b;
+    float force = 0.0f;
+    float torque = 0.0f;
+};
+
 struct RayHit {
     bool hit = false;
     BodyId body;
@@ -120,6 +127,9 @@ public:
     float coneSwingAngle(JointId id) const;
     float coneTwistAngle(JointId id) const;
     float prismaticTranslation(JointId id) const;
+    const std::vector<JointBreakEvent>& jointBreakEvents() const {
+        return jointBreakEvents_;
+    }
 
     // Contact and sensor Begin/Persist/End events from the most recent step().
     const std::vector<ContactEvent>& contactEvents() const { return events_; }
@@ -199,6 +209,7 @@ private:
     std::vector<uint32_t> unionParent_;
     std::vector<float> islandTimer_;
     std::vector<ContactEvent> events_;
+    std::vector<JointBreakEvent> jointBreakEvents_;
     std::vector<uint64_t> prevPairKeys_;
     ContactModifier contactModifier_;
     MeshSoup meshes_;

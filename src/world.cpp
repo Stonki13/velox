@@ -1051,12 +1051,27 @@ void applyImpulse(Body& x, const Vec3& r, const Vec3& P, float sign) {
     x.angularVelocity += x.invInertiaMul(cross(r, P)) * sign;
 }
 
+void applyJointImpulse(Joint& joint, Body& a, Body& b,
+                       const Vec3& ra, const Vec3& rb,
+                       const Vec3& impulse, float signA) {
+    applyImpulse(a, ra, impulse, signA);
+    applyImpulse(b, rb, impulse, -signA);
+    joint.reactionLinearImpulse += impulse * signA;
+}
+
+void applyJointAngularImpulse(Joint& joint, Body& a, Body& b,
+                              const Vec3& impulse, float signA = 1.0f) {
+    if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(impulse) * signA;
+    if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(impulse) * signA;
+    joint.reactionAngularImpulse += impulse * signA;
+}
+
 Mat3 angularMass(const Body& a, const Body& b) {
     auto col = [&](Vec3 e) { return a.invInertiaMul(e) + b.invInertiaMul(e); };
     return {col({1, 0, 0}), col({0, 1, 0}), col({0, 0, 1})};
 }
 
-void solveAngularFrame(const Joint& j, Body& a, Body& b, float biasScale) {
+void solveAngularFrame(Joint& j, Body& a, Body& b, float biasScale) {
     Vec3 xA = normalize(rotate(a.orientation, j.localAxisA));
     Vec3 xB = normalize(rotate(b.orientation, j.localAxisB));
     Vec3 yA = normalize(rotate(a.orientation, j.localRefA));
@@ -1067,8 +1082,7 @@ void solveAngularFrame(const Joint& j, Body& a, Body& b, float biasScale) {
     Vec3 relativeW = a.angularVelocity - b.angularVelocity;
     Vec3 impulse = mul(inverse(angularMass(a, b)),
                        -(relativeW + error * biasScale));
-    if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(impulse);
-    if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(impulse);
+    applyJointAngularImpulse(j, a, b, impulse);
 }
 
 // Signed gap and contact normal (from B towards A) between two bodies with
@@ -1143,6 +1157,9 @@ void World::solveJoints(float dt) {
         j.swingImpulse = 0.0f;
         j.twistImpulse = 0.0f;
         j.springImpulse = 0.0f;
+        j.reactionLinearImpulse = {};
+        j.reactionAngularImpulse = {};
+        j.broken = false;
     }
 
     for (int iter = 0; iter < kJointIterations; ++iter) {
@@ -1159,8 +1176,7 @@ void World::solveJoints(float dt) {
             case JointType::Ball: {
                 Vec3 bias = (pa - pb) * (kBeta / dt);
                 Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
-                applyImpulse(a, ra, P, +1.0f);
-                applyImpulse(b, rb, P, -1.0f);
+                applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
                 break;
             }
             case JointType::Distance: {
@@ -1191,15 +1207,13 @@ void World::solveJoints(float dt) {
                     float bias = (len - j.restLength) * (kBeta / dt);
                     lambda = -(dot(vel, n) + bias) / k;
                 }
-                applyImpulse(a, ra, n * lambda, +1.0f);
-                applyImpulse(b, rb, n * lambda, -1.0f);
+                applyJointImpulse(j, a, b, ra, rb, n * lambda, +1.0f);
                 break;
             }
             case JointType::Fixed: {
                 Vec3 bias = (pa - pb) * (kBeta / dt);
                 Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
-                applyImpulse(a, ra, P, +1.0f);
-                applyImpulse(b, rb, P, -1.0f);
+                applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
                 solveAngularFrame(j, a, b, kBeta / dt);
                 break;
             }
@@ -1218,8 +1232,7 @@ void World::solveJoints(float dt) {
                     float k = dot(t, mul(pointK, t));
                     if (k <= 0.0f) continue;
                     float lambda = -(dot(vel, t) + dot(error, t) * (kBeta / dt)) / k;
-                    applyImpulse(a, ra, t * lambda, +1.0f);
-                    applyImpulse(b, rb, t * lambda, -1.0f);
+                    applyJointImpulse(j, a, b, ra, rb, t * lambda, +1.0f);
                     vel = anchorVelocity(a, ra) - anchorVelocity(b, rb);
                 }
                 solveAngularFrame(j, a, b, kBeta / dt);
@@ -1235,8 +1248,8 @@ void World::solveJoints(float dt) {
                         j.motorImpulse = vclamp(oldImpulse + lambda,
                                                 -maxImpulse, maxImpulse);
                         lambda = j.motorImpulse - oldImpulse;
-                        applyImpulse(a, ra, axis * lambda, -1.0f);
-                        applyImpulse(b, rb, axis * lambda, +1.0f);
+                        applyJointImpulse(j, a, b, ra, rb,
+                                          axis * lambda, -1.0f);
                         axisSpeed = dot(anchorVelocity(b, rb) -
                                         anchorVelocity(a, ra), axis);
                     }
@@ -1255,8 +1268,8 @@ void World::solveJoints(float dt) {
                             j.limitImpulse = vmin(0.0f, oldImpulse + lambda);
                             lambda = j.limitImpulse - oldImpulse;
                         }
-                        applyImpulse(a, ra, axis * lambda, -1.0f);
-                        applyImpulse(b, rb, axis * lambda, +1.0f);
+                        applyJointImpulse(j, a, b, ra, rb,
+                                          axis * lambda, -1.0f);
                     }
                 }
                 break;
@@ -1265,8 +1278,7 @@ void World::solveJoints(float dt) {
                 // Point constraint...
                 Vec3 bias = (pa - pb) * (kBeta / dt);
                 Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
-                applyImpulse(a, ra, P, +1.0f);
-                applyImpulse(b, rb, P, -1.0f);
+                applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
                 // ...plus two angular rows keeping the axes aligned.
                 Vec3 axisA = rotate(a.orientation, j.localAxisA);
                 Vec3 axisB = rotate(b.orientation, j.localAxisB);
@@ -1282,8 +1294,7 @@ void World::solveJoints(float dt) {
                     // realign, i.e. the relative velocity wr = wa - wb must
                     // be driven towards -err * beta/dt.
                     float lambda = -(dot(wr, t) + dot(err, t) * (kBeta / dt)) / k;
-                    if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(t * lambda);
-                    if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(t * lambda);
+                    applyJointAngularImpulse(j, a, b, t * lambda);
                     wr = a.angularVelocity - b.angularVelocity;
                 }
 
@@ -1298,8 +1309,7 @@ void World::solveJoints(float dt) {
                         float oldImpulse = j.motorImpulse;
                         j.motorImpulse = vclamp(oldImpulse + lambda, -maxImpulse, maxImpulse);
                         lambda = j.motorImpulse - oldImpulse;
-                        if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
-                        if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                        applyJointAngularImpulse(j, a, b, axisA * lambda);
                     }
                     if (j.enableLimit) {
                         // Current angle from the stored references.
@@ -1327,8 +1337,7 @@ void World::solveJoints(float dt) {
                             lambda = j.limitImpulse - oldImpulse;
                         }
                         if (lambda != 0.0f) {
-                            if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
-                            if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                            applyJointAngularImpulse(j, a, b, axisA * lambda);
                         }
                     }
                 }
@@ -1338,8 +1347,7 @@ void World::solveJoints(float dt) {
                 // Ball anchor at the joint center.
                 Vec3 bias = (pa - pb) * (kBeta / dt);
                 Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
-                applyImpulse(a, ra, P, +1.0f);
-                applyImpulse(b, rb, P, -1.0f);
+                applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
 
                 Vec3 axisA = normalize(rotate(a.orientation, j.localAxisA));
                 Vec3 axisB = normalize(rotate(b.orientation, j.localAxisB));
@@ -1361,8 +1369,7 @@ void World::solveJoints(float dt) {
                             float oldImpulse = j.swingImpulse;
                             j.swingImpulse = vmin(0.0f, oldImpulse + lambda);
                             lambda = j.swingImpulse - oldImpulse;
-                            if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(n * lambda);
-                            if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(n * lambda);
+                            applyJointAngularImpulse(j, a, b, n * lambda);
                             wr = a.angularVelocity - b.angularVelocity;
                         }
                     }
@@ -1394,8 +1401,7 @@ void World::solveJoints(float dt) {
                             lambda = j.twistImpulse - oldImpulse;
                         }
                         if (lambda != 0.0f) {
-                            if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(axisA * lambda);
-                            if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(axisA * lambda);
+                            applyJointAngularImpulse(j, a, b, axisA * lambda);
                         }
                     }
                 }
@@ -1403,6 +1409,23 @@ void World::solveJoints(float dt) {
             }
             }
         }
+    }
+
+    for (Joint& joint : joints_) {
+        float force = length(joint.reactionLinearImpulse) / dt;
+        float torque = length(joint.reactionAngularImpulse) / dt;
+        joint.broken = force > joint.breakForce || torque > joint.breakTorque;
+    }
+    for (size_t i = joints_.size(); i-- > 0;) {
+        if (!joints_[i].broken) continue;
+        const Joint& joint = joints_[i];
+        uint32_t slot = jointDenseToSlot_[i];
+        jointBreakEvents_.push_back({
+            JointId::make(slot, jointSlots_[slot].generation),
+            bodyHandle(joint.a), bodyHandle(joint.b),
+            length(joint.reactionLinearImpulse) / dt,
+            length(joint.reactionAngularImpulse) / dt});
+        removeJointDense(static_cast<uint32_t>(i));
     }
 }
 
@@ -1474,6 +1497,7 @@ void World::step(float dt) {
     if (!finiteFloat(dt) || dt < 0.0f)
         throw std::invalid_argument("velox: timestep must be finite and non-negative");
     if (dt == 0.0f) return;
+    jointBreakEvents_.clear();
     if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
     if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
     for (Body& body : bodies_) {
@@ -1568,6 +1592,9 @@ void World::step(float dt) {
             (joint.enableSpring && (joint.type != JointType::Distance ||
                                     joint.springFrequencyHz <= 0.0f)))
             throw std::invalid_argument("velox: joint contains invalid spring settings");
+        if (!finiteFloat(joint.breakForce) || !finiteFloat(joint.breakTorque) ||
+            joint.breakForce < 0.0f || joint.breakTorque < 0.0f)
+            throw std::invalid_argument("velox: joint contains invalid break thresholds");
     }
     const int nSub = substeps > 0 ? substeps : 1;
     const float h = dt / nSub;

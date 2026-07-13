@@ -40,6 +40,11 @@ struct Joint {
     float springFrequencyHz = 0.0f;
     float springDampingRatio = 1.0f;
 
+    // Joint is removed after a solver pass whose reaction exceeds either
+    // threshold. Defaults effectively disable breaking.
+    float breakForce = 3.402823466e+38F;
+    float breakTorque = 3.402823466e+38F;
+
     // Hinge motor: drives the relative angular velocity about the axis.
     bool enableMotor = false;
     float motorSpeed = 0.0f;      // Hinge: rad/s A vs B; prismatic: m/s B vs A
@@ -64,6 +69,9 @@ struct Joint {
     float swingImpulse = 0.0f;
     float twistImpulse = 0.0f;
     float springImpulse = 0.0f;
+    Vec3 reactionLinearImpulse;
+    Vec3 reactionAngularImpulse;
+    bool broken = false;
 };
 
 } // namespace velox
