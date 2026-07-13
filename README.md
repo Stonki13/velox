@@ -55,14 +55,16 @@ the color count near the max contacts per body.
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 3.42 ms | **1.67 ms** |
-| 2048-sphere rain | 14.50 ms | **2.90 ms** |
-| 8192-sphere rain | 68.05 ms | **26.18 ms** |
-| 2048 spheres on 20k-triangle terrain | 27.28 ms | **7.13 ms** |
+| 512-sphere rain | 3.80 ms | **1.95 ms** |
+| 2048-sphere rain | 18.04 ms | **6.26 ms** |
+| 8192-sphere rain | 119.82 ms | **51.86 ms** |
+| 2048 spheres on 20k-triangle terrain | 34.60 ms | **11.01 ms** |
 
-These are a current local Release run on an RTX 5080. The GPU broad phase
-still scans the compact all-pairs matrix, so replacing that path with a
-hierarchical GPU broad phase remains the next major performance target.
+These are a current local Release run on an RTX 5080. The GPU broad phase is
+hybrid: compact all-pairs culling keeps small scenes highly occupied, while
+large scenes use GPU sweep-and-prune, overflow-safe candidate compaction, and
+a fully parallel narrow-phase pass. The measured crossover is 4096 bodies;
+the 8192-body all-pairs reference path takes 183.94 ms instead of 51.86 ms.
 
 ## Solver
 
@@ -106,7 +108,8 @@ closed 3D polytope cannot exist.
   pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
 - **CUDA backend**: integration, narrow phase, and graph-colored contact
   solver all on the GPU (CUDA Graphs batching)
-- Broad phase: sweep-and-prune (CPU), compact-AABB pair culling (GPU)
+- Broad phase: sweep-and-prune (CPU), hybrid all-pairs / compacted GPU
+  sweep-and-prune (CUDA)
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
 
 Mesh colliders are static-only (level geometry), matching how game engines
@@ -114,7 +117,6 @@ treat non-convex meshes.
 
 Roadmap:
 
-- [ ] Hierarchical GPU broad phase (replace the current all-pairs scan)
 - [ ] Device-resident stepping (skip per-substep transfers when no joints)
 
 ## Build

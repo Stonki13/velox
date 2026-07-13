@@ -35,7 +35,8 @@ endif()
 
 if(MSVC)
     target_compile_options(velox PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>)
+        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
 else()
     target_compile_options(velox PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -ffast-math>)

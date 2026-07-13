@@ -4,7 +4,10 @@
 // inherently serial; a Jacobi/graph-colored GPU solver is on the roadmap).
 #include "narrowphase.h"
 #include <cuda_runtime.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sort.h>
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 
 namespace velox {
@@ -34,7 +37,8 @@ __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
 // Planes and meshes get infinite bounds (they are collided by every pair).
 struct Aabb { Vec3 lo, hi; };
 
-__global__ void aabbKernel(const Body* bodies, int n, float dt, Aabb* aabbs) {
+__global__ void aabbKernel(const Body* bodies, int n, float dt, Aabb* aabbs,
+                           float* sortKeys, BodyIndex* sortedIndices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const Body& b = bodies[i];
@@ -45,38 +49,82 @@ __global__ void aabbKernel(const Body* bodies, int n, float dt, Aabb* aabbs) {
         bodyAabb(b, dt, box.lo, box.hi);
         aabbs[i] = box;
     }
+    sortKeys[i] = aabbs[i].lo.x;
+    sortedIndices[i] = (BodyIndex)i;
 }
 
-// One thread per body pair (upper triangle, linearized). The AABB test hits
-// only the compact array (fits in L2); full bodies load after an overlap.
-__global__ void contactsKernel(const Body* bodies, const Aabb* aabbs, int n,
-                               MeshSoupView soup, float dt,
-                               Contact* out, int* outCount, int outCap) {
-    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-    long long total = (long long)n * (n - 1) / 2;
-    if (idx >= total) return;
+// Stage 1: compact AABB-overlapping pairs from sorted X intervals. The atomic
+// count is allowed to exceed pairCap; the host grows the buffer and reruns so
+// broad-phase overflow never drops collision candidates.
+__global__ void sweepCandidatesKernel(const Body* bodies, const Aabb* aabbs,
+                                      const float* sortedKeys,
+                                      const BodyIndex* sortedIndices, int n,
+                                      uint64_t* pairs, int* pairCount,
+                                      int pairCap) {
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s >= n) return;
+    BodyIndex rawI = sortedIndices[s];
+    for (int t = s + 1; t < n && sortedKeys[t] <= aabbs[rawI].hi.x; ++t) {
+        BodyIndex rawJ = sortedIndices[t];
+        BodyIndex i = rawI < rawJ ? rawI : rawJ;
+        BodyIndex j = rawI < rawJ ? rawJ : rawI;
+        if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, aabbs[j].lo, aabbs[j].hi)) continue;
+        const Body& a = bodies[i];
+        const Body& b = bodies[j];
+        if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) continue;
+        if (!a.canCollideWith(b)) continue;
 
-    // Linear index -> (i, j), j > i, over the upper triangle.
-    int i = (int)((2LL * n - 1 - sqrtf((float)((2LL * n - 1) * (2LL * n - 1) - 8LL * idx))) / 2);
-    long long rowStart = (long long)i * n - (long long)i * (i + 1) / 2;
-    int j = (int)(idx - rowStart + i + 1);
-    // Float sqrt can land one row off; correct it.
-    while (j >= n) { ++i; rowStart = (long long)i * n - (long long)i * (i + 1) / 2; j = (int)(idx - rowStart + i + 1); }
+        int slot = atomicAdd(pairCount, 1);
+        if (slot < pairCap) pairs[slot] = (uint64_t(i) << 32) | j;
+    }
+}
 
-    if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, aabbs[j].lo, aabbs[j].hi)) return;
-
-    const Body& a = bodies[i];
-    const Body& b = bodies[j];
-    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
-    if (!a.canCollideWith(b)) return;
-
+// Stage 2: expensive narrow phase is fully parallel across compact candidates.
+__global__ void candidateContactsKernel(const Body* bodies,
+                                        const uint64_t* pairs, int pairCount,
+                                        MeshSoupView soup, float dt,
+                                        Contact* out, int* outCount, int outCap) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= pairCount) return;
+    uint64_t pair = pairs[k];
+    BodyIndex i = BodyIndex(pair >> 32), j = BodyIndex(pair);
     Contact buf[kMaxContactsPerPair];
-    int count = collidePair(a, b, (BodyIndex)i, (BodyIndex)j, soup, dt,
+    int count = collidePair(bodies[i], bodies[j], i, j, soup, dt,
                             buf, kMaxContactsPerPair);
     if (count == 0) return;
     int slot = atomicAdd(outCount, count);
     for (int c = 0; c < count && slot + c < outCap; ++c)
         out[slot + c] = buf[c];
+}
+
+// Reference all-pairs path retained for dense-scene fallback and controlled
+// benchmarking. Compact AABBs keep rejected pairs cheap.
+__global__ void allPairsContactsKernel(const Body* bodies, const Aabb* aabbs,
+                                       int n, MeshSoupView soup, float dt,
+                                       Contact* out, int* outCount, int outCap) {
+    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    long long total = (long long)n * (n - 1) / 2;
+    if (idx >= total) return;
+    int i = (int)((2LL * n - 1 - sqrtf((float)((2LL * n - 1) *
+        (2LL * n - 1) - 8LL * idx))) / 2);
+    long long rowStart = (long long)i * n - (long long)i * (i + 1) / 2;
+    int j = (int)(idx - rowStart + i + 1);
+    while (j >= n) {
+        ++i;
+        rowStart = (long long)i * n - (long long)i * (i + 1) / 2;
+        j = (int)(idx - rowStart + i + 1);
+    }
+    if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, aabbs[j].lo, aabbs[j].hi)) return;
+    const Body& a = bodies[i];
+    const Body& b = bodies[j];
+    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
+    if (!a.canCollideWith(b)) return;
+    Contact buf[kMaxContactsPerPair];
+    int count = collidePair(a, b, (BodyIndex)i, (BodyIndex)j, soup, dt,
+                            buf, kMaxContactsPerPair);
+    if (count == 0) return;
+    int slot = atomicAdd(outCount, count);
+    for (int c = 0; c < count && slot + c < outCap; ++c) out[slot + c] = buf[c];
 }
 
 // Solves every contact of one color in parallel: within a color no two
@@ -112,6 +160,9 @@ public:
         if (stream_) cudaStreamDestroy(stream_);
         release(dBodies_);
         release(dAabbs_);
+        release(dSortKeys_);
+        release(dSortedIndices_);
+        release(dPairs_);
         release(dSolve_);
         release(dContacts_);
         release(dCount_);
@@ -154,17 +205,66 @@ public:
 
         if ((size_t)n * sizeof(Aabb) > aabbCap_) {
             release(dAabbs_);
+            release(dSortKeys_);
+            release(dSortedIndices_);
             VELOX_CUDA_CHECK(cudaMalloc(&dAabbs_, n * sizeof(Aabb)));
+            VELOX_CUDA_CHECK(cudaMalloc(&dSortKeys_, n * sizeof(float)));
+            VELOX_CUDA_CHECK(cudaMalloc(&dSortedIndices_, n * sizeof(BodyIndex)));
             aabbCap_ = n * sizeof(Aabb);
         }
-        aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, n, dt, dAabbs_);
-
+        aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, n, dt, dAabbs_,
+                                             dSortKeys_, dSortedIndices_);
         MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_, dHullPts_};
-        long long pairs = (long long)n * (n - 1) / 2;
         int threads = 256;
-        long long blocks = (pairs + threads - 1) / threads;
-        contactsKernel<<<(unsigned)blocks, threads>>>(dBodies_, dAabbs_, n, soup, dt,
-                                                      dContacts_, dCount_, cap);
+        // The brute-force kernel has excellent occupancy for small scenes;
+        // radix sorting and candidate compaction pay off only once quadratic
+        // rejection dominates. Keep both and switch at the measured crossover.
+        if (n < 4096 || std::getenv("VELOX_CUDA_ALL_PAIRS")) {
+            long long pairs = (long long)n * (n - 1) / 2;
+            long long blocks = (pairs + threads - 1) / threads;
+            allPairsContactsKernel<<<(unsigned)blocks, threads>>>(
+                dBodies_, dAabbs_, n, soup, dt, dContacts_, dCount_, cap);
+            int count = 0;
+            VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int), cudaMemcpyDeviceToHost));
+            count = count < cap ? count : cap;
+            out.resize(count);
+            if (count > 0)
+                VELOX_CUDA_CHECK(cudaMemcpy(out.data(), dContacts_, count * sizeof(Contact),
+                                            cudaMemcpyDeviceToHost));
+            bodiesDirty_ = true;
+            return;
+        }
+
+        thrust::device_ptr<float> keys(dSortKeys_);
+        thrust::device_ptr<BodyIndex> indices(dSortedIndices_);
+        thrust::sort_by_key(keys, keys + n, indices);
+        int candidateCap = static_cast<int>(pairCap_ / sizeof(uint64_t));
+        if (candidateCap == 0) {
+            candidateCap = n * 128 + 1024;
+            VELOX_CUDA_CHECK(cudaMalloc(&dPairs_, candidateCap * sizeof(uint64_t)));
+            pairCap_ = candidateCap * sizeof(uint64_t);
+        }
+        VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
+        sweepCandidatesKernel<<<(n + threads - 1) / threads, threads>>>(
+            dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
+            dPairs_, dCount_, candidateCap);
+        int candidateCount = 0;
+        VELOX_CUDA_CHECK(cudaMemcpy(&candidateCount, dCount_, sizeof(int),
+                                    cudaMemcpyDeviceToHost));
+        if (candidateCount > candidateCap) {
+            release(dPairs_);
+            candidateCap = candidateCount;
+            VELOX_CUDA_CHECK(cudaMalloc(&dPairs_, candidateCap * sizeof(uint64_t)));
+            pairCap_ = candidateCap * sizeof(uint64_t);
+            VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
+            sweepCandidatesKernel<<<(n + threads - 1) / threads, threads>>>(
+                dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
+                dPairs_, dCount_, candidateCap);
+        }
+        VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
+        if (candidateCount > 0)
+            candidateContactsKernel<<<(candidateCount + threads - 1) / threads, threads>>>(
+                dBodies_, dPairs_, candidateCount, soup, dt, dContacts_, dCount_, cap);
         int count = 0;
         VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int), cudaMemcpyDeviceToHost));
         count = count < cap ? count : cap;
@@ -348,6 +448,10 @@ private:
 
     Body* dBodies_ = nullptr;
     Aabb* dAabbs_ = nullptr;
+    float* dSortKeys_ = nullptr;
+    BodyIndex* dSortedIndices_ = nullptr;
+    uint64_t* dPairs_ = nullptr;
+    size_t pairCap_ = 0;
     size_t aabbCap_ = 0;
     Contact* dSolve_ = nullptr;
     size_t solveCap_ = 0;
