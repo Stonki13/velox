@@ -108,12 +108,63 @@ struct Body {
     VELOX_HD float solverInvMass() const { return isDynamic() ? invMass : 0.0f; }
 
     // World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v))
-    VELOX_HD Vec3 invInertiaMul(const Vec3& v) const {
+    VELOX_HD Vec3 invInertiaMulAt(const Vec3& v, const Quat& at) const {
         if (!isDynamic()) return {};
+        Vec3 local = rotateInv(at, v);
+        return rotate(at, {local.x * invInertia.x,
+                           local.y * invInertia.y,
+                           local.z * invInertia.z});
+    }
+
+    VELOX_HD Vec3 invInertiaMul(const Vec3& v) const {
+        return invInertiaMulAt(v, orientation);
+    }
+
+    VELOX_HD Vec3 inertiaMul(const Vec3& v) const {
         Vec3 local = rotateInv(orientation, v);
-        return rotate(orientation, {local.x * invInertia.x,
-                                    local.y * invInertia.y,
-                                    local.z * invInertia.z});
+        Vec3 weighted{
+            invInertia.x > 0.0f ? local.x / invInertia.x : 0.0f,
+            invInertia.y > 0.0f ? local.y / invInertia.y : 0.0f,
+            invInertia.z > 0.0f ? local.z / invInertia.z : 0.0f};
+        return rotate(orientation, weighted);
+    }
+
+    VELOX_HD Vec3 worldAngularMomentum() const {
+        return inertiaMul(angularVelocity);
+    }
+
+    VELOX_HD float rotationalKineticEnergy() const {
+        return 0.5f * dot(angularVelocity, worldAngularMomentum());
+    }
+
+    // Advance orientation while preserving world angular momentum as an
+    // anisotropic inertia tensor rotates. Kinematic angular velocity is a
+    // prescribed trajectory and is therefore not reprojected.
+    VELOX_HD void advanceOrientation(float dt) {
+        bool anisotropic = invInertia.x != invInertia.y ||
+                           invInertia.y != invInertia.z;
+        if (isDynamic() && anisotropic) {
+            Vec3 angularMomentum = worldAngularMomentum();
+            Quat start = orientation;
+            Vec3 startVelocity = angularVelocity;
+            Quat next = integrate(start, startVelocity, dt);
+            // Implicit midpoint for q' = 0.5 * omega(q,L) * q. Three fixed
+            // point iterations are enough at solver-substep timesteps.
+            for (int iteration = 0; iteration < 3; ++iteration) {
+                Vec3 endVelocity = invInertiaMulAt(angularMomentum, next);
+                Vec3 midpointVelocity = (startVelocity + endVelocity) * 0.5f;
+                next = integrate(start, midpointVelocity, dt);
+            }
+            orientation = next;
+            angularVelocity = invInertiaMul(angularMomentum);
+        } else {
+            orientation = integrate(orientation, angularVelocity, dt);
+        }
+    }
+
+    VELOX_HD void advanceTransform(float dt) {
+        position += velocity * dt;
+        advanceOrientation(dt);
     }
 
     // Conservative bound on how far any surface point can move per second:

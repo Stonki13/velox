@@ -2109,8 +2109,7 @@ void World::step(float dt) {
             solveJoints(h);
             for (Body& b : bodies_) {
                 if (b.isStatic() || b.asleep) continue;
-                b.position += b.velocity * h;
-                b.orientation = integrate(b.orientation, b.angularVelocity, h);
+                b.advanceTransform(h);
             }
         }
     }
@@ -2159,11 +2158,24 @@ void World::step(float dt) {
             float bound = a.maxPointSpeed() * dt + (b.isStatic() ? 0.0f : b.maxPointSpeed() * dt);
             if (bound < 1e-9f) continue;
 
+            Vec3 angularMomentumA = a.worldAngularMomentum();
+            Vec3 angularMomentumB = b.isDynamic() ? b.worldAngularMomentum() : Vec3{};
+            auto orientationAt = [](const Body& body, const Quat& start,
+                                    const Vec3& angularMomentum, float elapsed) {
+                Body sample = body;
+                sample.orientation = start;
+                sample.angularVelocity = sample.invInertiaMul(angularMomentum);
+                sample.advanceOrientation(elapsed);
+                return sample.orientation;
+            };
+
             float t = 0.0f;
             Vec3 n = end.normal;
             for (int iter = 0; iter < 24 && t < 1.0f; ++iter) {
-                Quat qa = integrate(qa0, a.angularVelocity, dt * t);
-                Quat qb = b.isStatic() ? qb0 : integrate(qb0, b.angularVelocity, dt * t);
+                Quat qa = orientationAt(a, qa0, angularMomentumA, dt * t);
+                Quat qb = b.isStatic()
+                    ? qb0
+                    : orientationAt(b, qb0, angularMomentumB, dt * t);
                 GapProbe g = gapAt(a, pa0 + da * t, qa, b, pb0 + db * t, qb, soup, search);
                 n = g.normal;
                 if (g.gap < kSlop) break;
@@ -2175,10 +2187,14 @@ void World::step(float dt) {
             // preserves their shared timeline instead of arbitrarily clamping
             // one participant and leaving the other at the end of the step.
             a.position = pa0 + da * t;
-            a.orientation = integrate(qa0, a.angularVelocity, dt * t);
+            a.orientation = qa0;
+            a.angularVelocity = a.invInertiaMul(angularMomentumA);
+            a.advanceOrientation(dt * t);
             if (b.isDynamic()) {
                 b.position = pb0 + db * t;
-                b.orientation = integrate(qb0, b.angularVelocity, dt * t);
+                b.orientation = qb0;
+                b.angularVelocity = b.invInertiaMul(angularMomentumB);
+                b.advanceOrientation(dt * t);
             }
 
             // Remove only the remaining approach velocity with an
@@ -2196,12 +2212,8 @@ void World::step(float dt) {
             // normal approach component is now zero, so this cannot recreate
             // the crossing, and tangential/center-of-mass motion is retained.
             float remaining = dt * (1.0f - t);
-            a.position += a.velocity * remaining;
-            a.orientation = integrate(a.orientation, a.angularVelocity, remaining);
-            if (b.isDynamic()) {
-                b.position += b.velocity * remaining;
-                b.orientation = integrate(b.orientation, b.angularVelocity, remaining);
-            }
+            a.advanceTransform(remaining);
+            if (b.isDynamic()) b.advanceTransform(remaining);
         }
     }
 

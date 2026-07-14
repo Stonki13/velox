@@ -1341,7 +1341,44 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
-// 39. Large joint sets stay resident through CUDA solver substeps; mixed
+// 39. Torque-free asymmetric bodies conserve world angular momentum while
+// their body-space inertia rotates, including CPU/CUDA trajectory parity.
+static void testGyroscopicIntegration() {
+    velox::World cpu(velox::BackendType::Cpu);
+    velox::World accelerated;
+    cpu.gravity = accelerated.gravity = {0, 0, 0};
+    auto cpuBox = cpu.addBox({}, {0.25f, 0.75f, 1.25f}, 2.0f);
+    auto acceleratedBox = accelerated.addBox(
+        {}, {0.25f, 0.75f, 1.25f}, 2.0f);
+    cpu.setAngularVelocity(cpuBox, {3, 5, 7});
+    accelerated.setAngularVelocity(acceleratedBox, {3, 5, 7});
+    velox::Vec3 initialMomentum = cpu.body(cpuBox).worldAngularMomentum();
+    float initialEnergy = cpu.body(cpuBox).rotationalKineticEnergy();
+    for (int i = 0; i < 600; ++i) {
+        cpu.step(1.0f / 240.0f);
+        accelerated.step(1.0f / 240.0f);
+    }
+    const velox::Body& expected = cpu.body(cpuBox);
+    const velox::Body& actual = accelerated.body(acceleratedBox);
+    float momentumError = velox::length(
+        expected.worldAngularMomentum() - initialMomentum) /
+        velox::length(initialMomentum);
+    float energyError = std::fabs(expected.rotationalKineticEnergy() -
+                                  initialEnergy) / initialEnergy;
+    velox::Vec3 expectedAxis = velox::rotate(expected.orientation, {1, 0, 0});
+    velox::Vec3 actualAxis = velox::rotate(actual.orientation, {1, 0, 0});
+    bool parity = velox::length(expected.angularVelocity -
+                                actual.angularVelocity) < 3e-3f &&
+                  velox::length(expectedAxis - actualAxis) < 3e-3f;
+    bool ok = momentumError < 1e-3f && energyError < 5e-3f && parity;
+    if (!ok)
+        std::printf("  momentum error %.6g, energy error %.6g, parity %s\n",
+                    momentumError, energyError, parity ? "yes" : "no");
+    check(ok,
+          "gyroscopic integration (momentum, energy, CPU/CUDA parity)");
+}
+
+// 40. Large joint sets stay resident through CUDA solver substeps; mixed
 // constraint types and per-substep breaking must track CPU behavior.
 static void testDeviceJointSubsteps() {
     velox::World cpu(velox::BackendType::Cpu);
@@ -1469,7 +1506,7 @@ static void testDeviceJointSubsteps() {
           "CUDA joint substeps (resident solve and CPU trajectory parity)");
 }
 
-// 40. CPU integration and narrow phase may execute on persistent workers, but
+// 41. CPU integration and narrow phase may execute on persistent workers, but
 // pair-range merging preserves the exact serial contact order and trajectory.
 static void testDeterministicCpuWorkers() {
     velox::World serial(velox::BackendType::Cpu);
@@ -1508,7 +1545,7 @@ static void testDeterministicCpuWorkers() {
     check(ok, "CPU workers (parallel integration/narrow phase, serial replay)");
 }
 
-// 41. Debug geometry is renderer-agnostic and must safely traverse every
+// 42. Debug geometry is renderer-agnostic and must safely traverse every
 // internal storage kind while allowing shapes, AABBs, contacts, and joints to
 // be requested independently.
 static void testDebugLines() {
@@ -1590,6 +1627,7 @@ int main() {
     testBreakableJoints();
     testWorldSnapshots();
     testStepStats();
+    testGyroscopicIntegration();
     testDeviceJointSubsteps();
     testDeterministicCpuWorkers();
     testDebugLines();

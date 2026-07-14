@@ -104,6 +104,11 @@ split-impulse positional correction (penetration is resolved by translation,
 never by velocity bias — no energy injection), and whole-island sleeping. A
 10-box tower remains standing in the regression suite on both CPU and CUDA.
 
+Torque-free anisotropic bodies use an implicit-midpoint gyroscopic update.
+As the body-space inertia tensor rotates, the integrator preserves world-space
+angular momentum and bounds rotational-energy drift instead of treating angular
+velocity as constant. The same device-compatible path runs on CPU and CUDA.
+
 Deep convex-core overlaps use a fixed-capacity **EPA** solver shared by CPU and
 CUDA. EPA returns the minimum translation normal, penetration depth, and core
 witness points; lower-dimensional cores retain a conservative fallback when a
@@ -112,7 +117,7 @@ closed 3D polytope cannot exist.
 ## Features
 
 - Full rigid body dynamics: linear + rotational (quaternions, world-space
-  inverse inertia, contact torques)
+  inverse inertia, gyroscopic angular-momentum conservation, contact torques)
 - Colliders: **sphere, box, capsule, cylinder, center-of-mass-correct cone,
   dynamic convex hull, static plane, static triangle mesh, and validated static
   heightfield**, plus locally transformed convex compound bodies under one

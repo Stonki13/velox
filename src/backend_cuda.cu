@@ -39,8 +39,7 @@ __global__ void integrateTransformsKernel(Body* bodies, int n, float dt) {
     if (i >= n) return;
     Body& b = bodies[i];
     if (b.isStatic() || b.asleep) return;
-    b.position += b.velocity * dt;
-    b.orientation = integrate(b.orientation, b.angularVelocity, dt);
+    b.advanceTransform(dt);
 }
 
 // Compact AABBs so the pair kernel can reject without touching Body structs.
