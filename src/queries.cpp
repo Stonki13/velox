@@ -309,7 +309,77 @@ QueryGap queryGap(const Body& probe, const Body& target,
             (result.pointA + result.pointB) * 0.5f};
 }
 
+// Body-to-body closest points. Drafted by the local Gemma builder; review
+// fixed a stray dereference and the loop index type.
+ClosestPointResult closestPointsBodies(const Body& a, const Body& b,
+                                       const MeshSoupView& soup,
+                                       float searchRadius) {
+    bool unboundedA = (a.shape == ShapeType::Plane || a.shape == ShapeType::Mesh);
+    bool unboundedB = (b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh);
+
+    if (unboundedA && unboundedB) return {1e30f, {}, {}, {0, 1, 0}};
+
+    if (a.shape == ShapeType::Compound) {
+        ClosestPointResult best = {1e30f, {}, {}, {0, 1, 0}};
+        for (uint32_t i = 0; i < a.compoundCount; ++i) {
+            ClosestPointResult res = closestPointsBodies(
+                compoundChildBody(a, soup.compoundChildren[a.compoundFirst + i]),
+                b, soup, searchRadius);
+            if (res.distance < best.distance) best = res;
+        }
+        return best;
+    }
+
+    if (b.shape == ShapeType::Compound) {
+        ClosestPointResult best = {1e30f, {}, {}, {0, 1, 0}};
+        for (uint32_t i = 0; i < b.compoundCount; ++i) {
+            ClosestPointResult res = closestPointsBodies(
+                a, compoundChildBody(b, soup.compoundChildren[b.compoundFirst + i]),
+                soup, searchRadius);
+            if (res.distance < best.distance) best = res;
+        }
+        return best;
+    }
+
+    if (unboundedA && !unboundedB) {
+        ClosestPointResult res = closestPointsBodies(b, a, soup, searchRadius);
+        return {res.distance, res.pointB, res.pointA, -res.normal};
+    }
+
+    if (b.shape == ShapeType::Plane) {
+        // Sphere/capsule cores are deflated points/segments: the surface
+        // point sits one inflation radius beyond the core support.
+        const Convex c = makeConvex(a, soup);
+        Vec3 corePoint = c.support(-b.planeNormal);
+        float dist = dot(b.planeNormal, corePoint) - b.planeOffset - c.radius;
+        Vec3 pointA = corePoint - b.planeNormal * c.radius;
+        return {dist, pointA, pointA - b.planeNormal * dist, b.planeNormal};
+    }
+
+    if (b.shape == ShapeType::Mesh) {
+        float gap = 1e30f;
+        Vec3 normal = {0, 1, 0};
+        meshGapProbe(a, b, soup, searchRadius, gap, normal); // gap includes radius
+        const Convex c = makeConvex(a, soup);
+        Vec3 pointA = c.support(-normal) - normal * c.radius;
+        return {gap, pointA, pointA - normal * gap, normal};
+    }
+
+    GjkResult r = gjkDistance(makeConvex(a, soup), makeConvex(b, soup));
+    return {r.distance, r.pointA, r.pointB, r.normal};
+}
+
 } // namespace
+
+ClosestPointResult World::closestPoints(BodyId a, BodyId b) const {
+    const Body& bodyA = bodies_[resolve(a)];
+    const Body& bodyB = bodies_[resolve(b)];
+    const MeshSoupView soup = view(meshes_);
+    float extents = bodyA.radius + length(bodyA.halfExtents) + bodyA.capsuleHalfHeight +
+                    bodyB.radius + length(bodyB.halfExtents) + bodyB.capsuleHalfHeight;
+    float searchRadius = length(bodyA.position - bodyB.position) + extents + 1.0f;
+    return closestPointsBodies(bodyA, bodyB, soup, searchRadius);
+}
 
 bool World::queryAllows(BodyIndex dense, const QueryFilter& filter) const {
     const Body& body = bodies_[dense];

@@ -41,6 +41,15 @@ struct QueryFilter {
     BodyId ignoredBody;
 };
 
+// Closest points between two bodies' surfaces. distance is negative when the
+// bodies overlap. When either body is an unbounded static (plane/mesh) paired
+// with another unbounded static, distance is a large sentinel (1e30f).
+struct ClosestPointResult {
+    float distance = 0.0f;
+    Vec3 pointA, pointB; // witness points on each body's surface
+    Vec3 normal;         // from B towards A
+};
+
 struct ShapeCastHit {
     bool hit = false;
     BodyId body;
@@ -241,6 +250,7 @@ public:
     void rayCastAll(Vec3 origin, Vec3 dir, float maxDist,
                     std::vector<RayHit>& out,
                     const QueryFilter& filter = {}) const;
+    ClosestPointResult closestPoints(BodyId a, BodyId b) const;
     void overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
                        const QueryFilter& filter = {}) const;
     void overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,

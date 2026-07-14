@@ -2036,6 +2036,34 @@ static void testRayCastAll() {
     check(ok, "rayCastAll (all hits, sorted)");
 }
 
+// 48. Closest points: witness points, separation distance, and overlap sign
+// between convex bodies, planes, and compounds.
+static void testClosestPoints() {
+    velox::World w(velox::BackendType::Cpu);
+    w.gravity = {0, 0, 0};
+    auto a = w.addSphere({0, 0, 0}, 0.5f, 1.0f);
+    auto b = w.addSphere({5, 0, 0}, 0.5f, 1.0f);
+    auto plane = w.addStaticPlane({0, 1, 0}, -2.0f);
+
+    auto r = w.closestPoints(a, b);
+    bool ok = std::fabs(r.distance - 4.0f) < 1e-3f &&
+              velox::length(r.pointA - velox::Vec3{0.5f, 0, 0}) < 1e-3f &&
+              velox::length(r.pointB - velox::Vec3{4.5f, 0, 0}) < 1e-3f &&
+              r.normal.x < -0.99f; // from B towards A
+
+    auto rp = w.closestPoints(a, plane);
+    ok &= std::fabs(rp.distance - 1.5f) < 1e-3f &&
+          velox::length(rp.pointA - velox::Vec3{0, -0.5f, 0}) < 1e-3f &&
+          velox::length(rp.pointB - velox::Vec3{0, -2.0f, 0}) < 1e-3f &&
+          rp.normal.y > 0.99f;
+
+    auto c = w.addSphere({0.8f, 0, 0}, 0.5f, 1.0f);
+    auto ro = w.closestPoints(a, c);
+    ok &= ro.distance < -0.15f && ro.distance > -0.25f; // ~-0.2 overlap
+
+    check(ok, "closestPoints (witnesses, plane, overlap sign)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -2084,6 +2112,7 @@ int main() {
     testConvexDistanceMetamorphics();
     testBroadPhaseTree();
     testRayCastAll();
+    testClosestPoints();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;
