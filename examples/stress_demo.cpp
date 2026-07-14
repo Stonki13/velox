@@ -2,6 +2,7 @@
 // CCD failure mode. Exits nonzero if any invariant is violated.
 #include <velox/velox.h>
 #include "../src/gjk.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
