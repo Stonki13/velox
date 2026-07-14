@@ -236,6 +236,11 @@ public:
     // --- queries ------------------------------------------------------------
     RayHit rayCast(Vec3 origin, Vec3 dir, float maxDist,
                    const QueryFilter& filter = {}) const;
+    // All bodies hit within maxDist, sorted nearest-first. Each body appears
+    // at most once (its nearest intersection).
+    void rayCastAll(Vec3 origin, Vec3 dir, float maxDist,
+                    std::vector<RayHit>& out,
+                    const QueryFilter& filter = {}) const;
     void overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
                        const QueryFilter& filter = {}) const;
     void overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,

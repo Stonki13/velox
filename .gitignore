@@ -7,3 +7,6 @@ CMakeUserPresets.json
 *.obj
 *.exe
 *.pdb
+.opencode/
+opencode_run.log
+run_builder.cmd

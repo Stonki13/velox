@@ -353,6 +353,41 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
     return best;
 }
 
+void World::rayCastAll(Vec3 origin, Vec3 dir, float maxDist,
+                       std::vector<RayHit>& out,
+                       const QueryFilter& filter) const {
+    if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
+        !finiteQueryFloat(maxDist) || maxDist < 0.0f)
+        throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
+    if (lengthSq(dir) < 1e-12f)
+        throw std::invalid_argument("velox: ray direction must be non-zero");
+    dir = normalize(dir);
+    out.clear();
+    const MeshSoupView soup = view(meshes_);
+    ensureBroadPhase(broadPhase_->lastDt, /*refit=*/false);
+
+    auto tryBody = [&](BodyIndex i) {
+        if (!queryAllows(i, filter)) return;
+        LocalHit h = rayBody(origin, dir, bodies_[i], soup, maxDist);
+        if (h.hit && h.t <= maxDist) {
+            RayHit hit;
+            hit.hit = true;
+            hit.body = bodyHandle(i);
+            hit.t = h.t;
+            hit.normal = h.normal;
+            hit.point = origin + dir * h.t;
+            out.push_back(hit);
+        }
+    };
+    broadPhase_->tree.raySegment(origin, dir, maxDist, [&](uint32_t i) {
+        tryBody(i);
+        return maxDist; // keep the full segment: we want every hit
+    });
+    for (BodyIndex p : broadPhase_->planes) tryBody(p);
+    std::sort(out.begin(), out.end(),
+              [](const RayHit& a, const RayHit& b) { return a.t < b.t; });
+}
+
 void World::overlapShape(const Body& shape, std::vector<BodyId>& out,
                          const QueryFilter& filter) const {
     const MeshSoupView soup = view(meshes_);

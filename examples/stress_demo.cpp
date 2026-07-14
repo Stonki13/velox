@@ -2015,6 +2015,27 @@ static void testBroadPhaseTree() {
     check(ok, "broad-phase tree (parity through mutations)");
 }
 
+// 47. All-hits raycast: every body along the ray, sorted nearest-first.
+static void testRayCastAll() {
+    velox::World w(velox::BackendType::Cpu);
+    w.gravity = {0, 0, 0};
+    auto s1 = w.addSphere({5, 0, 0}, 0.5f, 1.0f);
+    auto s2 = w.addSphere({10, 0, 0}, 0.5f, 1.0f);
+    auto s3 = w.addSphere({15, 0, 0}, 0.5f, 1.0f);
+    w.addStaticPlane({0, 1, 0}, -2.0f);
+
+    std::vector<velox::RayHit> hits;
+    w.rayCastAll({0, 0, 0}, {1, 0, 0}, 20.0f, hits);
+    bool ok = hits.size() == 3 &&
+              hits[0].body.value == s1.value && std::fabs(hits[0].t - 4.5f) < 1e-3f &&
+              hits[1].body.value == s2.value && std::fabs(hits[1].t - 9.5f) < 1e-3f &&
+              hits[2].body.value == s3.value && std::fabs(hits[2].t - 14.5f) < 1e-3f;
+
+    w.rayCastAll({0, 0, 0}, {1, 0, 0}, 8.0f, hits);
+    ok &= hits.size() == 1 && hits[0].body.value == s1.value;
+    check(ok, "rayCastAll (all hits, sorted)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -2062,6 +2083,7 @@ int main() {
     testOriginShift();
     testConvexDistanceMetamorphics();
     testBroadPhaseTree();
+    testRayCastAll();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;
