@@ -21,16 +21,19 @@ struct Convex {
     float radius;       // inflation
     float geomRadius = 0.0f; // Cylinder/Cone geometric radius
 
-    VELOX_HD Vec3 support(const Vec3& dir) const {
+    VELOX_HD Vec3 supportOffset(const Vec3& dir) const {
         switch (kind) {
         case Point:
-            return position;
-        case Segment:
-            return dot(dir, segA) > dot(dir, segB) ? segA : segB;
+            return {};
+        case Segment: {
+            Vec3 a = segA - position, b = segB - position;
+            return dot(dir, a) > dot(dir, b) ? a : b;
+        }
         case Triangle: {
-            Vec3 best = segA;
-            if (dot(dir, segB) > dot(dir, best)) best = segB;
-            if (dot(dir, triC) > dot(dir, best)) best = triC;
+            Vec3 best = segA - position;
+            Vec3 b = segB - position, c = triC - position;
+            if (dot(dir, b) > dot(dir, best)) best = b;
+            if (dot(dir, c) > dot(dir, best)) best = c;
             return best;
         }
         case Box: {
@@ -38,7 +41,7 @@ struct Convex {
             Vec3 local{d.x >= 0 ? halfExtents.x : -halfExtents.x,
                        d.y >= 0 ? halfExtents.y : -halfExtents.y,
                        d.z >= 0 ? halfExtents.z : -halfExtents.z};
-            return position + rotate(orientation, local);
+            return rotate(orientation, local);
         }
         case Hull: {
             Vec3 d = rotateInv(orientation, dir);
@@ -48,7 +51,7 @@ struct Convex {
                 float t = dot(d, hullPts[i]);
                 if (t > bestDot) { bestDot = t; best = i; }
             }
-            return position + rotate(orientation, hullPts[best]);
+            return rotate(orientation, hullPts[best]);
         }
         case Cylinder: {
             Vec3 d = rotateInv(orientation, dir);
@@ -56,7 +59,7 @@ struct Convex {
             Vec3 local{radial > 1e-9f ? geomRadius * d.x / radial : 0.0f,
                        d.y >= 0.0f ? halfExtents.y : -halfExtents.y,
                        radial > 1e-9f ? geomRadius * d.z / radial : 0.0f};
-            return position + rotate(orientation, local);
+            return rotate(orientation, local);
         }
         case Cone: {
             Vec3 d = rotateInv(orientation, dir);
@@ -67,10 +70,14 @@ struct Convex {
                       radial > 1e-9f ? geomRadius * d.z / radial : 0.0f};
             Vec3 tip{0, 1.5f * halfHeight, 0};
             Vec3 local = dot(d, tip) > dot(d, base) ? tip : base;
-            return position + rotate(orientation, local);
+            return rotate(orientation, local);
         }
         }
-        return position;
+        return {};
+    }
+
+    VELOX_HD Vec3 support(const Vec3& dir) const {
+        return position + supportOffset(dir);
     }
 };
 
@@ -126,6 +133,7 @@ VELOX_HD inline Convex makeConvex(const Body& b, const MeshSoupView& soup) {
 VELOX_HD inline Convex makeTriangle(const Vec3& a, const Vec3& b, const Vec3& c) {
     Convex t{};
     t.kind = Convex::Triangle;
+    t.position = a + ((b - a) + (c - a)) * (1.0f / 3.0f);
     t.segA = a;
     t.segB = b;
     t.triC = c;
@@ -152,9 +160,11 @@ struct SupportVert {
 VELOX_HD inline SupportVert supportVertex(const Convex& A, const Convex& B,
                                           const Vec3& dir) {
     SupportVert v;
-    v.a = A.support(dir);
-    v.b = B.support(-dir);
-    v.p = v.a - v.b;
+    Vec3 offsetA = A.supportOffset(dir);
+    Vec3 offsetB = B.supportOffset(-dir);
+    v.a = A.position + offsetA;
+    v.b = B.position + offsetB;
+    v.p = (A.position - B.position) + (offsetA - offsetB);
     return v;
 }
 
@@ -460,7 +470,6 @@ VELOX_HD inline GjkResult gjkDistance(const Convex& A, const Convex& B) {
 
     Simplex s{};
     Vec3 dir = A.position - B.position;
-    if (A.kind == Convex::Triangle) dir = A.segA - B.position;
     if (lengthSq(dir) < 1e-12f) dir = {1, 0, 0};
     s.v[0] = supportVertex(A, B, dir);
     s.count = 1;
@@ -509,10 +518,6 @@ VELOX_HD inline GjkResult gjkDistance(const Convex& A, const Convex& B) {
         // example coincident capsule segments) cannot seed a 3D EPA polytope,
         // so retain a conservative center-based fallback for those cases.
         Vec3 n = A.position - B.position;
-        if (A.kind == Convex::Triangle)
-            n = (A.segA + A.segB + A.triC) * (1.0f / 3.0f) - B.position;
-        if (B.kind == Convex::Triangle)
-            n = A.position - (B.segA + B.segB + B.triC) * (1.0f / 3.0f);
         n = lengthSq(n) > 1e-12f ? normalize(n) : Vec3{0, 1, 0};
         float depth = dot(n, B.support(n) - A.support(-n));
         r.normal = n;

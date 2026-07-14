@@ -123,11 +123,14 @@ private:
     StepStats lastStepStats_;
 };
 
+struct BroadPhaseData;
+
 class World {
 public:
     // Auto picks the CUDA backend when built with VELOX_ENABLE_CUDA and a
     // device is present, otherwise the CPU backend. Cuda throws if unavailable.
     explicit World(BackendType type = BackendType::Auto);
+    ~World();
 
     const char* backendName() const;
     void setWorkerCount(uint32_t count) { backend_->setWorkerCount(count); }
@@ -182,6 +185,10 @@ public:
     void addLinearImpulse(BodyId id, Vec3 impulse);
     void addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint);
     void clearForces(BodyId id);
+    // Subtracts offset from every world-space coordinate while preserving
+    // relative geometry and dynamics. Use this to keep large worlds near the
+    // floating-point origin without rebuilding bodies, joints, or meshes.
+    void shiftOrigin(Vec3 offset);
     WorldSnapshot saveSnapshot() const;
     void restoreSnapshot(const WorldSnapshot& snapshot);
     const StepStats& lastStepStats() const { return lastStepStats_; }
@@ -283,6 +290,11 @@ private:
                                    const QueryFilter& filter,
                                    const MeshSoupView& soup) const;
     void removeJointDense(uint32_t dense);
+    // Incremental broad phase: rebuild/refit the AABB tree as needed.
+    // `refit` forces a proxy refresh even without recorded mutations (used by
+    // step(), where integration always moves bodies).
+    void ensureBroadPhase(float dt, bool refit) const;
+    void buildCandidatePairs(float dt);
     void solveJoints(float dt);
     void finishBrokenJoints(float dt);
     void updateSleeping(float dt);
@@ -308,6 +320,8 @@ private:
     ContactModifier contactModifier_;
     StepStats lastStepStats_;
     MeshSoup meshes_;
+    std::vector<uint64_t> candidatePairs_;
+    mutable std::unique_ptr<BroadPhaseData> broadPhase_;
     std::unique_ptr<Backend> backend_;
 };
 

@@ -83,9 +83,17 @@ public:
     virtual ~Backend() = default;
     virtual const char* name() const = 0;
     virtual void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) = 0;
+    // True when the backend consumes host-built broad-phase candidate pairs
+    // (from the World's incremental AABB tree). GPU backends run their own
+    // broad phase on-device and return false.
+    virtual bool wantsHostPairs() const { return false; }
     // Finds all pairs whose gap could close within dt (speculative detection).
+    // hostPairs, when non-null, holds candidate pairs encoded (min<<32)|max
+    // over dense indices; backends that report wantsHostPairs() use it instead
+    // of running a broad phase.
     virtual void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
-                              float dt, std::vector<Contact>& out) = 0;
+                              float dt, const std::vector<uint64_t>* hostPairs,
+                              std::vector<Contact>& out) = 0;
     // Iterative velocity solve over the contacts. CPU: sequential impulses.
     // CUDA: graph-colored parallel impulses (same math, conflict-free order).
     // warmStart is true only for the first substep of a step: accumulated

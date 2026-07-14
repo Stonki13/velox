@@ -1,6 +1,9 @@
-// Scene queries: raycasts and overlap tests against every collider type.
+// Scene queries: raycasts and overlap tests against every collider type,
+// accelerated by the World's incremental broad-phase AABB tree.
 #include "velox/world.h"
+#include "broadphase.h"
 #include "narrowphase.h"
+#include <algorithm>
 #include <stdexcept>
 
 namespace velox {
@@ -324,18 +327,24 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
     RayHit best;
     best.t = maxDist;
     const MeshSoupView soup = view(meshes_);
+    ensureBroadPhase(broadPhase_->lastDt, /*refit=*/false);
 
-    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
-        if (!queryAllows(i, filter)) continue;
-        const Body& b = bodies_[i];
-        LocalHit h = rayBody(origin, dir, b, soup, best.t);
+    auto tryBody = [&](BodyIndex i) {
+        if (!queryAllows(i, filter)) return;
+        LocalHit h = rayBody(origin, dir, bodies_[i], soup, best.t);
         if (h.hit && h.t < best.t) {
             best.hit = true;
             best.body = bodyHandle(i);
             best.t = h.t;
             best.normal = h.normal;
         }
-    }
+    };
+    broadPhase_->tree.raySegment(origin, dir, maxDist, [&](uint32_t i) {
+        tryBody(i);
+        return best.t; // shrink the remaining segment to the closest hit
+    });
+    for (BodyIndex p : broadPhase_->planes) tryBody(p);
+
     if (best.hit) best.point = origin + dir * best.t;
     return best;
 }
@@ -352,11 +361,20 @@ void World::overlapShapeWithSoup(const Body& shape, std::vector<BodyId>& out,
     out.clear();
     float searchRadius = shape.radius + length(shape.halfExtents) +
                          shape.capsuleHalfHeight + 0.1f;
-    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
-        if (!queryAllows(i, filter)) continue;
+    ensureBroadPhase(broadPhase_->lastDt, /*refit=*/false);
+
+    auto tryBody = [&](BodyIndex i) {
+        if (!queryAllows(i, filter)) return;
         QueryGap gap = queryGap(shape, bodies_[i], soup, searchRadius);
         if (gap.gap <= 0.0f) out.push_back(bodyHandle(i));
-    }
+    };
+    Vec3 lo, hi;
+    bodyAabb(shape, 0.0f, lo, hi);
+    broadPhase_->tree.query(lo, hi, [&](uint32_t i) { tryBody(i); });
+    for (BodyIndex p : broadPhase_->planes) tryBody(p);
+    // Tree visit order depends on insertion history; keep results stable.
+    std::sort(out.begin(), out.end(),
+              [](BodyId a, BodyId b) { return a.value < b.value; });
 }
 
 void World::overlapConvexHull(Vec3 center, const std::vector<Vec3>& points,
@@ -450,7 +468,23 @@ ShapeCastHit World::castShapeWithSoup(Body shape, Vec3 direction, float maxDist,
     ShapeCastHit best;
     best.distance = maxDist;
 
-    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
+    // Broad phase: the swept volume's AABB (start box unioned with end box).
+    ensureBroadPhase(broadPhase_->lastDt, /*refit=*/false);
+    std::vector<BodyIndex> candidates;
+    {
+        Vec3 lo0, hi0;
+        bodyAabb(shape, 0.0f, lo0, hi0);
+        Vec3 shift = direction * maxDist;
+        Vec3 lo = vmin(lo0, lo0 + shift), hi = vmax(hi0, hi0 + shift);
+        broadPhase_->tree.query(lo, hi, [&](uint32_t i) {
+            candidates.push_back(i);
+        });
+        candidates.insert(candidates.end(), broadPhase_->planes.begin(),
+                          broadPhase_->planes.end());
+        std::sort(candidates.begin(), candidates.end());
+    }
+
+    for (BodyIndex i : candidates) {
         if (!queryAllows(i, filter)) continue;
         float distance = 0.0f;
         QueryGap last{1e30f, {0, 1, 0}, {}};

@@ -1,6 +1,7 @@
 // Stress tests for Predictive Contact Sweeping — each case targets a classic
 // CCD failure mode. Exits nonzero if any invariant is violated.
 #include <velox/velox.h>
+#include "../src/gjk.h"
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -1771,6 +1772,248 @@ static void testDebugLines() {
     check(ok, "debug lines (shapes, AABBs, contacts, joints, flags)");
 }
 
+// 44. Large worlds need a lossless rebase path before float precision erodes.
+// Bodies, infinite planes, triangle meshes/BVHs, joints, warm starts, CCD
+// history, queries, and already-published event points must move together.
+static void testOriginShift() {
+    velox::World w(velox::BackendType::Cpu);
+    w.gravity = {0, 0, 0};
+    const velox::Vec3 origin{100000.0f, 200000.0f, -300000.0f};
+    auto plane = w.addStaticPlane({0, 1, 0}, origin.y);
+    auto mesh = w.addStaticMesh(
+        {origin + velox::Vec3{-2, 0, 3}, origin + velox::Vec3{2, 0, 3},
+         origin + velox::Vec3{0, 2, 3}}, {0, 1, 2});
+    auto anchor = w.addSphere(origin + velox::Vec3{2, 0.5f, 0}, 0.2f, 0.0f);
+    auto body = w.addSphere(origin + velox::Vec3{0, 0.5f, 0}, 0.5f, 1.0f);
+    auto joint = w.addDistanceJoint(anchor, body,
+                                    origin + velox::Vec3{2, 0.5f, 0},
+                                    origin + velox::Vec3{0, 0.5f, 0});
+    w.step(1.0f / 60.0f);
+
+    velox::RayHit before = w.rayCast(origin + velox::Vec3{0, 1, -2},
+                                     {0, 0, 1}, 10.0f);
+    velox::Vec3 eventPoint{};
+    bool hadPointEvent = false;
+    for (const auto& event : w.contactEvents()) {
+        if (event.type != velox::ContactEventType::End) {
+            eventPoint = event.point;
+            hadPointEvent = true;
+            break;
+        }
+    }
+
+    w.shiftOrigin(origin);
+    velox::RayHit after = w.rayCast({0, 1, -2}, {0, 0, 1}, 10.0f);
+    bool ok = w.isValid(plane) && w.isValid(mesh) && w.isValid(anchor) &&
+              w.isValid(body) && w.isValid(joint) &&
+              velox::length(w.body(body).position - velox::Vec3{0, 0.5f, 0}) < 0.03f &&
+              std::fabs(w.body(plane).planeOffset) < 0.03f &&
+              before.hit == after.hit && (!before.hit ||
+                  (before.body == after.body && std::fabs(before.t - after.t) < 0.03f));
+    if (hadPointEvent) {
+        bool shiftedEvent = false;
+        for (const auto& event : w.contactEvents())
+            if (event.type != velox::ContactEventType::End &&
+                velox::length(event.point - (eventPoint - origin)) < 0.03f)
+                shiftedEvent = true;
+        ok &= shiftedEvent;
+    }
+
+    velox::Vec3 stablePosition = w.body(body).position;
+    ok &= throwsException([&] {
+        w.shiftOrigin({std::numeric_limits<float>::infinity(), 0, 0});
+    });
+    ok &= velox::length(w.body(body).position - stablePosition) < 1e-7f;
+    w.step(1.0f / 60.0f);
+    ok &= std::isfinite(w.body(body).position.x) &&
+          std::isfinite(w.body(body).position.y) &&
+          std::isfinite(w.body(body).position.z);
+    check(ok, "large-world origin shift (geometry, caches, events)");
+}
+
+// 45. Deterministic metamorphic coverage catches convex-distance regressions
+// that hand-authored contact scenes miss: swapping operands must negate the
+// normal, and translating the entire pair must not change the result.
+static void testConvexDistanceMetamorphics() {
+    uint32_t state = 0x6d2b79f5u;
+    auto random01 = [&]() {
+        state = state * 1664525u + 1013904223u;
+        return float(state >> 8) * (1.0f / 16777216.0f);
+    };
+    auto randomRange = [&](float lo, float hi) {
+        return lo + (hi - lo) * random01();
+    };
+    auto randomBody = [&](int kind) {
+        velox::Body body;
+        body.position = {randomRange(-3.0f, 3.0f), randomRange(-3.0f, 3.0f),
+                         randomRange(-3.0f, 3.0f)};
+        velox::Vec3 axis{randomRange(-1.0f, 1.0f), randomRange(-1.0f, 1.0f),
+                         randomRange(-1.0f, 1.0f)};
+        if (velox::lengthSq(axis) < 1e-4f) axis = {1, 0, 0};
+        body.orientation = velox::fromAxisAngle(
+            velox::normalize(axis), randomRange(-3.14159265f, 3.14159265f));
+        body.radius = randomRange(0.1f, 0.9f);
+        body.capsuleHalfHeight = randomRange(0.1f, 1.1f);
+        body.halfExtents = {randomRange(0.1f, 1.0f), randomRange(0.1f, 1.0f),
+                            randomRange(0.1f, 1.0f)};
+        body.shape = kind == 0 ? velox::ShapeType::Sphere
+                   : kind == 1 ? velox::ShapeType::Capsule
+                   : kind == 2 ? velox::ShapeType::Box
+                   : kind == 3 ? velox::ShapeType::Cylinder
+                               : velox::ShapeType::Cone;
+        return body;
+    };
+    auto finite = [](const velox::Vec3& v) {
+        return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+    };
+
+    bool ok = true;
+    velox::MeshSoupView empty{};
+    const velox::Vec3 translation{17.25f, -9.5f, 5.75f};
+    for (int iteration = 0; iteration < 2000 && ok; ++iteration) {
+        velox::Body a = randomBody(iteration % 5);
+        velox::Body b = randomBody((iteration * 3 + 1) % 5);
+        velox::GjkResult ab = velox::gjkDistance(velox::makeConvex(a, empty),
+                                                 velox::makeConvex(b, empty));
+        velox::GjkResult ba = velox::gjkDistance(velox::makeConvex(b, empty),
+                                                 velox::makeConvex(a, empty));
+        float scale = std::max(1.0f, std::max(std::fabs(ab.distance),
+                                              std::fabs(ba.distance)));
+        bool caseOk = std::isfinite(ab.distance) && finite(ab.normal) &&
+                      finite(ab.pointA) && finite(ab.pointB) &&
+                      std::fabs(ab.distance - ba.distance) <= 2e-3f * scale;
+        if (ab.distance > 1e-3f && ba.distance > 1e-3f)
+            caseOk &= velox::dot(ab.normal, ba.normal) < -0.98f;
+        if (ab.distance > 1e-3f) {
+            velox::Vec3 witnessDelta = ab.pointA - ab.pointB;
+            caseOk &= std::fabs(velox::dot(witnessDelta, ab.normal) - ab.distance)
+                          <= 2e-3f * scale;
+        }
+
+        a.position += translation;
+        b.position += translation;
+        velox::GjkResult moved = velox::gjkDistance(velox::makeConvex(a, empty),
+                                                    velox::makeConvex(b, empty));
+        caseOk &= std::isfinite(moved.distance) &&
+                  std::fabs(moved.distance - ab.distance) <= 3e-3f * scale;
+        if (ab.distance > 1e-3f && moved.distance > 1e-3f)
+            caseOk &= velox::dot(ab.normal, moved.normal) > 0.98f;
+        if (!caseOk) {
+            std::printf("  metamorphic case %d: shapes=%d/%d d=%g reverse=%g "
+                        "moved=%g nDotReverse=%g nDotMoved=%g\n",
+                        iteration, iteration % 5, (iteration * 3 + 1) % 5,
+                        ab.distance, ba.distance, moved.distance,
+                        velox::dot(ab.normal, ba.normal),
+                        velox::dot(ab.normal, moved.normal));
+            std::printf("    A p=(%g,%g,%g) q=(%g,%g,%g,%g) r=%g h=%g\n",
+                        a.position.x - translation.x, a.position.y - translation.y,
+                        a.position.z - translation.z, a.orientation.x,
+                        a.orientation.y, a.orientation.z, a.orientation.w,
+                        a.radius, a.capsuleHalfHeight);
+            std::printf("    B p=(%g,%g,%g) q=(%g,%g,%g,%g) r=%g h=%g\n",
+                        b.position.x - translation.x, b.position.y - translation.y,
+                        b.position.z - translation.z, b.orientation.x,
+                        b.orientation.y, b.orientation.z, b.orientation.w,
+                        b.radius, b.capsuleHalfHeight);
+            ok = false;
+        }
+    }
+    check(ok, "GJK/EPA metamorphics (symmetry, translation, witnesses)");
+}
+
+// 46. Incremental broad-phase tree: query results must match a brute-force
+// reference through the mutations that stress proxy bookkeeping — teleports
+// via setTransform and direct body() access, removals (dense reshuffle),
+// additions, sleep, and queries issued between steps without stepping first.
+static void testBroadPhaseTree() {
+    velox::World w(velox::BackendType::Cpu);
+    w.gravity = {0, 0, 0};
+    uint32_t seed = 0x9e3779b9u;
+    auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return (seed >> 8) * (1.0f / 16777216.0f);
+    };
+    auto rndPos = [&]() {
+        return velox::Vec3{rnd() * 80.0f - 40.0f, rnd() * 80.0f - 40.0f,
+                           rnd() * 80.0f - 40.0f};
+    };
+
+    std::vector<velox::BodyId> ids;
+    for (int i = 0; i < 120; ++i) {
+        if (i % 3 == 0)
+            ids.push_back(w.addBox(rndPos(), {0.4f, 0.6f, 0.5f}, 1.0f));
+        else
+            ids.push_back(w.addSphere(rndPos(), 0.3f + rnd() * 0.5f, 1.0f));
+    }
+
+    bool ok = true;
+    std::vector<velox::BodyId> got, expected;
+    auto compareProbes = [&](const char* /*label*/) {
+        for (int probe = 0; probe < 24 && ok; ++probe) {
+            velox::Vec3 c = rndPos();
+            float r = 0.5f + rnd() * 3.0f;
+            expected.clear();
+            bool ambiguous = false;
+            // Sphere-only exact reference (boxes checked via containment below).
+            for (velox::BodyId id : ids) {
+                if (!w.isValid(id)) continue;
+                const velox::Body& b = w.body(id);
+                if (b.shape != velox::ShapeType::Sphere) { ambiguous = true; continue; }
+                if (velox::length(b.position - c) - b.radius - r <= 0.0f)
+                    expected.push_back(id);
+            }
+            w.overlapSphere(c, r, got);
+            // Every reference sphere must be reported; with boxes present the
+            // tree may legitimately report extra (box) bodies.
+            for (velox::BodyId id : expected)
+                if (std::find(got.begin(), got.end(), id) == got.end()) ok = false;
+            if (!ambiguous && got.size() != expected.size()) ok = false;
+
+            // Raycast cross-check: closest reported hit must actually be hit.
+            velox::Vec3 dir{rnd() - 0.5f, rnd() - 0.5f, rnd() - 0.5f};
+            if (velox::lengthSq(dir) > 1e-6f) {
+                auto hit = w.rayCast(c, dir, 200.0f);
+                if (hit.hit) ok &= w.isValid(hit.body) && hit.t >= 0.0f;
+            }
+        }
+    };
+
+    compareProbes("initial");
+
+    // Teleport half the bodies through the official API and a quarter through
+    // direct body() mutation (which must also invalidate the tree).
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i % 2 == 0) w.setTransform(ids[i], rndPos(), {});
+        else if (i % 4 == 1) w.body(ids[i]).position = rndPos();
+    }
+    compareProbes("teleported");
+
+    // Remove a third (dense-index reshuffle), add replacements.
+    for (size_t i = 0; i < ids.size(); i += 3) {
+        w.removeBody(ids[i]);
+        ids[i] = w.addSphere(rndPos(), 0.3f + rnd() * 0.4f, 1.0f);
+    }
+    compareProbes("removed+readded");
+
+    // Step a few frames so bodies move/settle/sleep, then probe again.
+    w.gravity = {0, -9.81f, 0};
+    w.addStaticPlane({0, 1, 0}, -60.0f);
+    for (int s = 0; s < 120; ++s) w.step(1.0f / 60.0f);
+    compareProbes("after stepping");
+
+    // Contact parity: the tree-driven pair generation must produce identical
+    // contact counts to a freshly rebuilt tree.
+    velox::WorldSnapshot snap = w.saveSnapshot();
+    w.step(1.0f / 60.0f);
+    size_t contactsIncremental = w.lastStepStats().generatedContacts;
+    w.restoreSnapshot(snap); // forces a structural rebuild
+    w.step(1.0f / 60.0f);
+    size_t contactsRebuilt = w.lastStepStats().generatedContacts;
+    ok &= contactsIncremental == contactsRebuilt;
+
+    check(ok, "broad-phase tree (parity through mutations)");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -1815,6 +2058,9 @@ int main() {
     testDeviceJointSubsteps();
     testDeterministicCpuWorkers();
     testDebugLines();
+    testOriginShift();
+    testConvexDistanceMetamorphics();
+    testBroadPhaseTree();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

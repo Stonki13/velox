@@ -56,14 +56,21 @@ solver substeps, then download body state once. Smaller joint sets use the CPU
 joint path to avoid graph overhead.
 
 `examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
-(60 Hz steps, full pipeline, 4 solver substeps):
+(60 Hz steps, full pipeline, 4 solver substeps, 60-step run):
 
 | Scene | CPU | CUDA |
 |---|---|---|
-| 512-sphere rain | 3.92 ms | **1.60 ms** |
-| 2048-sphere rain | 18.07 ms | **5.11 ms** |
-| 8192-sphere rain | 120.30 ms | **52.50 ms** |
-| 2048 spheres on 20k-triangle terrain | 34.83 ms | **10.53 ms** |
+| 512-sphere rain | 4.70 ms | **2.56 ms** |
+| 2048-sphere rain | 21.65 ms | **5.89 ms** |
+| 8192-sphere rain | 124.46 ms | **39.54 ms** |
+| 2048 spheres on 20k-triangle terrain | 17.77 ms | **4.05 ms** |
+| 4096 disjoint meshes, 64 active bodies | **0.58 ms** | 1.72 ms |
+
+The incremental AABB-tree broad phase halved the CPU mesh-terrain scene
+(previously 34.8 ms) and makes the disjoint-mesh archipelago effectively free
+on the CPU — small active sets over large static worlds no longer pay for the
+world's size, and the CPU beats the GPU there (transfer overhead dominates
+tiny workloads).
 
 The independent-distance-joint scene added to the same benchmark measures the
 new resident constraint path (10-step local Release sample):
@@ -112,7 +119,10 @@ velocity as constant. The same device-compatible path runs on CPU and CUDA.
 Deep convex-core overlaps use a fixed-capacity **EPA** solver shared by CPU and
 CUDA. EPA returns the minimum translation normal, penetration depth, and core
 witness points; lower-dimensional cores retain a conservative fallback when a
-closed 3D polytope cannot exist.
+closed 3D polytope cannot exist. Minkowski support arithmetic is centered on
+each convex transform before subtraction, avoiding translation-dependent loss
+of distance precision; deterministic randomized metamorphic coverage checks
+operand symmetry, common-translation invariance, and witness consistency.
 
 ## Features
 
@@ -152,6 +162,9 @@ closed 3D polytope cannot exist.
 - **Rollback snapshots**: copyable same-world checkpoints restore bodies,
   joints, geometry, stable-handle generations, warm starts, sleeping state,
   and event phase while invalidating CPU/CUDA backend caches for exact replay
+- **Large-world origin shifting**: one transactional call rebases bodies,
+  planes, static mesh/BVH geometry, CCD history, warm starts, and event points
+  while preserving relative dynamics and stable handles
 - **Frame diagnostics**: body/awake/contact/joint workload counters plus wall
   timings for setup, collision detection, solving, CCD recovery, and
   finalization; `deviceSubsteps` reports whether the complete solver substep
@@ -176,10 +189,19 @@ closed 3D polytope cannot exist.
   high-throughput joint sets stay on the GPU through every solver substep
   (CUDA Graphs batching and topology reuse), including per-substep breaking.
   Contact and broad-phase candidate buffers count-and-grow on overflow instead
-  of dropping dense-scene pairs. Small joint sets retain the lower-latency CPU
-  joint path.
-- Broad phase: sweep-and-prune (CPU), hybrid all-pairs / compacted GPU
-  sweep-and-prune (CUDA)
+  of dropping dense-scene pairs. Operational CUDA failures propagate as
+  exceptions with the failing API expression and source location; cleanup
+  remains non-throwing. Small joint sets retain the lower-latency CPU joint path.
+- Broad phase: **incremental dynamic AABB tree** (CPU) — fat proxies with
+  escape-check refits, SAH-guided insertion, AVL-style rotations; only bodies
+  whose swept bounds leave their fat proxy reinsert, so mostly-static and
+  mostly-sleeping scenes skip per-frame broad-phase rebuilds entirely. The
+  same tree accelerates raycasts, overlaps, and shape casts (previously
+  linear scans). Structural mutations (removal, snapshot restore, origin
+  shift) rebuild; direct `body()` mutation re-fits lazily before the next
+  query. GPU: hybrid all-pairs / compacted sweep-and-prune (CUDA). Static
+  meshes participate by root AABB rather than as unbounded geometry
+- PCS collision pipeline (above) with restitution and accumulated-impulse friction
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
 
 Mesh colliders are static-only (level geometry), matching how game engines

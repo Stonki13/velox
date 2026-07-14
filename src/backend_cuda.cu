@@ -16,13 +16,23 @@ namespace velox {
 
 namespace {
 
+[[noreturn]] void throwCudaError(cudaError_t error, const char* expression,
+                                 const char* file, int line) {
+    char message[768];
+    std::snprintf(message, sizeof(message),
+                  "velox CUDA failure: %s (%s) at %s:%d",
+                  cudaGetErrorString(error), expression, file, line);
+    throw std::runtime_error(message);
+}
+
 #define VELOX_CUDA_CHECK(expr)                                                \
     do {                                                                      \
         cudaError_t err_ = (expr);                                            \
         if (err_ != cudaSuccess)                                              \
-            std::fprintf(stderr, "velox cuda: %s at %s:%d\n",                 \
-                         cudaGetErrorString(err_), __FILE__, __LINE__);       \
+            throwCudaError(err_, #expr, __FILE__, __LINE__);                 \
     } while (0)
+
+#define VELOX_CUDA_LAUNCH_CHECK() VELOX_CUDA_CHECK(cudaGetLastError())
 
 __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -44,16 +54,20 @@ __global__ void integrateTransformsKernel(Body* bodies, int n, float dt) {
 }
 
 // Compact AABBs so the pair kernel can reject without touching Body structs.
-// Planes and meshes get infinite bounds (they are collided by every pair).
+// Planes remain infinite; meshes use their uploaded root bounds.
 struct Aabb { Vec3 lo, hi; };
 
-__global__ void aabbKernel(const Body* bodies, int n, float dt, Aabb* aabbs,
-                           float* sortKeys, BodyIndex* sortedIndices) {
+__global__ void aabbKernel(const Body* bodies, const Mesh* meshes, int n,
+                           float dt, Aabb* aabbs, float* sortKeys,
+                           BodyIndex* sortedIndices) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const Body& b = bodies[i];
-    if (b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh) {
+    if (b.shape == ShapeType::Plane) {
         aabbs[i] = {{-1e30f, -1e30f, -1e30f}, {1e30f, 1e30f, 1e30f}};
+    } else if (b.shape == ShapeType::Mesh) {
+        const Mesh& mesh = meshes[b.meshIndex];
+        aabbs[i] = {mesh.aabbMin, mesh.aabbMax};
     } else {
         Aabb box;
         bodyAabb(b, dt, box.lo, box.hi);
@@ -196,7 +210,10 @@ public:
     ~CudaBackend() override {
         // Graph instantiation may leave runtime work outside the solve stream;
         // drain the device before graph and allocation teardown.
-        VELOX_CUDA_CHECK(cudaDeviceSynchronize());
+        cudaError_t synchronizeError = cudaDeviceSynchronize();
+        if (synchronizeError != cudaSuccess)
+            std::fprintf(stderr, "velox CUDA cleanup: %s\n",
+                         cudaGetErrorString(synchronizeError));
         if (solveGraph_) cudaGraphExecDestroy(solveGraph_);
         if (jointGraph_) cudaGraphExecDestroy(jointGraph_);
         if (stream_) cudaStreamDestroy(stream_);
@@ -225,13 +242,16 @@ public:
         if (n == 0) return;
         uploadBodies(bodies);
         integrateKernel<<<(n + 255) / 256, 256>>>(dBodies_, n, gravity, dt);
+        VELOX_CUDA_LAUNCH_CHECK();
         VELOX_CUDA_CHECK(cudaMemcpy(bodies.data(), dBodies_, n * sizeof(Body),
                                     cudaMemcpyDeviceToHost));
         bodiesDirty_ = false; // device copy is current
     }
 
     void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
-                      float dt, std::vector<Contact>& out) override {
+                      float dt, const std::vector<uint64_t>* /*hostPairs*/,
+                      std::vector<Contact>& out) override {
+        // The broad phase runs on-device; host candidate pairs are ignored.
         out.clear();
         int n = static_cast<int>(bodies.size());
         if (n < 2) return;
@@ -254,8 +274,10 @@ public:
             VELOX_CUDA_CHECK(cudaMalloc(&dSortedIndices_, n * sizeof(BodyIndex)));
             aabbCap_ = n * sizeof(Aabb);
         }
-        aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, n, dt, dAabbs_,
-                                             dSortKeys_, dSortedIndices_);
+        aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, dMeshes_, n, dt,
+                                             dAabbs_, dSortKeys_,
+                                             dSortedIndices_);
+        VELOX_CUDA_LAUNCH_CHECK();
         MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_,
                           dHullPts_, dCompoundChildren_};
         int threads = 256;
@@ -287,6 +309,7 @@ public:
             collectContacts([&](int outCap) {
                 allPairsContactsKernel<<<(unsigned)blocks, threads>>>(
                     dBodies_, dAabbs_, n, soup, dt, dContacts_, dCount_, outCap);
+                VELOX_CUDA_LAUNCH_CHECK();
             });
             bodiesDirty_ = true;
             return;
@@ -305,6 +328,7 @@ public:
         sweepCandidatesKernel<<<(n + threads - 1) / threads, threads>>>(
             dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
             dPairs_, dCount_, candidateCap);
+        VELOX_CUDA_LAUNCH_CHECK();
         int candidateCount = 0;
         VELOX_CUDA_CHECK(cudaMemcpy(&candidateCount, dCount_, sizeof(int),
                                     cudaMemcpyDeviceToHost));
@@ -317,6 +341,7 @@ public:
             sweepCandidatesKernel<<<(n + threads - 1) / threads, threads>>>(
                 dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
                 dPairs_, dCount_, candidateCap);
+            VELOX_CUDA_LAUNCH_CHECK();
         }
         if (candidateCount > 0) {
             collectContacts([&](int outCap) {
@@ -324,6 +349,7 @@ public:
                     (candidateCount + threads - 1) / threads, threads>>>(
                     dBodies_, dPairs_, candidateCount, soup, dt,
                     dContacts_, dCount_, outCap);
+                VELOX_CUDA_LAUNCH_CHECK();
             });
         }
         bodiesDirty_ = true; // host may mutate bodies before the solve call
@@ -417,6 +443,7 @@ public:
                 int first = colorStart_[c], count = colorStart_[c + 1] - first;
                 warmStartColorKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
                     dBodies_, dSolve_, first, count);
+                VELOX_CUDA_LAUNCH_CHECK();
             }
             // Thousands of tiny per-color launches per frame are dominated by
             // launch overhead. Capture the whole iteration sweep as a CUDA
@@ -433,6 +460,7 @@ public:
                     int first = colorStart_[c], count = colorStart_[c + 1] - first;
                     solveColorKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
                         dBodies_, dSolve_, first, count, dt);
+                    VELOX_CUDA_LAUNCH_CHECK();
                 }
             VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
             VELOX_CUDA_CHECK(cudaGraphInstantiate(&solveGraph_, graph, nullptr, nullptr, 0));
@@ -477,16 +505,19 @@ public:
             if (s > 0)
             integrateKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
                 dBodies_, n, gravity, dt);
+            if (s > 0) VELOX_CUDA_LAUNCH_CHECK();
             if (s > 0 && hasContacts && solveGraph_)
                 VELOX_CUDA_CHECK(cudaGraphLaunch(solveGraph_, stream_));
             if (!joints.empty()) {
                 int jointCount = static_cast<int>(joints.size());
                 resetJointsKernel<<<(jointCount + 127) / 128, 128, 0, stream_>>>(
                     dJoints_, jointCount, s > 0);
+                VELOX_CUDA_LAUNCH_CHECK();
                 VELOX_CUDA_CHECK(cudaGraphLaunch(jointGraph_, stream_));
             }
             integrateTransformsKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
                 dBodies_, n, dt);
+            VELOX_CUDA_LAUNCH_CHECK();
         }
         VELOX_CUDA_CHECK(cudaMemcpyAsync(bodies.data(), dBodies_, n * sizeof(Body),
                                          cudaMemcpyDeviceToHost, stream_));
@@ -617,9 +648,11 @@ private:
                 solveJointColorKernel<<<(colorCount + 127) / 128, 128, 0,
                                         stream_>>>(dBodies_, dJoints_, first,
                                                    colorCount, dt);
+                VELOX_CUDA_LAUNCH_CHECK();
             }
         markBrokenJointsKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
             dJoints_, count, dt);
+        VELOX_CUDA_LAUNCH_CHECK();
         VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
         VELOX_CUDA_CHECK(cudaGraphInstantiate(&jointGraph_, graph,
                                               nullptr, nullptr, 0));

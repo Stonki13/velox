@@ -2,6 +2,7 @@
 //   A) N-sphere rain into a walled floor (dense dynamic-dynamic contact)
 //   B) sphere rain onto a procedurally bumpy triangle-mesh terrain (BVH)
 //   C) independent distance constraints (joint solver throughput)
+//   D) many disjoint static mesh islands (mesh broad-phase pruning)
 #include <velox/velox.h>
 #include <algorithm>
 #include <chrono>
@@ -75,6 +76,19 @@ static void sceneJoints(velox::World& w, int n) {
     }
 }
 
+static void sceneMeshArchipelago(velox::World& w, int meshCount,
+                                 int activeBodies) {
+    w.gravity = {0, 0, 0};
+    const std::vector<uint32_t> indices = {0, 2, 1, 1, 2, 3};
+    for (int i = 0; i < meshCount; ++i) {
+        float x = float(i) * 4.0f;
+        w.addStaticMesh({{x - 1, 0, -1}, {x + 1, 0, -1},
+                         {x - 1, 0, 1}, {x + 1, 0, 1}}, indices);
+    }
+    for (int i = 0; i < activeBodies; ++i)
+        w.addSphere({float(i) * 4.0f, 0.5f, 0}, 0.5f, 1.0f);
+}
+
 int main(int argc, char** argv) {
     const int steps = argc > 1 ? std::max(1, std::atoi(argv[1])) : 120;
     std::printf("Velox benchmark — ms per step, %d steps, 60 Hz\n\n", steps);
@@ -141,6 +155,22 @@ int main(int argc, char** argv) {
             } catch (const std::exception& e) {
                 std::printf("  (%s)\n", e.what());
             }
+        }
+    }
+
+    std::printf("Scene D: 4096 disjoint meshes, 64 active spheres\n");
+    for (const Configuration& configuration : configurations) {
+        try {
+            velox::World w(configuration.backend);
+            if (configuration.backend == velox::BackendType::Cpu)
+                w.setWorkerCount(configuration.workers);
+            sceneMeshArchipelago(w, 4096, 64);
+            float ms = runScene(w, steps);
+            std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
+                        configuration.label, w.backendName(),
+                        w.workerCount(), ms);
+        } catch (const std::exception& e) {
+            std::printf("  (%s)\n", e.what());
         }
     }
     return 0;

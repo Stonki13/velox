@@ -196,50 +196,63 @@ public:
             });
     }
 
+    bool wantsHostPairs() const override { return true; }
+
     void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
-                      float dt, std::vector<Contact>& out) override {
+                      float dt, const std::vector<uint64_t>* hostPairs,
+                      std::vector<Contact>& out) override {
         out.clear();
         const MeshSoupView soup = view(meshes);
         const size_t n = bodies.size();
 
-        // Planes and meshes are unbounded/large: every dynamic body is tested
-        // against them directly. Bounded bodies go through sweep-and-prune.
-        boundless_.clear();
-        sorted_.clear();
-        aabbs_.resize(n);
-        for (BodyIndex i = 0; i < n; ++i) {
-            const Body& b = bodies[i];
-            if (b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh)
-                boundless_.push_back(i);
-            else {
-                bodyAabb(b, dt, aabbs_[i].lo, aabbs_[i].hi);
-                sorted_.push_back(i);
+        if (hostPairs) {
+            // The World's incremental AABB tree already produced candidates.
+            pairs_ = *hostPairs;
+        } else {
+            // Fallback broad phase: full sweep-and-prune rebuild. Planes are
+            // truly unbounded and tested directly; meshes use root bounds.
+            boundless_.clear();
+            sorted_.clear();
+            aabbs_.resize(n);
+            for (BodyIndex i = 0; i < n; ++i) {
+                const Body& b = bodies[i];
+                if (b.shape == ShapeType::Plane)
+                    boundless_.push_back(i);
+                else {
+                    if (b.shape == ShapeType::Mesh) {
+                        const Mesh& mesh = meshes.meshes[b.meshIndex];
+                        aabbs_[i] = {mesh.aabbMin, mesh.aabbMax};
+                    } else {
+                        bodyAabb(b, dt, aabbs_[i].lo, aabbs_[i].hi);
+                    }
+                    sorted_.push_back(i);
+                }
             }
-        }
 
-        auto inert = [&](BodyIndex k) { return bodies[k].isStatic() || bodies[k].asleep; };
+            auto inert = [&](BodyIndex k) { return bodies[k].isStatic() || bodies[k].asleep; };
 
-        pairs_.clear();
-        for (BodyIndex i : sorted_)
-            if (!inert(i))
-                for (BodyIndex j : boundless_)
-                    if (bodies[i].canCollideWith(bodies[j]))
-                        pairs_.push_back((uint64_t)i << 32 | j);
+            pairs_.clear();
+            for (BodyIndex i : sorted_)
+                if (!inert(i))
+                    for (BodyIndex j : boundless_)
+                        if (bodies[i].canCollideWith(bodies[j]))
+                            pairs_.push_back((uint64_t)i << 32 | j);
 
-        // Sweep-and-prune along X: sort by AABB min, only test while overlapping.
-        std::sort(sorted_.begin(), sorted_.end(), [&](BodyIndex a, BodyIndex b) {
-            return aabbs_[a].lo.x < aabbs_[b].lo.x;
-        });
-        for (size_t si = 0; si < sorted_.size(); ++si) {
-            BodyIndex i = sorted_[si];
-            for (size_t sj = si + 1; sj < sorted_.size(); ++sj) {
-                BodyIndex j = sorted_[sj];
-                if (aabbs_[j].lo.x > aabbs_[i].hi.x) break; // pruned: sorted axis
-                if (inert(i) && inert(j)) continue;
-                if (!bodies[i].canCollideWith(bodies[j])) continue;
-                if (!aabbOverlap(aabbs_[i].lo, aabbs_[i].hi, aabbs_[j].lo, aabbs_[j].hi))
-                    continue;
-                pairs_.push_back((uint64_t)i << 32 | j);
+            // Sweep-and-prune along X: sort by min, only test while overlapping.
+            std::sort(sorted_.begin(), sorted_.end(), [&](BodyIndex a, BodyIndex b) {
+                return aabbs_[a].lo.x < aabbs_[b].lo.x;
+            });
+            for (size_t si = 0; si < sorted_.size(); ++si) {
+                BodyIndex i = sorted_[si];
+                for (size_t sj = si + 1; sj < sorted_.size(); ++sj) {
+                    BodyIndex j = sorted_[sj];
+                    if (aabbs_[j].lo.x > aabbs_[i].hi.x) break; // pruned: sorted axis
+                    if (inert(i) && inert(j)) continue;
+                    if (!bodies[i].canCollideWith(bodies[j])) continue;
+                    if (!aabbOverlap(aabbs_[i].lo, aabbs_[i].hi, aabbs_[j].lo, aabbs_[j].hi))
+                        continue;
+                    pairs_.push_back((uint64_t)i << 32 | j);
+                }
             }
         }
 

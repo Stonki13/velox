@@ -1,4 +1,5 @@
 #include "velox/world.h"
+#include "broadphase.h"
 #include "mass_properties.h"
 #include "narrowphase.h"
 #include <algorithm>
@@ -141,7 +142,9 @@ void validateRuntimeBody(const Body& body) {
 
 } // namespace
 
-World::World(BackendType type) {
+World::~World() = default;
+
+World::World(BackendType type) : broadPhase_(new BroadPhaseData) {
     if (type != BackendType::Cpu) backend_.reset(createCudaBackend());
     if (!backend_) {
         if (type == BackendType::Cuda)
@@ -217,6 +220,9 @@ JointId World::addJoint(Joint jointValue) {
 }
 
 Body& World::body(BodyId id) {
+    // Mutable access can change transforms, velocities, or shape parameters:
+    // the broad-phase proxies must re-fit before the tree is trusted again.
+    broadPhase_->touched = true;
     return bodies_[resolve(id)];
 }
 
@@ -989,6 +995,65 @@ void World::clearForces(BodyId id) {
     b.torque = {};
 }
 
+void World::shiftOrigin(Vec3 offset) {
+    requireFiniteVec(offset, "velox: origin shift must be finite");
+    broadPhase_->structureDirty = true; // all stored bounds move wholesale
+
+    // Validate every subtraction before mutating anything. Opposite, finite
+    // FLT_MAX-scale operands can still overflow, so this preserves strong
+    // exception safety for malformed large-world inputs.
+    auto shifted = [&](const Vec3& value) {
+        Vec3 result = value - offset;
+        if (!finiteVec(result))
+            throw std::overflow_error("velox: origin shift overflows world coordinates");
+        return result;
+    };
+    for (const Body& body : bodies_) {
+        shifted(body.position);
+        if (body.shape == ShapeType::Plane) {
+            float planeOffset = body.planeOffset - dot(body.planeNormal, offset);
+            if (!finiteFloat(planeOffset))
+                throw std::overflow_error("velox: origin shift overflows plane offset");
+        }
+    }
+    for (const Vec3& vertex : meshes_.vertices) shifted(vertex);
+    for (const Mesh& mesh : meshes_.meshes) {
+        shifted(mesh.aabbMin);
+        shifted(mesh.aabbMax);
+    }
+    for (const BvhNode& node : meshes_.bvhNodes) {
+        shifted(node.aabbMin);
+        shifted(node.aabbMax);
+    }
+    for (const Contact& contact : contacts_) shifted(contact.point);
+    for (const Contact& contact : prevContacts_) shifted(contact.point);
+    for (const PrevState& state : prev_) shifted(state.position);
+    for (const ContactEvent& event : events_)
+        if (event.type != ContactEventType::End) shifted(event.point);
+
+    for (Body& body : bodies_) {
+        body.position -= offset;
+        if (body.shape == ShapeType::Plane)
+            body.planeOffset -= dot(body.planeNormal, offset);
+    }
+    for (Vec3& vertex : meshes_.vertices) vertex -= offset;
+    for (Mesh& mesh : meshes_.meshes) {
+        mesh.aabbMin -= offset;
+        mesh.aabbMax -= offset;
+    }
+    for (BvhNode& node : meshes_.bvhNodes) {
+        node.aabbMin -= offset;
+        node.aabbMax -= offset;
+    }
+    for (Contact& contact : contacts_) contact.point -= offset;
+    for (Contact& contact : prevContacts_) contact.point -= offset;
+    for (PrevState& state : prev_) state.position -= offset;
+    for (ContactEvent& event : events_)
+        if (event.type != ContactEventType::End) event.point -= offset;
+
+    backend_->invalidateCaches();
+}
+
 WorldSnapshot World::saveSnapshot() const {
     WorldSnapshot snapshot;
     snapshot.owner_ = this;
@@ -1026,6 +1091,7 @@ void World::restoreSnapshot(const WorldSnapshot& snapshot) {
     if (snapshot.owner_ != this)
         throw std::invalid_argument(
             "velox: a snapshot can only be restored to its originating world");
+    broadPhase_->structureDirty = true; // bodies and geometry replaced wholesale
 
     // Allocate every converted private representation before changing World,
     // giving restore strong exception safety.
@@ -1294,6 +1360,94 @@ void World::wake(BodyId id) {
     b.sleepTimer = 0.0f;
 }
 
+namespace {
+
+// Tight bounds fed to the broad-phase tree: swept bounds for finite shapes
+// (bodyAabb already includes the speculative reach), root bounds for meshes.
+void proxyBounds(const Body& b, const MeshSoup& meshes, float dt,
+                 Vec3& lo, Vec3& hi) {
+    if (b.shape == ShapeType::Mesh) {
+        const Mesh& mesh = meshes.meshes[b.meshIndex];
+        lo = mesh.aabbMin;
+        hi = mesh.aabbMax;
+    } else {
+        bodyAabb(b, dt, lo, hi);
+    }
+}
+
+} // namespace
+
+void World::ensureBroadPhase(float dt, bool refit) const {
+    BroadPhaseData& bp = *broadPhase_;
+    if (bp.structureDirty || bp.proxies.size() != bodies_.size()) {
+        bp.tree.clear();
+        bp.planes.clear();
+        bp.proxies.assign(bodies_.size(), -1);
+        for (BodyIndex i = 0; i < bodies_.size(); ++i) {
+            const Body& b = bodies_[i];
+            if (b.shape == ShapeType::Plane) {
+                bp.planes.push_back(i);
+                continue;
+            }
+            Vec3 lo, hi;
+            proxyBounds(b, meshes_, dt, lo, hi);
+            bp.proxies[i] = bp.tree.insert(lo, hi, i);
+        }
+        bp.structureDirty = false;
+        bp.touched = false;
+        bp.lastDt = dt;
+        return;
+    }
+    if (!refit && !bp.touched) return;
+    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
+        if (bp.proxies[i] < 0) continue;
+        const Body& b = bodies_[i];
+        if (b.isStatic() && !bp.touched) continue; // statics only move via API
+        Vec3 lo, hi;
+        proxyBounds(b, meshes_, dt, lo, hi);
+        bp.tree.move(bp.proxies[i], lo, hi);
+    }
+    bp.touched = false;
+    bp.lastDt = dt;
+}
+
+void World::buildCandidatePairs(float dt) {
+    ensureBroadPhase(dt, /*refit=*/true);
+    const BroadPhaseData& bp = *broadPhase_;
+    candidatePairs_.clear();
+
+    auto inert = [&](BodyIndex k) {
+        return bodies_[k].isStatic() || bodies_[k].asleep;
+    };
+    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
+        if (bp.proxies[i] < 0 || inert(i)) continue;
+        const Body& a = bodies_[i];
+        Vec3 lo, hi;
+        proxyBounds(a, meshes_, dt, lo, hi);
+        bp.tree.query(lo, hi, [&](uint32_t j) {
+            if (j == i) return;
+            // Active-active pairs are discovered from both endpoints: keep the
+            // lower index's discovery. Inert bodies never run a query, so
+            // their pairs survive unconditionally.
+            if (!inert(j) && j < i) return;
+            if (!a.canCollideWith(bodies_[j])) return;
+            BodyIndex lo32 = i < j ? i : (BodyIndex)j;
+            BodyIndex hi32 = i < j ? (BodyIndex)j : i;
+            candidatePairs_.push_back((uint64_t)lo32 << 32 | hi32);
+        });
+        for (BodyIndex p : bp.planes)
+            if (a.canCollideWith(bodies_[p]))
+                candidatePairs_.push_back(i < p ? ((uint64_t)i << 32 | p)
+                                                : ((uint64_t)p << 32 | i));
+    }
+    // Deterministic order for the narrow phase and solver regardless of tree
+    // shape history; unique guards against duplicate discoveries.
+    std::sort(candidatePairs_.begin(), candidatePairs_.end());
+    candidatePairs_.erase(
+        std::unique(candidatePairs_.begin(), candidatePairs_.end()),
+        candidatePairs_.end());
+}
+
 bool World::isAwake(BodyId id) const { return !body(id).asleep; }
 
 void World::removeJointDense(uint32_t dense) {
@@ -1320,6 +1474,7 @@ void World::removeJoint(JointId id) { removeJointDense(resolve(id)); }
 
 void World::removeBody(BodyId id) {
     BodyIndex dense = resolve(id);
+    broadPhase_->structureDirty = true; // dense indices reshuffle on removal
 
     // Removing an endpoint also removes every constraint that references it.
     for (uint32_t i = static_cast<uint32_t>(joints_.size()); i-- > 0;)
@@ -2130,7 +2285,12 @@ void World::step(float dt) {
     // current body positions (Contact::bias0), Box2D-v3 style.
     const auto detectionStart = Clock::now();
     backend_->integrate(bodies_, gravity, h); // first substep's gravity
-    backend_->findContacts(bodies_, meshes_, dt, contacts_);
+    const std::vector<uint64_t>* hostPairs = nullptr;
+    if (backend_->wantsHostPairs()) {
+        buildCandidatePairs(dt); // incremental AABB-tree broad phase
+        hostPairs = &candidatePairs_;
+    }
+    backend_->findContacts(bodies_, meshes_, dt, hostPairs, contacts_);
     const auto detectionEnd = Clock::now();
     lastStepStats_.generatedContacts = contacts_.size();
 
