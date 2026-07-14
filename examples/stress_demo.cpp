@@ -11,7 +11,6 @@
 static int failures = 0;
 static void check(bool ok, const char* name) {
     std::printf("%-44s %s\n", name, ok ? "PASS" : "FAIL");
-    std::fflush(stdout);
     if (!ok) ++failures;
 }
 
@@ -1342,8 +1341,8 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
-// 39. Large supported joint sets stay resident through CUDA solver substeps;
-// CPU builds and smaller workloads deliberately retain the low-latency path.
+// 39. Large joint sets stay resident through CUDA solver substeps; mixed
+// constraint types and per-substep breaking must track CPU behavior.
 static void testDeviceJointSubsteps() {
     velox::World cpu(velox::BackendType::Cpu);
     velox::World accelerated;
@@ -1358,7 +1357,7 @@ static void testDeviceJointSubsteps() {
             velox::Vec3 position{x, 0, 0};
             auto body = world.addSphere(position, 0.1f, 1.0f);
             world.body(body).maskBits = 0;
-            switch (i % 4) {
+            switch (i % 7) {
             case 0:
                 world.addBallJoint(anchor, body, position);
                 break;
@@ -1368,10 +1367,42 @@ static void testDeviceJointSubsteps() {
             case 2:
                 world.addFixedJoint(anchor, body, position);
                 break;
-            default: {
+            case 3: {
                 auto joint = world.addSixDofJoint(anchor, body, position);
                 world.joint(joint).linearLimitMask =
                     velox::JointAxisY | velox::JointAxisZ;
+                break;
+            }
+            case 4: {
+                auto id = world.addPrismaticJoint(anchor, body, position,
+                                                  {1, 0, 0});
+                auto& joint = world.joint(id);
+                joint.enableMotor = joint.enableLimit = true;
+                joint.motorSpeed = 0.5f;
+                joint.maxMotorForce = 10.0f;
+                joint.lowerLimit = -0.2f;
+                joint.upperLimit = 0.2f;
+                break;
+            }
+            case 5: {
+                auto id = world.addHingeJoint(anchor, body, position,
+                                              {0, 1, 0});
+                auto& joint = world.joint(id);
+                joint.enableMotor = joint.enableLimit = true;
+                joint.motorSpeed = 0.3f;
+                joint.maxMotorTorque = 10.0f;
+                joint.lowerLimit = -0.2f;
+                joint.upperLimit = 0.2f;
+                break;
+            }
+            default: {
+                auto id = world.addConeTwistJoint(anchor, body, position,
+                                                  {0, 1, 0});
+                auto& joint = world.joint(id);
+                joint.enableSwingLimit = joint.enableTwistLimit = true;
+                joint.swingLimit = 0.2f;
+                joint.lowerTwistLimit = -0.2f;
+                joint.upperTwistLimit = 0.2f;
                 break;
             }
             }
@@ -1399,20 +1430,42 @@ static void testDeviceJointSubsteps() {
     bool cuda = std::string(accelerated.backendName()) == "cuda";
     bool expectedPath = cuda ? accelerated.lastStepStats().deviceSubsteps :
                                !accelerated.lastStepStats().deviceSubsteps;
-    velox::World unsupported;
-    unsupported.gravity = {0, 0, 0};
-    auto rail = unsupported.addSphere({}, 0.1f, 0.0f);
-    unsupported.body(rail).maskBits = 0;
+    velox::World breakable;
+    breakable.gravity = {0, 0, 0};
+    auto rail = breakable.addSphere({}, 0.1f, 0.0f);
+    breakable.body(rail).maskBits = 0;
+    velox::JointId brokenJoint, torqueJoint;
     for (int i = 0; i < 64; ++i) {
         velox::Vec3 position{2.0f + i, 0, 0};
-        auto body = unsupported.addSphere(position, 0.1f, 1.0f);
-        unsupported.body(body).maskBits = 0;
-        unsupported.addPrismaticJoint(rail, body, position, {1, 0, 0});
+        auto body = breakable.addSphere(position, 0.1f, 1.0f);
+        breakable.body(body).maskBits = 0;
+        auto joint = i == 1 ? breakable.addFixedJoint(rail, body, position) :
+                              breakable.addBallJoint(rail, body, position);
+        if (i == 0) {
+            brokenJoint = joint;
+            breakable.joint(joint).breakForce = 0.1f;
+            breakable.setLinearVelocity(body, {10, 0, 0});
+        } else if (i == 1) {
+            torqueJoint = joint;
+            breakable.joint(joint).breakTorque = 0.1f;
+            breakable.setAngularVelocity(body, {10, 0, 0});
+        }
     }
-    unsupported.step(1.0f / 60.0f);
+    breakable.step(1.0f / 60.0f);
+    bool breakPath = cuda ? breakable.lastStepStats().deviceSubsteps :
+                            !breakable.lastStepStats().deviceSubsteps;
+    bool forceEvent = false, torqueEvent = false;
+    for (const auto& event : breakable.jointBreakEvents()) {
+        forceEvent |= event.joint == brokenJoint && event.force > 0.1f;
+        torqueEvent |= event.joint == torqueJoint && event.torque > 0.1f;
+    }
+    bool breakOk = breakPath && !breakable.isValid(brokenJoint) &&
+                   !breakable.isValid(torqueJoint) &&
+                   breakable.jointBreakEvents().size() == 2 &&
+                   forceEvent && torqueEvent;
 
     check(parity && expectedPath && !cpu.lastStepStats().deviceSubsteps &&
-              !unsupported.lastStepStats().deviceSubsteps,
+              breakOk,
           "CUDA joint substeps (resident solve and CPU trajectory parity)");
 }
 

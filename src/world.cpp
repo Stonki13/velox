@@ -1711,10 +1711,15 @@ void World::solveJoints(float dt) {
         }
     }
 
+    finishBrokenJoints(dt);
+}
+
+void World::finishBrokenJoints(float dt) {
     for (Joint& joint : joints_) {
         float force = length(joint.reactionLinearImpulse) / dt;
         float torque = length(joint.reactionAngularImpulse) / dt;
-        joint.broken = force > joint.breakForce || torque > joint.breakTorque;
+        joint.broken = joint.broken || force > joint.breakForce ||
+                       torque > joint.breakTorque;
     }
     for (size_t i = joints_.size(); i-- > 0;) {
         if (!joints_[i].broken) continue;
@@ -2096,6 +2101,7 @@ void World::step(float dt) {
     bool advancedOnDevice = backend_->advanceSubsteps(
         bodies_, contacts_, joints_, gravity, h, nSub);
     lastStepStats_.deviceSubsteps = advancedOnDevice;
+    if (advancedOnDevice) finishBrokenJoints(h);
     if (!advancedOnDevice) {
         for (int s = 0; s < nSub; ++s) {
             if (s > 0) backend_->integrate(bodies_, gravity, h);

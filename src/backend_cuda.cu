@@ -157,9 +157,11 @@ __global__ void warmStartColorKernel(Body* bodies, Contact* contacts,
     warmStartContact(bodies[c.a], bodies[c.b], c);
 }
 
-__global__ void resetJointsKernel(Joint* joints, int count) {
+__global__ void resetJointsKernel(Joint* joints, int count,
+                                  bool preserveBroken) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < count) joint_solver::reset(joints[k]);
+    if (k >= count || (preserveBroken && joints[k].broken)) return;
+    joint_solver::reset(joints[k]);
 }
 
 __global__ void solveJointColorKernel(Body* bodies, Joint* joints,
@@ -167,10 +169,20 @@ __global__ void solveJointColorKernel(Body* bodies, Joint* joints,
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= count) return;
     Joint& joint = joints[first + k];
+    if (joint.broken) return;
     Body& a = bodies[joint.a];
     Body& b = bodies[joint.b];
     if (a.asleep && b.asleep) return;
     joint_solver::solve(joint, a, b, dt);
+}
+
+__global__ void markBrokenJointsKernel(Joint* joints, int count, float dt) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count || joints[k].broken) return;
+    Joint& joint = joints[k];
+    float force = length(joint.reactionLinearImpulse) / dt;
+    float torque = length(joint.reactionAngularImpulse) / dt;
+    joint.broken = force > joint.breakForce || torque > joint.breakTorque;
 }
 
 class CudaBackend final : public Backend {
@@ -461,7 +473,7 @@ public:
             if (!joints.empty()) {
                 int jointCount = static_cast<int>(joints.size());
                 resetJointsKernel<<<(jointCount + 127) / 128, 128, 0, stream_>>>(
-                    dJoints_, jointCount);
+                    dJoints_, jointCount, s > 0);
                 VELOX_CUDA_CHECK(cudaGraphLaunch(jointGraph_, stream_));
             }
             integrateTransformsKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
@@ -597,6 +609,8 @@ private:
                                         stream_>>>(dBodies_, dJoints_, first,
                                                    colorCount, dt);
             }
+        markBrokenJointsKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
+            dJoints_, count, dt);
         VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
         VELOX_CUDA_CHECK(cudaGraphInstantiate(&jointGraph_, graph,
                                               nullptr, nullptr, 0));

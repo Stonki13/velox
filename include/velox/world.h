@@ -276,6 +276,7 @@ private:
                                    const MeshSoupView& soup) const;
     void removeJointDense(uint32_t dense);
     void solveJoints(float dt);
+    void finishBrokenJoints(float dt);
     void updateSleeping(float dt);
 
     std::vector<Body> bodies_;

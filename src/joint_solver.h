@@ -249,6 +249,186 @@ VELOX_HD inline void solveSixDof(Joint& joint, Body& a, Body& b,
     }
 }
 
+VELOX_HD inline void solvePrismatic(Joint& joint, Body& a, Body& b,
+                                    const Vec3& ra, const Vec3& rb,
+                                    const Vec3& pa, const Vec3& pb, float dt) {
+    Vec3 axis = normalize(rotate(a.orientation, joint.localAxisA));
+    Vec3 ref = rotate(a.orientation, joint.localRefA);
+    Vec3 t1 = normalize(ref - axis * dot(ref, axis));
+    if (lengthSq(t1) < 1e-12f) {
+        ref = fabsf(axis.x) < 0.9f ? Vec3{1,0,0} : Vec3{0,1,0};
+        t1 = normalize(cross(axis, ref));
+    }
+    Vec3 tangents[2] = {t1, cross(axis, t1)};
+    Mat3 pointK = pointMass(a, b, ra, rb);
+    Vec3 error = pa - pb;
+    Vec3 velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    for (int i = 0; i < 2; ++i) {
+        Vec3 tangent = tangents[i];
+        float k = dot(tangent, mul(pointK, tangent));
+        if (k <= 0.0f) continue;
+        float lambda = -(dot(velocity, tangent) +
+                         dot(error, tangent) * (kBeta / dt)) / k;
+        applyLinear(joint, a, b, ra, rb, tangent * lambda, 1.0f);
+        velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    }
+    solveAngularFrame(joint, a, b, kBeta / dt);
+
+    float kAxis = dot(axis, mul(pointK, axis));
+    if (kAxis <= 0.0f) return;
+    float axisSpeed = dot(anchorVelocity(b, rb) -
+                          anchorVelocity(a, ra), axis);
+    if (joint.enableMotor) {
+        float lambda = (joint.motorSpeed - axisSpeed) / kAxis;
+        float maxImpulse = joint.maxMotorForce * dt;
+        float old = joint.motorImpulse;
+        joint.motorImpulse = vclamp(old + lambda, -maxImpulse, maxImpulse);
+        lambda = joint.motorImpulse - old;
+        applyLinear(joint, a, b, ra, rb, axis * lambda, -1.0f);
+        axisSpeed = dot(anchorVelocity(b, rb) -
+                        anchorVelocity(a, ra), axis);
+    }
+    if (!joint.enableLimit) return;
+    float translation = dot(pb - pa, axis);
+    float lambda = 0.0f;
+    float old = joint.limitImpulse;
+    if (translation < joint.lowerLimit) {
+        float bias = (translation - joint.lowerLimit) * (kBeta / dt);
+        lambda = -(axisSpeed + bias) / kAxis;
+        joint.limitImpulse = vmax(0.0f, old + lambda);
+        lambda = joint.limitImpulse - old;
+    } else if (translation > joint.upperLimit) {
+        float bias = (translation - joint.upperLimit) * (kBeta / dt);
+        lambda = -(axisSpeed + bias) / kAxis;
+        joint.limitImpulse = vmin(0.0f, old + lambda);
+        lambda = joint.limitImpulse - old;
+    }
+    if (lambda != 0.0f)
+        applyLinear(joint, a, b, ra, rb, axis * lambda, -1.0f);
+}
+
+VELOX_HD inline void solveHinge(Joint& joint, Body& a, Body& b,
+                                const Vec3& ra, const Vec3& rb,
+                                const Vec3& pa, const Vec3& pb, float dt) {
+    Vec3 velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    Vec3 bias = (pa - pb) * (kBeta / dt);
+    Vec3 impulse = mul(inverse(pointMass(a, b, ra, rb)),
+                       -(velocity + bias));
+    applyLinear(joint, a, b, ra, rb, impulse, 1.0f);
+
+    Vec3 axisA = rotate(a.orientation, joint.localAxisA);
+    Vec3 axisB = rotate(b.orientation, joint.localAxisB);
+    Vec3 error = cross(axisB, axisA);
+    Vec3 ref = fabsf(axisA.x) < 0.9f ? Vec3{1,0,0} : Vec3{0,1,0};
+    Vec3 tangents[2] = {normalize(cross(axisA, ref)), {}};
+    tangents[1] = cross(axisA, tangents[0]);
+    Vec3 relativeW = a.angularVelocity - b.angularVelocity;
+    for (int i = 0; i < 2; ++i) {
+        Vec3 tangent = tangents[i];
+        float k = dot(tangent, a.invInertiaMul(tangent)) +
+                  dot(tangent, b.invInertiaMul(tangent));
+        if (k <= 0.0f) continue;
+        float lambda = -(dot(relativeW, tangent) +
+                         dot(error, tangent) * (kBeta / dt)) / k;
+        applyAngular(joint, a, b, tangent * lambda);
+        relativeW = a.angularVelocity - b.angularVelocity;
+    }
+
+    float kAxis = dot(axisA, a.invInertiaMul(axisA)) +
+                  dot(axisA, b.invInertiaMul(axisA));
+    if (kAxis <= 0.0f) return;
+    if (joint.enableMotor) {
+        float wAxis = dot(a.angularVelocity - b.angularVelocity, axisA);
+        float lambda = (joint.motorSpeed - wAxis) / kAxis;
+        float maxImpulse = joint.maxMotorTorque * dt;
+        float old = joint.motorImpulse;
+        joint.motorImpulse = vclamp(old + lambda, -maxImpulse, maxImpulse);
+        lambda = joint.motorImpulse - old;
+        applyAngular(joint, a, b, axisA * lambda);
+    }
+    if (!joint.enableLimit) return;
+    Vec3 refA = rotate(a.orientation, joint.localRefA);
+    Vec3 refB = rotate(b.orientation, joint.localRefB);
+    float angle = atan2f(dot(cross(refA, refB), axisA), dot(refA, refB));
+    float wAxis = dot(a.angularVelocity - b.angularVelocity, axisA);
+    float lambda = 0.0f;
+    float old = joint.limitImpulse;
+    if (angle < joint.lowerLimit) {
+        float target = (angle - joint.lowerLimit) * (kBeta / dt);
+        lambda = (target - wAxis) / kAxis;
+        joint.limitImpulse = vmin(0.0f, old + lambda);
+        lambda = joint.limitImpulse - old;
+    } else if (angle > joint.upperLimit) {
+        float target = (angle - joint.upperLimit) * (kBeta / dt);
+        lambda = (target - wAxis) / kAxis;
+        joint.limitImpulse = vmax(0.0f, old + lambda);
+        lambda = joint.limitImpulse - old;
+    }
+    if (lambda != 0.0f) applyAngular(joint, a, b, axisA * lambda);
+}
+
+VELOX_HD inline void solveConeTwist(Joint& joint, Body& a, Body& b,
+                                    const Vec3& ra, const Vec3& rb,
+                                    const Vec3& pa, const Vec3& pb, float dt) {
+    Vec3 velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    Vec3 bias = (pa - pb) * (kBeta / dt);
+    Vec3 impulse = mul(inverse(pointMass(a, b, ra, rb)),
+                       -(velocity + bias));
+    applyLinear(joint, a, b, ra, rb, impulse, 1.0f);
+
+    Vec3 axisA = normalize(rotate(a.orientation, joint.localAxisA));
+    Vec3 axisB = normalize(rotate(b.orientation, joint.localAxisB));
+    Vec3 relativeW = a.angularVelocity - b.angularVelocity;
+    if (joint.enableSwingLimit) {
+        float angle = acosf(vclamp(dot(axisA, axisB), -1.0f, 1.0f));
+        if (angle > joint.swingLimit) {
+            Vec3 n = cross(axisB, axisA);
+            if (lengthSq(n) < 1e-10f) {
+                Vec3 refA = rotate(a.orientation, joint.localRefA);
+                n = cross(axisA, refA);
+            }
+            n = normalize(n);
+            float k = dot(n, a.invInertiaMul(n)) +
+                      dot(n, b.invInertiaMul(n));
+            if (k > 0.0f) {
+                float error = angle - joint.swingLimit;
+                float lambda = -(dot(relativeW, n) +
+                                 error * (kBeta / dt)) / k;
+                float old = joint.swingImpulse;
+                joint.swingImpulse = vmin(0.0f, old + lambda);
+                lambda = joint.swingImpulse - old;
+                applyAngular(joint, a, b, n * lambda);
+                relativeW = a.angularVelocity - b.angularVelocity;
+            }
+        }
+    }
+    if (!joint.enableTwistLimit) return;
+    Vec3 refA = rotate(a.orientation, joint.localRefA);
+    Vec3 refB = rotate(b.orientation, joint.localRefB);
+    refA = normalize(refA - axisA * dot(refA, axisA));
+    refB = normalize(refB - axisA * dot(refB, axisA));
+    if (lengthSq(refA) < 1e-10f || lengthSq(refB) < 1e-10f) return;
+    float angle = atan2f(dot(cross(refA, refB), axisA), dot(refA, refB));
+    float k = dot(axisA, a.invInertiaMul(axisA)) +
+              dot(axisA, b.invInertiaMul(axisA));
+    if (k <= 0.0f) return;
+    float wAxis = dot(a.angularVelocity - b.angularVelocity, axisA);
+    float lambda = 0.0f;
+    float old = joint.twistImpulse;
+    if (angle < joint.lowerTwistLimit) {
+        float target = (angle - joint.lowerTwistLimit) * (kBeta / dt);
+        lambda = (target - wAxis) / k;
+        joint.twistImpulse = vmin(0.0f, old + lambda);
+        lambda = joint.twistImpulse - old;
+    } else if (angle > joint.upperTwistLimit) {
+        float target = (angle - joint.upperTwistLimit) * (kBeta / dt);
+        lambda = (target - wAxis) / k;
+        joint.twistImpulse = vmax(0.0f, old + lambda);
+        lambda = joint.twistImpulse - old;
+    }
+    if (lambda != 0.0f) applyAngular(joint, a, b, axisA * lambda);
+}
+
 VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
     Vec3 ra = rotate(a.orientation, joint.localAnchorA);
     Vec3 rb = rotate(b.orientation, joint.localAnchorB);
@@ -303,19 +483,22 @@ VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
     case JointType::SixDof:
         solveSixDof(joint, a, b, ra, rb, pa, pb, dt);
         break;
+    case JointType::Prismatic:
+        solvePrismatic(joint, a, b, ra, rb, pa, pb, dt);
+        break;
+    case JointType::Hinge:
+        solveHinge(joint, a, b, ra, rb, pa, pb, dt);
+        break;
+    case JointType::ConeTwist:
+        solveConeTwist(joint, a, b, ra, rb, pa, pb, dt);
+        break;
     default:
         break;
     }
 }
 
 inline bool supported(const Joint& joint) {
-    bool typeSupported = joint.type == JointType::Ball ||
-                         joint.type == JointType::Distance ||
-                         joint.type == JointType::Fixed ||
-                         joint.type == JointType::SixDof;
-    constexpr float disabled = 3.402823466e+38F;
-    return typeSupported && joint.breakForce == disabled &&
-           joint.breakTorque == disabled;
+    return (uint8_t)joint.type <= (uint8_t)JointType::SixDof;
 }
 
 } // namespace velox::joint_solver

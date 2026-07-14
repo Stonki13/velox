@@ -50,9 +50,10 @@ Per-color kernel sweeps are batched with CUDA Graphs, and the coloring is greedy
 first-free-bit, which keeps the color count near the max constraints per body.
 Contact graphs are captured once per step; joint graphs are reused while body
 storage, joint storage, timestep, and constraint topology remain unchanged.
-Worlds without unsupported CPU-side joints keep velocity integration, contact
-and joint solving, and transform integration on the device across all solver
-substeps, then download body state once.
+Worlds above the measured joint-workload crossover keep velocity integration,
+contact and joint solving, and transform integration on the device across all
+solver substeps, then download body state once. Smaller joint sets use the CPU
+joint path to avoid graph overhead.
 
 `examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
 (60 Hz steps, full pipeline, 4 solver substeps):
@@ -161,10 +162,9 @@ closed 3D polytope cannot exist.
 - GJK narrow phase over support functions (one code path for all convex
   pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
 - **CUDA backend**: integration, narrow phase, graph-colored contacts, and
-  high-throughput ball/distance/spring/fixed/6DoF joint sets stay on the GPU
-  through every solver substep (CUDA Graphs batching and topology reuse).
-  Small joint sets, hinge/cone-twist/prismatic constraints, and breakable
-  joints currently retain the CPU joint path.
+  high-throughput joint sets stay on the GPU through every solver substep
+  (CUDA Graphs batching and topology reuse), including per-substep breaking.
+  Small joint sets retain the lower-latency CPU joint path.
 - Broad phase: sweep-and-prune (CPU), hybrid all-pairs / compacted GPU
   sweep-and-prune (CUDA)
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
