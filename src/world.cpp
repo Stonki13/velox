@@ -427,10 +427,16 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
 
     std::vector<CompoundChild> children;
     std::vector<Vec3> hullPoints;
+    struct ChildMassData {
+        double volume = 0.0;
+        Vec3 principalInertia;
+        Quat principalOrientation;
+    };
+    std::vector<ChildMassData> childMass;
+    std::vector<float> childBounds;
     children.reserve(shapes.size());
-    Vec3 aggregateLo{1e30f, 1e30f, 1e30f};
-    Vec3 aggregateHi{-1e30f, -1e30f, -1e30f};
-    float aggregateRadius = 0.0f;
+    childMass.reserve(shapes.size());
+    childBounds.reserve(shapes.size());
 
     for (const CompoundShape& shape : shapes) {
         requireFiniteVec(shape.localPosition,
@@ -448,6 +454,8 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
         child.shape = shape.shape;
         child.localPosition = shape.localPosition;
         child.localOrientation = normalize(shape.localOrientation);
+        ChildMassData massData;
+        massData.principalOrientation = child.localOrientation;
         float bound = 0.0f;
         switch (shape.shape) {
         case ShapeType::Sphere:
@@ -455,6 +463,13 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
                             "velox: compound sphere radius must be positive");
             child.radius = shape.radius;
             bound = shape.radius;
+            if (mass > 0.0f) {
+                massData.volume = (4.0 / 3.0) * 3.141592653589793 *
+                                  shape.radius * shape.radius * shape.radius;
+                float moment = 0.4f * float(massData.volume) *
+                               shape.radius * shape.radius;
+                massData.principalInertia = {moment, moment, moment};
+            }
             break;
         case ShapeType::Box:
             if (!finiteVec(shape.halfExtents) || shape.halfExtents.x <= 0.0f ||
@@ -462,6 +477,18 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
                 throw std::invalid_argument("velox: compound box half extents must be positive");
             child.halfExtents = shape.halfExtents;
             bound = length(shape.halfExtents);
+            if (mass > 0.0f) {
+                massData.volume = 8.0 * shape.halfExtents.x *
+                                  shape.halfExtents.y * shape.halfExtents.z;
+                float childMassValue = float(massData.volume) / 3.0f;
+                massData.principalInertia = {
+                    childMassValue * (shape.halfExtents.y * shape.halfExtents.y +
+                                      shape.halfExtents.z * shape.halfExtents.z),
+                    childMassValue * (shape.halfExtents.x * shape.halfExtents.x +
+                                      shape.halfExtents.z * shape.halfExtents.z),
+                    childMassValue * (shape.halfExtents.x * shape.halfExtents.x +
+                                      shape.halfExtents.y * shape.halfExtents.y)};
+            }
             break;
         case ShapeType::Capsule:
             requirePositive(shape.radius,
@@ -471,6 +498,20 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             child.radius = shape.radius;
             child.capsuleHalfHeight = shape.capsuleHalfHeight;
             bound = shape.radius + shape.capsuleHalfHeight;
+            if (mass > 0.0f) {
+                float r = shape.radius, h = shape.capsuleHalfHeight;
+                double cylinderVolume = 2.0 * 3.141592653589793 * r * r * h;
+                double sphereVolume = (4.0 / 3.0) * 3.141592653589793 * r * r * r;
+                massData.volume = cylinderVolume + sphereVolume;
+                float cylinderMass = float(cylinderVolume);
+                float sphereMass = float(sphereVolume);
+                float iy = 0.5f * cylinderMass * r * r +
+                           0.4f * sphereMass * r * r;
+                float ix = cylinderMass * (3.0f * r * r + 4.0f * h * h) /
+                               12.0f +
+                           sphereMass * (0.4f * r * r + 0.75f * h * r + h * h);
+                massData.principalInertia = {ix, iy, ix};
+            }
             break;
         case ShapeType::Cylinder:
             requirePositive(shape.radius,
@@ -481,6 +522,15 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             child.capsuleHalfHeight = shape.capsuleHalfHeight;
             bound = sqrtf(shape.radius * shape.radius +
                           shape.capsuleHalfHeight * shape.capsuleHalfHeight);
+            if (mass > 0.0f) {
+                float r = shape.radius, h = shape.capsuleHalfHeight;
+                massData.volume = 2.0 * 3.141592653589793 * r * r * h;
+                float childMassValue = float(massData.volume);
+                float iy = 0.5f * childMassValue * r * r;
+                float ix = childMassValue * (3.0f * r * r + 4.0f * h * h) /
+                           12.0f;
+                massData.principalInertia = {ix, iy, ix};
+            }
             break;
         case ShapeType::Cone: {
             requirePositive(shape.radius,
@@ -493,6 +543,15 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             bound = vmax(top, sqrtf(shape.radius * shape.radius +
                                     0.25f * shape.capsuleHalfHeight *
                                         shape.capsuleHalfHeight));
+            if (mass > 0.0f) {
+                float r = shape.radius, height = 2.0f * shape.capsuleHalfHeight;
+                massData.volume = 3.141592653589793 * r * r * height / 3.0;
+                float childMassValue = float(massData.volume);
+                float iy = 0.3f * childMassValue * r * r;
+                float ix = 0.15f * childMassValue * r * r +
+                           0.0375f * childMassValue * height * height;
+                massData.principalInertia = {ix, iy, ix};
+            }
             break;
         }
         case ShapeType::Hull: {
@@ -503,7 +562,6 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
                 throw std::length_error("velox: compound hull point capacity exceeded");
             for (const Vec3& p : shape.hullPoints) {
                 requireFiniteVec(p, "velox: compound hull points must be finite");
-                bound = vmax(bound, length(p));
             }
             const Vec3 p0 = shape.hullPoints[0];
             float scale2 = 0.0f;
@@ -534,23 +592,71 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             child.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size() +
                                                     hullPoints.size());
             child.hullCount = static_cast<uint32_t>(shape.hullPoints.size());
-            hullPoints.insert(hullPoints.end(), shape.hullPoints.begin(),
-                              shape.hullPoints.end());
+            if (mass > 0.0f) {
+                mass_properties::ConvexMassProperties hullProperties =
+                    mass_properties::convex(shape.hullPoints);
+                child.localPosition += rotate(child.localOrientation,
+                                              hullProperties.center);
+                massData.volume = hullProperties.volume;
+                massData.principalInertia = hullProperties.principalInertia;
+                massData.principalOrientation = mul(
+                    child.localOrientation,
+                    hullProperties.principalOrientation);
+                for (const Vec3& point : shape.hullPoints) {
+                    Vec3 centered = point - hullProperties.center;
+                    hullPoints.push_back(centered);
+                    bound = vmax(bound, length(centered));
+                }
+            } else {
+                hullPoints.insert(hullPoints.end(), shape.hullPoints.begin(),
+                                  shape.hullPoints.end());
+                for (const Vec3& point : shape.hullPoints)
+                    bound = vmax(bound, length(point));
+            }
             break;
         }
         default:
             throw std::invalid_argument(
                 "velox: compound children must be sphere, box, capsule, or hull");
         }
-        Vec3 r{bound, bound, bound};
-        aggregateLo = vmin(aggregateLo, shape.localPosition - r);
-        aggregateHi = vmax(aggregateHi, shape.localPosition + r);
-        aggregateRadius = vmax(aggregateRadius, length(shape.localPosition) + bound);
         children.push_back(child);
+        childMass.push_back(massData);
+        childBounds.push_back(bound);
     }
 
     Body body;
-    body.position = position;
+    Vec3 center;
+    mass_properties::Matrix3 centeredTensor;
+    double totalVolume = 0.0;
+    if (mass > 0.0f) {
+        double first[3]{};
+        mass_properties::Matrix3 originTensor;
+        for (size_t i = 0; i < children.size(); ++i) {
+            totalVolume += childMass[i].volume;
+            first[0] += childMass[i].volume * children[i].localPosition.x;
+            first[1] += childMass[i].volume * children[i].localPosition.y;
+            first[2] += childMass[i].volume * children[i].localPosition.z;
+            mass_properties::Matrix3 tensor =
+                mass_properties::rotatedPrincipalTensor(
+                    childMass[i].principalInertia,
+                    childMass[i].principalOrientation);
+            mass_properties::addAtOffset(originTensor, tensor,
+                                         childMass[i].volume,
+                                         children[i].localPosition);
+        }
+        if (totalVolume <= 1e-12)
+            throw std::invalid_argument("velox: compound has no positive volume");
+        center = {float(first[0] / totalVolume), float(first[1] / totalVolume),
+                  float(first[2] / totalVolume)};
+        centeredTensor = mass_properties::shiftedToCenter(
+            originTensor, totalVolume, center);
+        for (CompoundChild& child : children) child.localPosition -= center;
+    }
+    float aggregateRadius = 0.0f;
+    for (size_t i = 0; i < children.size(); ++i)
+        aggregateRadius = vmax(aggregateRadius,
+                               length(children[i].localPosition) + childBounds[i]);
+    body.position = position + center;
     body.shape = ShapeType::Compound;
     body.compoundFirst = static_cast<uint32_t>(meshes_.compoundChildren.size());
     body.compoundCount = static_cast<uint32_t>(children.size());
@@ -558,12 +664,13 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
     body.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     body.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     if (mass > 0.0f) {
-        Vec3 e = aggregateHi - aggregateLo;
-        float k = mass / 12.0f;
-        body.invInertia = {
-            1.0f / (k * (e.y * e.y + e.z * e.z) + 1e-9f),
-            1.0f / (k * (e.x * e.x + e.z * e.z) + 1e-9f),
-            1.0f / (k * (e.x * e.x + e.y * e.y) + 1e-9f)};
+        Vec3 unitMoments;
+        mass_properties::jacobiDiagonalize(centeredTensor, unitMoments,
+                                           body.inertiaOrientation);
+        float density = mass / float(totalVolume);
+        Vec3 inertia = unitMoments * density;
+        body.invInertia = {1.0f / inertia.x, 1.0f / inertia.y,
+                           1.0f / inertia.z};
     }
     meshes_.hullPoints.insert(meshes_.hullPoints.end(), hullPoints.begin(), hullPoints.end());
     meshes_.compoundChildren.insert(meshes_.compoundChildren.end(),

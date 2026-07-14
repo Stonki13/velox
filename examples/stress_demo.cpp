@@ -803,6 +803,51 @@ static void testCompoundBody() {
                           fastBox.localPosition);
         ok &= center.y > -0.5f;
     }
+
+    velox::World exactWorld(velox::BackendType::Cpu);
+    velox::CompoundShape largeSphere;
+    largeSphere.shape = velox::ShapeType::Sphere;
+    largeSphere.radius = 1.0f;
+    velox::CompoundShape smallSphere = largeSphere;
+    smallSphere.radius = 0.5f;
+    smallSphere.localPosition = {4, 0, 0};
+    auto exactCompound = exactWorld.addCompound(
+        {10, 0, 0}, {largeSphere, smallSphere}, 9.0f);
+    const velox::Body& exactBody = exactWorld.body(exactCompound);
+    float expectedCenter = 10.0f + 4.0f / 9.0f;
+    float expectedAxial = 3.3f;
+    float expectedTransverse = expectedAxial + 1152.0f / 81.0f;
+    ok &= std::fabs(exactBody.position.x - expectedCenter) < 1e-4f;
+    ok &= velox::length(exactBody.inertiaMul({1, 0, 0}) -
+                        velox::Vec3{expectedAxial, 0, 0}) < 1e-3f;
+    ok &= velox::length(exactBody.inertiaMul({0, 1, 0}) -
+                        velox::Vec3{0, expectedTransverse, 0}) < 1e-3f;
+
+    velox::CompoundShape rotatedBox;
+    rotatedBox.shape = velox::ShapeType::Box;
+    rotatedBox.localPosition = {3, 4, 5};
+    rotatedBox.localOrientation = velox::fromAxisAngle(
+        {0, 0, 1}, 3.14159265f * 0.5f);
+    rotatedBox.halfExtents = {1, 2, 3};
+    auto rotatedCompound = exactWorld.addCompound({}, {rotatedBox}, 12.0f);
+    const velox::Body& rotatedBody = exactWorld.body(rotatedCompound);
+    ok &= velox::length(rotatedBody.position - velox::Vec3{3, 4, 5}) < 1e-4f;
+    ok &= velox::length(rotatedBody.inertiaMul({1, 0, 0}) -
+                        velox::Vec3{40, 0, 0}) < 1e-3f;
+    ok &= velox::length(rotatedBody.inertiaMul({0, 1, 0}) -
+                        velox::Vec3{0, 52, 0}) < 1e-3f;
+
+    velox::CompoundShape hullChild;
+    hullChild.shape = velox::ShapeType::Hull;
+    hullChild.localPosition = {2, 3, 4};
+    for (float x : {-1.0f, 1.0f}) for (float y : {-2.0f, 2.0f})
+        for (float z : {-3.0f, 3.0f})
+            hullChild.hullPoints.push_back({x + 4, y - 2, z + 1});
+    auto hullCompound = exactWorld.addCompound({}, {hullChild}, 12.0f);
+    const velox::Body& hullBody = exactWorld.body(hullCompound);
+    ok &= velox::length(hullBody.position - velox::Vec3{6, 1, 5}) < 1e-4f;
+    ok &= velox::length(hullBody.inertiaMul({1, 0, 0}) -
+                        velox::Vec3{52, 0, 0}) < 1e-3f;
     check(ok, "compound body (local children, parent queries, CCD)");
 }
 

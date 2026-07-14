@@ -179,6 +179,49 @@ inline void jacobiDiagonalize(Matrix3 tensor, Vec3& moments, Quat& orientation) 
     orientation = normalize(orientation);
 }
 
+inline Matrix3 rotatedPrincipalTensor(const Vec3& moments,
+                                      const Quat& orientation) {
+    Vec3 axes[3] = {rotate(orientation, {1, 0, 0}),
+                    rotate(orientation, {0, 1, 0}),
+                    rotate(orientation, {0, 0, 1})};
+    double components[3][3] = {
+        {axes[0].x, axes[0].y, axes[0].z},
+        {axes[1].x, axes[1].y, axes[1].z},
+        {axes[2].x, axes[2].y, axes[2].z}};
+    double values[3] = {moments.x, moments.y, moments.z};
+    Matrix3 result;
+    for (int row = 0; row < 3; ++row) for (int column = 0; column < 3; ++column) {
+        double value = 0.0;
+        for (int axis = 0; axis < 3; ++axis)
+            value += values[axis] * components[axis][row] *
+                     components[axis][column];
+        result.m[row][column] = value;
+    }
+    return result;
+}
+
+inline void addAtOffset(Matrix3& aggregate, const Matrix3& centered,
+                        double childMass, const Vec3& offset) {
+    double p[3] = {offset.x, offset.y, offset.z};
+    double lengthSquared = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+    for (int row = 0; row < 3; ++row) for (int column = 0; column < 3; ++column) {
+        double parallel = childMass *
+            ((row == column ? lengthSquared : 0.0) - p[row] * p[column]);
+        aggregate.m[row][column] += centered.m[row][column] + parallel;
+    }
+}
+
+inline Matrix3 shiftedToCenter(const Matrix3& origin, double totalMass,
+                               const Vec3& center) {
+    Matrix3 result = origin;
+    double p[3] = {center.x, center.y, center.z};
+    double lengthSquared = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+    for (int row = 0; row < 3; ++row) for (int column = 0; column < 3; ++column)
+        result.m[row][column] -= totalMass *
+            ((row == column ? lengthSquared : 0.0) - p[row] * p[column]);
+    return result;
+}
+
 inline ConvexMassProperties convex(const std::vector<Vec3>& points) {
     ConvexMassProperties result;
     result.triangles = convexTriangles(points);
