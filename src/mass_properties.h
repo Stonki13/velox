@@ -22,59 +22,26 @@ struct ConvexMassProperties {
     std::vector<std::array<uint32_t, 3>> triangles;
 };
 
-struct Plane {
+struct HullFace {
+    uint32_t a, b, c;
     Vec3 normal;
-    float offset = 0.0f;
+    float offset;
+    std::vector<uint32_t> outside;
+    bool removed = false;
 };
 
-struct ProjectedPoint {
-    float x, y;
-    uint32_t index;
-};
-
-inline float cross2(const ProjectedPoint& a, const ProjectedPoint& b,
-                    const ProjectedPoint& c) {
-    return (b.x - a.x) * (c.y - a.y) -
-           (b.y - a.y) * (c.x - a.x);
-}
-
-inline std::vector<uint32_t> planeHull(const std::vector<Vec3>& points,
-                                       const Plane& plane, float epsilon) {
-    Vec3 reference = std::fabs(plane.normal.x) < 0.8f
-        ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
-    Vec3 u = normalize(cross(plane.normal, reference));
-    Vec3 v = cross(plane.normal, u);
-    std::vector<ProjectedPoint> projected;
-    for (uint32_t i = 0; i < points.size(); ++i) {
-        if (std::fabs(dot(plane.normal, points[i]) - plane.offset) <= epsilon)
-            projected.push_back({dot(points[i], u), dot(points[i], v), i});
+inline HullFace makeFace(uint32_t a, uint32_t b, uint32_t c,
+                         const std::vector<Vec3>& points,
+                         const Vec3& interior) {
+    HullFace face{a, b, c};
+    face.normal = normalize(cross(points[b] - points[a], points[c] - points[a]));
+    face.offset = dot(face.normal, points[a]);
+    if (dot(face.normal, interior) > face.offset) {
+        std::swap(face.b, face.c);
+        face.normal = -face.normal;
+        face.offset = -face.offset;
     }
-    std::sort(projected.begin(), projected.end(),
-              [](const ProjectedPoint& a, const ProjectedPoint& b) {
-                  if (a.x != b.x) return a.x < b.x;
-                  if (a.y != b.y) return a.y < b.y;
-                  return a.index < b.index;
-              });
-    std::vector<ProjectedPoint> hull;
-    for (const ProjectedPoint& point : projected) {
-        while (hull.size() >= 2 &&
-               cross2(hull[hull.size() - 2], hull.back(), point) <= epsilon)
-            hull.pop_back();
-        hull.push_back(point);
-    }
-    size_t lower = hull.size();
-    for (size_t i = projected.size(); i-- > 0;) {
-        const ProjectedPoint& point = projected[i];
-        while (hull.size() > lower &&
-               cross2(hull[hull.size() - 2], hull.back(), point) <= epsilon)
-            hull.pop_back();
-        hull.push_back(point);
-    }
-    if (!hull.empty()) hull.pop_back();
-    std::vector<uint32_t> result;
-    result.reserve(hull.size());
-    for (const ProjectedPoint& point : hull) result.push_back(point.index);
-    return result;
+    return face;
 }
 
 inline std::vector<std::array<uint32_t, 3>> convexTriangles(
@@ -84,42 +51,135 @@ inline std::vector<std::array<uint32_t, 3>> convexTriangles(
         lo = vmin(lo, point);
         hi = vmax(hi, point);
     }
-    float scale = vmax(1.0f, length(hi - lo));
-    float epsilon = scale * 1e-5f;
-    std::vector<Plane> planes;
-    for (uint32_t i = 0; i + 2 < points.size(); ++i) {
-        for (uint32_t j = i + 1; j + 1 < points.size(); ++j) {
-            for (uint32_t k = j + 1; k < points.size(); ++k) {
-                Vec3 n = cross(points[j] - points[i], points[k] - points[i]);
-                if (lengthSq(n) <= epsilon * epsilon) continue;
-                n = normalize(n);
-                float d = dot(n, points[i]);
-                bool front = false, back = false;
-                for (const Vec3& point : points) {
-                    float distance = dot(n, point) - d;
-                    front |= distance > epsilon;
-                    back |= distance < -epsilon;
-                }
-                if (front && back) continue;
-                if (front) { n = -n; d = -d; }
-                bool duplicate = false;
-                for (const Plane& plane : planes) {
-                    if (dot(n, plane.normal) > 1.0f - 1e-4f &&
-                        std::fabs(d - plane.offset) <= 2.0f * epsilon) {
-                        duplicate = true;
-                        break;
-                    }
-                }
-                if (!duplicate) planes.push_back({n, d});
+    Vec3 extent = hi - lo;
+    int axis = extent.y > extent.x ? 1 : 0;
+    if ((axis == 0 ? extent.z > extent.x : extent.z > extent.y)) axis = 2;
+    auto component = [&](uint32_t index) {
+        return axis == 0 ? points[index].x :
+               (axis == 1 ? points[index].y : points[index].z);
+    };
+    uint32_t i0 = 0, i1 = 0;
+    for (uint32_t i = 1; i < points.size(); ++i) {
+        if (component(i) < component(i0)) i0 = i;
+        if (component(i) > component(i1)) i1 = i;
+    }
+    float scale = vmax(1.0f, length(extent));
+    float epsilon = scale * 1e-6f;
+    Vec3 initialEdge = points[i1] - points[i0];
+    float initialEdgeLengthSq = lengthSq(initialEdge);
+    uint32_t i2 = i0;
+    float bestLineDistance = 0.0f;
+    for (uint32_t i = 0; i < points.size(); ++i) {
+        float distance = lengthSq(cross(initialEdge, points[i] - points[i0])) /
+                         initialEdgeLengthSq;
+        if (distance > bestLineDistance) {
+            bestLineDistance = distance;
+            i2 = i;
+        }
+    }
+    if (bestLineDistance <= epsilon * epsilon)
+        throw std::invalid_argument("velox: convex hull points are collinear");
+    Vec3 initialNormal = normalize(cross(points[i1] - points[i0],
+                                         points[i2] - points[i0]));
+    uint32_t i3 = i0;
+    float bestPlaneDistance = 0.0f;
+    for (uint32_t i = 0; i < points.size(); ++i) {
+        float distance = std::fabs(dot(initialNormal, points[i] - points[i0]));
+        if (distance > bestPlaneDistance) {
+            bestPlaneDistance = distance;
+            i3 = i;
+        }
+    }
+    if (bestPlaneDistance <= epsilon)
+        throw std::invalid_argument("velox: convex hull points are coplanar");
+    Vec3 interior = (points[i0] + points[i1] + points[i2] + points[i3]) * 0.25f;
+    std::vector<HullFace> faces;
+    faces.push_back(makeFace(i0, i1, i2, points, interior));
+    faces.push_back(makeFace(i0, i3, i1, points, interior));
+    faces.push_back(makeFace(i0, i2, i3, points, interior));
+    faces.push_back(makeFace(i1, i3, i2, points, interior));
+    auto initialVertex = [&](uint32_t i) {
+        return i == i0 || i == i1 || i == i2 || i == i3;
+    };
+    for (uint32_t point = 0; point < points.size(); ++point) {
+        if (initialVertex(point)) continue;
+        int bestFace = -1;
+        float bestDistance = epsilon;
+        for (int face = 0; face < int(faces.size()); ++face) {
+            float distance = dot(faces[face].normal, points[point]) -
+                             faces[face].offset;
+            if (distance > bestDistance) {
+                bestDistance = distance;
+                bestFace = face;
             }
+        }
+        if (bestFace >= 0) faces[bestFace].outside.push_back(point);
+    }
+    struct HorizonEdge { uint32_t from, to; int count = 1; };
+    for (;;) {
+        int seedFace = -1;
+        for (int i = 0; i < int(faces.size()); ++i)
+            if (!faces[i].removed && !faces[i].outside.empty()) {
+                seedFace = i;
+                break;
+            }
+        if (seedFace < 0) break;
+        uint32_t eye = faces[seedFace].outside.front();
+        float farthest = -1.0f;
+        for (uint32_t point : faces[seedFace].outside) {
+            float distance = dot(faces[seedFace].normal, points[point]) -
+                             faces[seedFace].offset;
+            if (distance > farthest) { farthest = distance; eye = point; }
+        }
+        std::vector<int> visible;
+        std::vector<uint32_t> orphaned;
+        std::vector<HorizonEdge> edges;
+        for (int i = 0; i < int(faces.size()); ++i) {
+            HullFace& face = faces[i];
+            if (face.removed ||
+                dot(face.normal, points[eye]) - face.offset <= epsilon)
+                continue;
+            visible.push_back(i);
+            orphaned.insert(orphaned.end(), face.outside.begin(), face.outside.end());
+            uint32_t endpoints[3][2] = {{face.a, face.b}, {face.b, face.c},
+                                        {face.c, face.a}};
+            for (const auto& endpoint : endpoints) {
+                auto found = std::find_if(edges.begin(), edges.end(),
+                    [&](const HorizonEdge& edge) {
+                        return edge.from == endpoint[1] && edge.to == endpoint[0];
+                    });
+                if (found == edges.end()) edges.push_back({endpoint[0], endpoint[1]});
+                else ++found->count;
+            }
+        }
+        for (int index : visible) {
+            faces[index].removed = true;
+            faces[index].outside.clear();
+        }
+        std::vector<int> newFaces;
+        for (const HorizonEdge& edge : edges) {
+            if (edge.count != 1) continue;
+            newFaces.push_back(int(faces.size()));
+            faces.push_back(makeFace(edge.to, edge.from, eye, points, interior));
+        }
+        for (uint32_t point : orphaned) {
+            if (point == eye) continue;
+            int bestFace = -1;
+            float bestDistance = epsilon;
+            for (int face : newFaces) {
+                float distance = dot(faces[face].normal, points[point]) -
+                                 faces[face].offset;
+                if (distance > bestDistance) {
+                    bestDistance = distance;
+                    bestFace = face;
+                }
+            }
+            if (bestFace >= 0) faces[bestFace].outside.push_back(point);
         }
     }
     std::vector<std::array<uint32_t, 3>> triangles;
-    for (const Plane& plane : planes) {
-        std::vector<uint32_t> polygon = planeHull(points, plane, epsilon * 2.0f);
-        for (size_t i = 1; i + 1 < polygon.size(); ++i)
-            triangles.push_back({polygon[0], polygon[i], polygon[i + 1]});
-    }
+    for (const HullFace& face : faces)
+        if (!face.removed) triangles.push_back({face.a, face.b, face.c});
     return triangles;
 }
 

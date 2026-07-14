@@ -125,7 +125,8 @@ closed 3D polytope cannot exist.
   heightfield**, plus locally transformed convex compound bodies under one
   rigid-body handle. Dynamic hulls and uniform-density compounds compute and
   recenter their exact center of mass and full inertia tensor before reducing
-  it to principal moments/axes.
+  it to principal moments/axes. Incremental 3D QuickHull extracts mass faces
+  from arbitrary point clouds without charging interior points combinatorially.
 - **Joints**: ball, distance, hinge, cone/twist, fixed, prismatic, and full
   six-degree-of-freedom constraints. Hinges support torque motors and angle
   limits; prismatic joints support force motors and signed translation limits;

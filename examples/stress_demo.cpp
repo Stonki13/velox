@@ -335,6 +335,40 @@ static void testHull() {
                         velox::Vec3{0, 40, 0}) < 1e-3f;
     ok &= velox::length(exact.inertiaMul({0, 0, 1}) -
                         velox::Vec3{0, 0, 20}) < 1e-3f;
+
+    std::vector<velox::Vec3> denseCloud = shiftedBox;
+    uint32_t randomState = 0x12345678u;
+    auto randomUnit = [&]() {
+        randomState = randomState * 1664525u + 1013904223u;
+        return float((randomState >> 8) & 0xffffu) / 65535.0f;
+    };
+    for (int i = 0; i < 2000; ++i) {
+        denseCloud.push_back({4.0f + (randomUnit() * 2.0f - 1.0f) * 0.95f,
+                              -2.0f + (randomUnit() * 2.0f - 1.0f) * 1.9f,
+                              1.0f + (randomUnit() * 2.0f - 1.0f) * 2.85f});
+    }
+    auto denseHull = massWorld.addConvexHull({}, denseCloud, 12.0f);
+    const velox::Body& dense = massWorld.body(denseHull);
+    ok &= velox::length(dense.position - velox::Vec3{4, -2, 1}) < 1e-4f;
+    ok &= velox::length(dense.inertiaMul({1, 0, 0}) -
+                        velox::Vec3{52, 0, 0}) < 1e-3f;
+
+    std::vector<velox::Vec3> exteriorCloud;
+    for (int i = 0; i < 64; ++i) {
+        velox::Vec3 direction{randomUnit() * 2.0f - 1.0f,
+                              randomUnit() * 2.0f - 1.0f,
+                              randomUnit() * 2.0f - 1.0f};
+        direction = velox::normalize(direction);
+        velox::Vec3 point{direction.x, direction.y * 2.0f,
+                          direction.z * 3.0f};
+        exteriorCloud.push_back(point + velox::Vec3{5, -4, 2});
+        exteriorCloud.push_back(-point + velox::Vec3{5, -4, 2});
+    }
+    auto exteriorHull = massWorld.addConvexHull({}, exteriorCloud, 5.0f);
+    const velox::Body& exterior = massWorld.body(exteriorHull);
+    ok &= velox::length(exterior.position - velox::Vec3{5, -4, 2}) < 1e-3f;
+    ok &= exterior.invInertia.x > 0.0f && exterior.invInertia.y > 0.0f &&
+          exterior.invInertia.z > 0.0f;
     check(ok, "convex hull vs box (broad phase, rest, raycast)");
 }
 
