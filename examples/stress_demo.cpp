@@ -1378,7 +1378,36 @@ static void testGyroscopicIntegration() {
           "gyroscopic integration (momentum, energy, CPU/CUDA parity)");
 }
 
-// 40. Large joint sets stay resident through CUDA solver substeps; mixed
+// 40. Dense CUDA narrow phases replay with an exact larger output allocation
+// rather than silently truncating contacts at the initial capacity estimate.
+static void testDenseContactCapacity() {
+    constexpr int kBodyCount = 80;
+    constexpr size_t kExpectedContacts =
+        size_t(kBodyCount) * size_t(kBodyCount - 1) / 2;
+    velox::World cpu(velox::BackendType::Cpu);
+    velox::World accelerated;
+    cpu.gravity = accelerated.gravity = {};
+    for (int i = 0; i < kBodyCount; ++i) {
+        auto cpuBody = cpu.addSphere({}, 0.5f, 1.0f);
+        auto acceleratedBody = accelerated.addSphere({}, 0.5f, 1.0f);
+        cpu.body(cpuBody).sensor = 1;
+        accelerated.body(acceleratedBody).sensor = 1;
+    }
+    cpu.step(1.0f / 60.0f);
+    accelerated.step(1.0f / 60.0f);
+    bool ok = cpu.lastStepStats().generatedContacts == kExpectedContacts &&
+              accelerated.lastStepStats().generatedContacts ==
+                  kExpectedContacts &&
+              cpu.contactEvents().size() == kExpectedContacts &&
+              accelerated.contactEvents().size() == kExpectedContacts;
+    accelerated.step(1.0f / 60.0f);
+    ok &= accelerated.lastStepStats().generatedContacts == kExpectedContacts &&
+          accelerated.contactEvents().size() == kExpectedContacts;
+
+    check(ok, "dense contact capacity (lossless CUDA buffer growth)");
+}
+
+// 41. Large joint sets stay resident through CUDA solver substeps; mixed
 // constraint types and per-substep breaking must track CPU behavior.
 static void testDeviceJointSubsteps() {
     velox::World cpu(velox::BackendType::Cpu);
@@ -1506,7 +1535,7 @@ static void testDeviceJointSubsteps() {
           "CUDA joint substeps (resident solve and CPU trajectory parity)");
 }
 
-// 41. CPU integration and narrow phase may execute on persistent workers, but
+// 42. CPU integration and narrow phase may execute on persistent workers, but
 // pair-range merging preserves the exact serial contact order and trajectory.
 static void testDeterministicCpuWorkers() {
     velox::World serial(velox::BackendType::Cpu);
@@ -1545,7 +1574,7 @@ static void testDeterministicCpuWorkers() {
     check(ok, "CPU workers (parallel integration/narrow phase, serial replay)");
 }
 
-// 42. Debug geometry is renderer-agnostic and must safely traverse every
+// 43. Debug geometry is renderer-agnostic and must safely traverse every
 // internal storage kind while allowing shapes, AABBs, contacts, and joints to
 // be requested independently.
 static void testDebugLines() {
@@ -1628,6 +1657,7 @@ int main() {
     testWorldSnapshots();
     testStepStats();
     testGyroscopicIntegration();
+    testDenseContactCapacity();
     testDeviceJointSubsteps();
     testDeterministicCpuWorkers();
     testDebugLines();

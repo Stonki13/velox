@@ -169,7 +169,9 @@ closed 3D polytope cannot exist.
 - **CUDA backend**: integration, narrow phase, graph-colored contacts, and
   high-throughput joint sets stay on the GPU through every solver substep
   (CUDA Graphs batching and topology reuse), including per-substep breaking.
-  Small joint sets retain the lower-latency CPU joint path.
+  Contact and broad-phase candidate buffers count-and-grow on overflow instead
+  of dropping dense-scene pairs. Small joint sets retain the lower-latency CPU
+  joint path.
 - Broad phase: sweep-and-prune (CPU), hybrid all-pairs / compacted GPU
   sweep-and-prune (CUDA)
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction

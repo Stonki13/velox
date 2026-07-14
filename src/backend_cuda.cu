@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
+#include <stdexcept>
 
 namespace velox {
 
@@ -237,14 +238,12 @@ public:
         if (bodiesDirty_) uploadBodies(const_cast<std::vector<Body>&>(bodies));
         uploadMeshes(meshes);
 
-        int cap = vmaxContacts(n);
-        if ((size_t)cap * sizeof(Contact) > contactCap_) {
-            release(dContacts_);
-            VELOX_CUDA_CHECK(cudaMalloc(&dContacts_, cap * sizeof(Contact)));
-            contactCap_ = cap * sizeof(Contact);
-        }
+        int cap = initialContactCapacity(n);
+        size_t residentContacts = contactCap_ / sizeof(Contact);
+        if (residentContacts > size_t(cap))
+            cap = static_cast<int>(residentContacts);
+        ensureContactCapacity(cap);
         if (!dCount_) VELOX_CUDA_CHECK(cudaMalloc(&dCount_, sizeof(int)));
-        VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
 
         if ((size_t)n * sizeof(Aabb) > aabbCap_) {
             release(dAabbs_);
@@ -260,21 +259,35 @@ public:
         MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_,
                           dHullPts_, dCompoundChildren_};
         int threads = 256;
+        auto collectContacts = [&](auto&& launch) {
+            int count = 0;
+            for (;;) {
+                VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
+                launch(cap);
+                VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int),
+                                            cudaMemcpyDeviceToHost));
+                if (count < 0)
+                    throw std::length_error("velox: CUDA contact count overflow");
+                if (count <= cap) break;
+                cap = count;
+                ensureContactCapacity(cap);
+            }
+            out.resize(count);
+            if (count > 0)
+                VELOX_CUDA_CHECK(cudaMemcpy(out.data(), dContacts_,
+                                            count * sizeof(Contact),
+                                            cudaMemcpyDeviceToHost));
+        };
         // The brute-force kernel has excellent occupancy for small scenes;
         // radix sorting and candidate compaction pay off only once quadratic
         // rejection dominates. Keep both and switch at the measured crossover.
         if (n < 4096 || std::getenv("VELOX_CUDA_ALL_PAIRS")) {
             long long pairs = (long long)n * (n - 1) / 2;
             long long blocks = (pairs + threads - 1) / threads;
-            allPairsContactsKernel<<<(unsigned)blocks, threads>>>(
-                dBodies_, dAabbs_, n, soup, dt, dContacts_, dCount_, cap);
-            int count = 0;
-            VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int), cudaMemcpyDeviceToHost));
-            count = count < cap ? count : cap;
-            out.resize(count);
-            if (count > 0)
-                VELOX_CUDA_CHECK(cudaMemcpy(out.data(), dContacts_, count * sizeof(Contact),
-                                            cudaMemcpyDeviceToHost));
+            collectContacts([&](int outCap) {
+                allPairsContactsKernel<<<(unsigned)blocks, threads>>>(
+                    dBodies_, dAabbs_, n, soup, dt, dContacts_, dCount_, outCap);
+            });
             bodiesDirty_ = true;
             return;
         }
@@ -305,17 +318,14 @@ public:
                 dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
                 dPairs_, dCount_, candidateCap);
         }
-        VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
-        if (candidateCount > 0)
-            candidateContactsKernel<<<(candidateCount + threads - 1) / threads, threads>>>(
-                dBodies_, dPairs_, candidateCount, soup, dt, dContacts_, dCount_, cap);
-        int count = 0;
-        VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int), cudaMemcpyDeviceToHost));
-        count = count < cap ? count : cap;
-        out.resize(count);
-        if (count > 0)
-            VELOX_CUDA_CHECK(cudaMemcpy(out.data(), dContacts_, count * sizeof(Contact),
-                                        cudaMemcpyDeviceToHost));
+        if (candidateCount > 0) {
+            collectContacts([&](int outCap) {
+                candidateContactsKernel<<<
+                    (candidateCount + threads - 1) / threads, threads>>>(
+                    dBodies_, dPairs_, candidateCount, soup, dt,
+                    dContacts_, dCount_, outCap);
+            });
+        }
         bodiesDirty_ = true; // host may mutate bodies before the solve call
     }
 
@@ -646,11 +656,20 @@ private:
                                     cudaMemcpyHostToDevice));
     }
 
-    static int vmaxContacts(int n) {
-        // Manifold-rich scenes (box stacks) can produce many contacts per
-        // body; dropping any on overflow injects noise, so size generously.
-        int c = n * 24 + 1024;
-        return c < 4 << 20 ? c : 4 << 20;
+    void ensureContactCapacity(int count) {
+        size_t bytes = size_t(count) * sizeof(Contact);
+        if (bytes <= contactCap_) return;
+        release(dContacts_);
+        VELOX_CUDA_CHECK(cudaMalloc(&dContacts_, bytes));
+        contactCap_ = bytes;
+    }
+
+    static int initialContactCapacity(int n) {
+        // Most scenes fit this first allocation. Dense scenes replay after the
+        // count pass with an exact larger allocation, so contacts are never
+        // truncated by this latency/memory heuristic.
+        long long count = (long long)n * 24 + 1024;
+        return static_cast<int>(count < (4 << 20) ? count : (4 << 20));
     }
 
     Body* dBodies_ = nullptr;
