@@ -1,8 +1,9 @@
 // CUDA backend: integration and the full narrow phase (GJK, manifolds, mesh
 // BVH traversal) run on the GPU via the same VELOX_HD code the CPU uses.
-// The contact solver stays on the CPU for now (sequential impulses are
-// inherently serial; a Jacobi/graph-colored GPU solver is on the roadmap).
+// Contact and supported joint constraints use graph-colored device passes;
+// small or unsupported joint workloads retain the lower-latency CPU path.
 #include "narrowphase.h"
+#include "joint_solver.h"
 #include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
@@ -156,6 +157,22 @@ __global__ void warmStartColorKernel(Body* bodies, Contact* contacts,
     warmStartContact(bodies[c.a], bodies[c.b], c);
 }
 
+__global__ void resetJointsKernel(Joint* joints, int count) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k < count) joint_solver::reset(joints[k]);
+}
+
+__global__ void solveJointColorKernel(Body* bodies, Joint* joints,
+                                      int first, int count, float dt) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= count) return;
+    Joint& joint = joints[first + k];
+    Body& a = bodies[joint.a];
+    Body& b = bodies[joint.b];
+    if (a.asleep && b.asleep) return;
+    joint_solver::solve(joint, a, b, dt);
+}
+
 class CudaBackend final : public Backend {
 public:
     static CudaBackend* create() {
@@ -165,7 +182,11 @@ public:
     }
 
     ~CudaBackend() override {
+        // Graph instantiation may leave runtime work outside the solve stream;
+        // drain the device before graph and allocation teardown.
+        VELOX_CUDA_CHECK(cudaDeviceSynchronize());
         if (solveGraph_) cudaGraphExecDestroy(solveGraph_);
+        if (jointGraph_) cudaGraphExecDestroy(jointGraph_);
         if (stream_) cudaStreamDestroy(stream_);
         release(dBodies_);
         release(dAabbs_);
@@ -174,6 +195,7 @@ public:
         release(dPairs_);
         release(dSolve_);
         release(dContacts_);
+        release(dJoints_);
         release(dCount_);
         release(dVertices_);
         release(dIndices_);
@@ -405,33 +427,56 @@ public:
 
     bool advanceSubsteps(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts,
+                         std::vector<Joint>& joints,
                          const Vec3& gravity, float dt,
                          int substeps) override {
-        // Prepare/color contacts and complete substep zero through the regular
-        // path. This preserves identical ordering and warm-start behavior.
+        // Graph construction dominates small constraint sets; the CPU path is
+        // lower latency until enough independent rows amortize the capture.
+        constexpr size_t kDeviceJointThreshold = 64;
+        if (!joints.empty() && joints.size() < kDeviceJointThreshold)
+            return false;
+        for (const Joint& joint : joints)
+            if (!joint_solver::supported(joint)) return false;
+
+        for (const Joint& joint : joints) {
+            if (bodies[joint.a].asleep == bodies[joint.b].asleep) continue;
+            bodies[joint.a].asleep = bodies[joint.b].asleep = 0;
+            bodies[joint.a].sleepTimer = bodies[joint.b].sleepTimer = 0.0f;
+        }
+
         bool hasContacts = !contacts.empty();
         solveVelocities(bodies, contacts, dt, true);
-        for (Body& b : bodies) {
-            if (b.isStatic() || b.asleep) continue;
-            b.position += b.velocity * dt;
-            b.orientation = velox::integrate(b.orientation, b.angularVelocity, dt);
-        }
-        if (substeps <= 1 || bodies.empty()) return true;
+        if (bodies.empty()) return true;
 
         int n = static_cast<int>(bodies.size());
         uploadBodies(bodies);
+        prepareJoints(bodies, joints, dt);
         if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
-        for (int s = 1; s < substeps; ++s) {
+        for (int s = 0; s < substeps; ++s) {
+            if (s > 0)
             integrateKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
                 dBodies_, n, gravity, dt);
-            if (hasContacts && solveGraph_)
+            if (s > 0 && hasContacts && solveGraph_)
                 VELOX_CUDA_CHECK(cudaGraphLaunch(solveGraph_, stream_));
+            if (!joints.empty()) {
+                int jointCount = static_cast<int>(joints.size());
+                resetJointsKernel<<<(jointCount + 127) / 128, 128, 0, stream_>>>(
+                    dJoints_, jointCount);
+                VELOX_CUDA_CHECK(cudaGraphLaunch(jointGraph_, stream_));
+            }
             integrateTransformsKernel<<<(n + 255) / 256, 256, 0, stream_>>>(
                 dBodies_, n, dt);
         }
         VELOX_CUDA_CHECK(cudaMemcpyAsync(bodies.data(), dBodies_, n * sizeof(Body),
                                          cudaMemcpyDeviceToHost, stream_));
         VELOX_CUDA_CHECK(cudaStreamSynchronize(stream_));
+        if (!joints.empty()) {
+            VELOX_CUDA_CHECK(cudaMemcpy(jointSorted_.data(), dJoints_,
+                                       joints.size() * sizeof(Joint),
+                                       cudaMemcpyDeviceToHost));
+            for (size_t i = 0; i < joints.size(); ++i)
+                joints[jointOrder_[i]] = jointSorted_[i];
+        }
         bodiesDirty_ = true;
         return true;
     }
@@ -451,6 +496,10 @@ public:
             cudaGraphExecDestroy(solveGraph_);
             solveGraph_ = nullptr;
         }
+        if (jointGraph_) {
+            cudaGraphExecDestroy(jointGraph_);
+            jointGraph_ = nullptr;
+        }
     }
 
 private:
@@ -466,6 +515,95 @@ private:
             bodyCap_ = bytes;
         }
         VELOX_CUDA_CHECK(cudaMemcpy(dBodies_, bodies.data(), bytes, cudaMemcpyHostToDevice));
+    }
+
+    void prepareJoints(const std::vector<Body>& bodies,
+                       const std::vector<Joint>& joints, float dt) {
+        int count = static_cast<int>(joints.size());
+        if (count == 0) return;
+
+        std::vector<int> previousColorStart = jointColorStart_;
+        std::vector<int> previousOrder = jointOrder_;
+
+        jointColorMask_.assign(bodies.size(), 0);
+        jointNextColor_.assign(bodies.size(), 64);
+        jointColorOf_.resize(count);
+        jointNumColors_ = 0;
+        for (int k = 0; k < count; ++k) {
+            const Joint& joint = joints[k];
+            bool staticA = !bodies[joint.a].isDynamic();
+            bool staticB = !bodies[joint.b].isDynamic();
+            uint64_t used = (staticA ? 0 : jointColorMask_[joint.a]) |
+                            (staticB ? 0 : jointColorMask_[joint.b]);
+            int color;
+            if (~used) {
+                color = 0;
+                while (used & (1ull << color)) ++color;
+            } else {
+                int nextA = staticA ? 64 : jointNextColor_[joint.a];
+                int nextB = staticB ? 64 : jointNextColor_[joint.b];
+                color = nextA > nextB ? nextA : nextB;
+                if (!staticA) jointNextColor_[joint.a] = color + 1;
+                if (!staticB) jointNextColor_[joint.b] = color + 1;
+            }
+            if (color < 64) {
+                if (!staticA) jointColorMask_[joint.a] |= 1ull << color;
+                if (!staticB) jointColorMask_[joint.b] |= 1ull << color;
+            }
+            jointColorOf_[k] = color;
+            if (color + 1 > jointNumColors_) jointNumColors_ = color + 1;
+        }
+
+        jointColorStart_.assign(jointNumColors_ + 1, 0);
+        for (int color : jointColorOf_) ++jointColorStart_[color + 1];
+        for (int c = 0; c < jointNumColors_; ++c)
+            jointColorStart_[c + 1] += jointColorStart_[c];
+        jointFill_ = jointColorStart_;
+        jointSorted_.resize(count);
+        jointOrder_.resize(count);
+        for (int k = 0; k < count; ++k) {
+            int sorted = jointFill_[jointColorOf_[k]]++;
+            jointSorted_[sorted] = joints[k];
+            jointOrder_[sorted] = k;
+        }
+
+        size_t bytes = joints.size() * sizeof(Joint);
+        if (bytes > jointCap_) {
+            release(dJoints_);
+            VELOX_CUDA_CHECK(cudaMalloc(&dJoints_, bytes));
+            jointCap_ = bytes;
+        }
+        VELOX_CUDA_CHECK(cudaMemcpy(dJoints_, jointSorted_.data(), bytes,
+                                    cudaMemcpyHostToDevice));
+        if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
+        bool reusable = jointGraph_ && jointGraphBodies_ == dBodies_ &&
+                        jointGraphJoints_ == dJoints_ && jointGraphDt_ == dt &&
+                        previousColorStart == jointColorStart_ &&
+                        previousOrder == jointOrder_;
+        if (reusable) return;
+        if (jointGraph_) {
+            cudaGraphExecDestroy(jointGraph_);
+            jointGraph_ = nullptr;
+        }
+        cudaGraph_t graph;
+        VELOX_CUDA_CHECK(cudaStreamBeginCapture(stream_,
+                                                cudaStreamCaptureModeGlobal));
+        for (int iteration = 0; iteration < joint_solver::kIterations;
+             ++iteration)
+            for (int color = 0; color < jointNumColors_; ++color) {
+                int first = jointColorStart_[color];
+                int colorCount = jointColorStart_[color + 1] - first;
+                solveJointColorKernel<<<(colorCount + 127) / 128, 128, 0,
+                                        stream_>>>(dBodies_, dJoints_, first,
+                                                   colorCount, dt);
+            }
+        VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
+        VELOX_CUDA_CHECK(cudaGraphInstantiate(&jointGraph_, graph,
+                                              nullptr, nullptr, 0));
+        VELOX_CUDA_CHECK(cudaGraphDestroy(graph));
+        jointGraphBodies_ = dBodies_;
+        jointGraphJoints_ = dJoints_;
+        jointGraphDt_ = dt;
     }
 
     void uploadMeshes(const MeshSoup& m) {
@@ -515,10 +653,12 @@ private:
     int numColors_ = 0;
     cudaStream_t stream_ = nullptr;
     cudaGraphExec_t solveGraph_ = nullptr;
+    cudaGraphExec_t jointGraph_ = nullptr;
     std::vector<int> nextColor_, colorOf_, colorStart_, fill_;
     std::vector<uint64_t> colorMask_;
     std::vector<Contact> sorted_;
     Contact* dContacts_ = nullptr;
+    Joint* dJoints_ = nullptr;
     int* dCount_ = nullptr;
     Vec3* dVertices_ = nullptr;
     uint32_t* dIndices_ = nullptr;
@@ -531,8 +671,17 @@ private:
     size_t compoundChildren_ = ~size_t(0);
     size_t bodyCap_ = 0;
     size_t contactCap_ = 0;
+    size_t jointCap_ = 0;
     size_t meshVerts_ = ~size_t(0), meshNodes_ = ~size_t(0);
     bool bodiesDirty_ = true;
+    int jointNumColors_ = 0;
+    std::vector<int> jointNextColor_, jointColorOf_, jointColorStart_,
+                     jointFill_, jointOrder_;
+    std::vector<uint64_t> jointColorMask_;
+    std::vector<Joint> jointSorted_;
+    Body* jointGraphBodies_ = nullptr;
+    Joint* jointGraphJoints_ = nullptr;
+    float jointGraphDt_ = -1.0f;
 };
 
 } // namespace

@@ -5,11 +5,13 @@
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 static int failures = 0;
 static void check(bool ok, const char* name) {
     std::printf("%-44s %s\n", name, ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
     if (!ok) ++failures;
 }
 
@@ -1073,7 +1075,8 @@ static void testSixDofJoint() {
         locked.body(payload).orientation, {1, 0, 0});
     bool lockOk = velox::length(lockedTranslation) < 0.03f &&
                   velox::length(lockedRotation) < 0.03f &&
-                  velox::length(finalDirection - initialDirection) < 0.03f;
+                  velox::length(finalDirection - initialDirection) < 0.03f &&
+                  !locked.lastStepStats().deviceSubsteps;
 
     velox::World free;
     free.gravity = {0, 0, 0};
@@ -1339,7 +1342,81 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
-// 39. CPU integration and narrow phase may execute on persistent workers, but
+// 39. Large supported joint sets stay resident through CUDA solver substeps;
+// CPU builds and smaller workloads deliberately retain the low-latency path.
+static void testDeviceJointSubsteps() {
+    velox::World cpu(velox::BackendType::Cpu);
+    velox::World accelerated;
+    cpu.gravity = accelerated.gravity = {0, 0, 0};
+    std::vector<velox::BodyId> cpuBodies, acceleratedBodies;
+    auto populate = [](velox::World& world,
+                       std::vector<velox::BodyId>& bodies) {
+        auto anchor = world.addSphere({}, 0.1f, 0.0f);
+        world.body(anchor).maskBits = 0;
+        for (int i = 0; i < 64; ++i) {
+            float x = 2.0f + 1.0f * i;
+            velox::Vec3 position{x, 0, 0};
+            auto body = world.addSphere(position, 0.1f, 1.0f);
+            world.body(body).maskBits = 0;
+            switch (i % 4) {
+            case 0:
+                world.addBallJoint(anchor, body, position);
+                break;
+            case 1:
+                world.addSpringJoint(anchor, body, {}, position, 2.0f, 0.7f);
+                break;
+            case 2:
+                world.addFixedJoint(anchor, body, position);
+                break;
+            default: {
+                auto joint = world.addSixDofJoint(anchor, body, position);
+                world.joint(joint).linearLimitMask =
+                    velox::JointAxisY | velox::JointAxisZ;
+                break;
+            }
+            }
+            world.setLinearVelocity(body, {0.4f, 1.0f, -0.3f});
+            world.setAngularVelocity(body, {0.2f, -0.1f, 0.3f});
+            bodies.push_back(body);
+        }
+    };
+    populate(cpu, cpuBodies);
+    populate(accelerated, acceleratedBodies);
+    for (int step = 0; step < 4; ++step) {
+        cpu.step(1.0f / 60.0f);
+        accelerated.step(1.0f / 60.0f);
+    }
+
+    bool parity = true;
+    for (size_t i = 0; i < cpuBodies.size(); ++i) {
+        const velox::Body& expected = cpu.body(cpuBodies[i]);
+        const velox::Body& actual = accelerated.body(acceleratedBodies[i]);
+        parity &= velox::length(expected.position - actual.position) < 2e-3f &&
+                  velox::length(expected.velocity - actual.velocity) < 2e-3f &&
+                  velox::length(expected.angularVelocity -
+                                actual.angularVelocity) < 2e-3f;
+    }
+    bool cuda = std::string(accelerated.backendName()) == "cuda";
+    bool expectedPath = cuda ? accelerated.lastStepStats().deviceSubsteps :
+                               !accelerated.lastStepStats().deviceSubsteps;
+    velox::World unsupported;
+    unsupported.gravity = {0, 0, 0};
+    auto rail = unsupported.addSphere({}, 0.1f, 0.0f);
+    unsupported.body(rail).maskBits = 0;
+    for (int i = 0; i < 64; ++i) {
+        velox::Vec3 position{2.0f + i, 0, 0};
+        auto body = unsupported.addSphere(position, 0.1f, 1.0f);
+        unsupported.body(body).maskBits = 0;
+        unsupported.addPrismaticJoint(rail, body, position, {1, 0, 0});
+    }
+    unsupported.step(1.0f / 60.0f);
+
+    check(parity && expectedPath && !cpu.lastStepStats().deviceSubsteps &&
+              !unsupported.lastStepStats().deviceSubsteps,
+          "CUDA joint substeps (resident solve and CPU trajectory parity)");
+}
+
+// 40. CPU integration and narrow phase may execute on persistent workers, but
 // pair-range merging preserves the exact serial contact order and trajectory.
 static void testDeterministicCpuWorkers() {
     velox::World serial(velox::BackendType::Cpu);
@@ -1378,7 +1455,7 @@ static void testDeterministicCpuWorkers() {
     check(ok, "CPU workers (parallel integration/narrow phase, serial replay)");
 }
 
-// 40. Debug geometry is renderer-agnostic and must safely traverse every
+// 41. Debug geometry is renderer-agnostic and must safely traverse every
 // internal storage kind while allowing shapes, AABBs, contacts, and joints to
 // be requested independently.
 static void testDebugLines() {
@@ -1460,6 +1537,7 @@ int main() {
     testBreakableJoints();
     testWorldSnapshots();
     testStepStats();
+    testDeviceJointSubsteps();
     testDeterministicCpuWorkers();
     testDebugLines();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."

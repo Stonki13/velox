@@ -1,6 +1,7 @@
-// Velox benchmark: CPU vs CUDA backend on two scenes.
+// Velox benchmark: CPU vs CUDA backend on three scenes.
 //   A) N-sphere rain into a walled floor (dense dynamic-dynamic contact)
 //   B) sphere rain onto a procedurally bumpy triangle-mesh terrain (BVH)
+//   C) independent distance constraints (joint solver throughput)
 #include <velox/velox.h>
 #include <algorithm>
 #include <chrono>
@@ -61,6 +62,19 @@ static void sceneMesh(velox::World& w, int n, int grid) {
     std::printf("  (terrain: %d triangles)\n", (int)idx.size() / 3);
 }
 
+static void sceneJoints(velox::World& w, int n) {
+    w.gravity = {0, 0, 0};
+    auto anchor = w.addSphere({}, 0.1f, 0.0f);
+    w.body(anchor).maskBits = 0;
+    for (int i = 0; i < n; ++i) {
+        float x = 2.0f + i * 0.5f;
+        auto body = w.addSphere({x, 0, 0}, 0.1f, 1.0f);
+        w.body(body).maskBits = 0;
+        w.addDistanceJoint(anchor, body, {}, {x, 0, 0});
+        w.setLinearVelocity(body, {0, 1, 0});
+    }
+}
+
 int main(int argc, char** argv) {
     const int steps = argc > 1 ? std::max(1, std::atoi(argv[1])) : 120;
     std::printf("Velox benchmark — ms per step, %d steps, 60 Hz\n\n", steps);
@@ -105,6 +119,25 @@ int main(int argc, char** argv) {
                 std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
                             configuration.label, w.backendName(),
                             w.workerCount(), ms);
+            } catch (const std::exception& e) {
+                std::printf("  (%s)\n", e.what());
+            }
+        }
+    }
+
+    for (int n : {64, 256, 1024, 4096}) {
+        std::printf("Scene C: %d independent distance joints\n", n);
+        for (const Configuration& configuration : configurations) {
+            try {
+                velox::World w(configuration.backend);
+                if (configuration.backend == velox::BackendType::Cpu)
+                    w.setWorkerCount(configuration.workers);
+                sceneJoints(w, n);
+                float ms = runScene(w, steps);
+                std::printf("  %-8s (%s, %u workers, device=%s) %8.3f ms/step\n",
+                            configuration.label, w.backendName(),
+                            w.workerCount(),
+                            w.lastStepStats().deviceSubsteps ? "yes" : "no", ms);
             } catch (const std::exception& e) {
                 std::printf("  (%s)\n", e.what());
             }

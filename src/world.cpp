@@ -2093,8 +2093,9 @@ void World::step(float dt) {
     // Each substep: gravity, velocity solve against live gaps, joints, and
     // position integration. Warm starting applies only on the first substep;
     // afterwards the accumulated impulses already live in the velocities.
-    bool advancedOnDevice = joints_.empty() &&
-        backend_->advanceSubsteps(bodies_, contacts_, gravity, h, nSub);
+    bool advancedOnDevice = backend_->advanceSubsteps(
+        bodies_, contacts_, joints_, gravity, h, nSub);
+    lastStepStats_.deviceSubsteps = advancedOnDevice;
     if (!advancedOnDevice) {
         for (int s = 0; s < nSub; ++s) {
             if (s > 0) backend_->integrate(bodies_, gravity, h);

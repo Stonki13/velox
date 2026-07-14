@@ -46,11 +46,13 @@ contacts are partitioned so no two contacts in a color share a dynamic body,
 and each color is solved as one fully parallel kernel. CMake auto-detects a
 CUDA toolkit; `World(BackendType::Auto)` picks the GPU when present.
 
-Per-color kernel sweeps are batched with CUDA Graphs (captured once per step,
-replayed per substep), and the coloring is greedy first-free-bit, which keeps
-the color count near the max contacts per body. Worlds without CPU-side joints
-keep velocity integration, contact solving, and transform integration on the
-device across the remaining solver substeps, then download body state once.
+Per-color kernel sweeps are batched with CUDA Graphs, and the coloring is greedy
+first-free-bit, which keeps the color count near the max constraints per body.
+Contact graphs are captured once per step; joint graphs are reused while body
+storage, joint storage, timestep, and constraint topology remain unchanged.
+Worlds without unsupported CPU-side joints keep velocity integration, contact
+and joint solving, and transform integration on the device across all solver
+substeps, then download body state once.
 
 `examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
 (60 Hz steps, full pipeline, 4 solver substeps):
@@ -61,6 +63,14 @@ device across the remaining solver substeps, then download body state once.
 | 2048-sphere rain | 18.07 ms | **5.11 ms** |
 | 8192-sphere rain | 120.30 ms | **52.50 ms** |
 | 2048 spheres on 20k-triangle terrain | 34.83 ms | **10.53 ms** |
+
+The independent-distance-joint scene added to the same benchmark measures the
+new resident constraint path (10-step local Release sample):
+
+| Joints | CPU | CUDA |
+|---|---|---|
+| 1024 | 2.02 ms | **0.69 ms** |
+| 4096 | 8.07 ms | **1.47 ms** |
 
 These are a current local Release run on an RTX 5080. The GPU broad phase is
 hybrid: compact all-pairs culling keeps small scenes highly occupied, while
@@ -131,7 +141,9 @@ closed 3D polytope cannot exist.
   joints, geometry, stable-handle generations, warm starts, sleeping state,
   and event phase while invalidating CPU/CUDA backend caches for exact replay
 - **Frame diagnostics**: body/awake/contact/joint workload counters plus wall
-  timings for setup, collision detection, solving, CCD recovery, and finalization
+  timings for setup, collision detection, solving, CCD recovery, and
+  finalization; `deviceSubsteps` reports whether the complete solver substep
+  loop stayed on the GPU
 - **Debug drawing**: renderer-agnostic colored line lists for collider
   wireframes, compound children, mesh triangles, AABBs, contact normals, and
   joint anchors/axes with independently selectable flags
@@ -148,8 +160,11 @@ closed 3D polytope cannot exist.
   individual manifold points before either backend solves them.
 - GJK narrow phase over support functions (one code path for all convex
   pairs and mesh triangles); **triangle BVH** per mesh (flat, GPU-traversable)
-- **CUDA backend**: integration, narrow phase, and graph-colored contact
-  solver all on the GPU (CUDA Graphs batching)
+- **CUDA backend**: integration, narrow phase, graph-colored contacts, and
+  high-throughput ball/distance/spring/fixed/6DoF joint sets stay on the GPU
+  through every solver substep (CUDA Graphs batching and topology reuse).
+  Small joint sets, hinge/cone-twist/prismatic constraints, and breakable
+  joints currently retain the CPU joint path.
 - Broad phase: sweep-and-prune (CPU), hybrid all-pairs / compacted GPU
   sweep-and-prune (CUDA)
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction

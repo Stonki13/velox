@@ -1,5 +1,5 @@
 #pragma once
-#include "body.h"
+#include "joint.h"
 #include <vector>
 
 namespace velox {
@@ -97,7 +97,9 @@ public:
     // Returns true when all solver substeps and transform integration were
     // completed. CPU and backends requiring host-side constraints return false.
     virtual bool advanceSubsteps(std::vector<Body>&, std::vector<Contact>&,
-                                 const Vec3&, float, int) { return false; }
+                                 std::vector<Joint>&, const Vec3&, float, int) {
+        return false;
+    }
     // Called once after the last substep: backends holding impulses in
     // device memory write the accumulated values back into `contacts` (used
     // for next frame's warm starting). CPU backend solves in place: no-op.
