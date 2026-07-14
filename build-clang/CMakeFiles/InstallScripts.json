@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/Users/adria/Desktop/PHYSIC PLACEHOLDER/build-clang/cmake_install.cmake",
-		"C:/Users/adria/Desktop/PHYSIC PLACEHOLDER/build-clang/examples/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
