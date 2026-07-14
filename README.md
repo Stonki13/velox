@@ -117,8 +117,9 @@ closed 3D polytope cannot exist.
 ## Features
 
 - Full rigid body dynamics: linear + rotational (quaternions, world-space
-  inverse inertia, analytic primitive mass properties, gyroscopic
-  angular-momentum conservation, contact torques)
+  inverse inertia, analytic primitive and convex-polyhedron mass properties,
+  automatic hull center-of-mass recentering, gyroscopic angular-momentum
+  conservation, and contact torques)
 - Colliders: **sphere, box, capsule, cylinder, center-of-mass-correct cone,
   dynamic convex hull, static plane, static triangle mesh, and validated static
   heightfield**, plus locally transformed convex compound bodies under one

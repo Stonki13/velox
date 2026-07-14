@@ -319,6 +319,22 @@ static void testHull() {
               velox::length(b.velocity) < 0.1f;
     auto hit = w.rayCast({b.position.x, 5, b.position.z}, {0, -1, 0}, 10.0f);
     ok &= hit.hit && hit.body == hull;
+
+    velox::World massWorld(velox::BackendType::Cpu);
+    std::vector<velox::Vec3> shiftedBox;
+    for (float x : {-1.0f, 1.0f}) for (float y : {-2.0f, 2.0f})
+        for (float z : {-3.0f, 3.0f})
+            shiftedBox.push_back({x + 4.0f, y - 2.0f, z + 1.0f});
+    shiftedBox.push_back({4.0f, -2.0f, 1.0f}); // Interior input is ignored by mass integration.
+    auto exactHull = massWorld.addConvexHull({10, 20, 30}, shiftedBox, 12.0f);
+    const velox::Body& exact = massWorld.body(exactHull);
+    ok &= velox::length(exact.position - velox::Vec3{14, 18, 31}) < 1e-4f;
+    ok &= velox::length(exact.inertiaMul({1, 0, 0}) -
+                        velox::Vec3{52, 0, 0}) < 1e-3f;
+    ok &= velox::length(exact.inertiaMul({0, 1, 0}) -
+                        velox::Vec3{0, 40, 0}) < 1e-3f;
+    ok &= velox::length(exact.inertiaMul({0, 0, 1}) -
+                        velox::Vec3{0, 0, 20}) < 1e-3f;
     check(ok, "convex hull vs box (broad phase, rest, raycast)");
 }
 

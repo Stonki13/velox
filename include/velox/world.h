@@ -144,8 +144,8 @@ public:
     BodyId addCapsule(Vec3 position, float radius, float halfHeight, float mass);
     BodyId addCylinder(Vec3 position, float radius, float halfHeight, float mass);
     BodyId addCone(Vec3 position, float radius, float height, float mass);
-    // Convex hull from a local-space point cloud (points should already be on
-    // the hull; interior points only cost support-function time).
+    // Convex hull from a local-space point cloud. Interior points are excluded
+    // from mass integration but still cost support-function time.
     BodyId addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass);
     BodyId addCompound(Vec3 position, const std::vector<CompoundShape>& shapes, float mass);
     BodyId addStaticPlane(Vec3 normal, float offset);

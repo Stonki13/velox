@@ -1,4 +1,5 @@
 #include "velox/world.h"
+#include "mass_properties.h"
 #include "narrowphase.h"
 #include <algorithm>
 #include <chrono>
@@ -384,29 +385,32 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     float scale = sqrtf(scale2);
     if (maxPlaneDistance <= scale * scale * scale * 1e-6f)
         throw std::invalid_argument("velox: convex hull points are coplanar");
+    std::vector<Vec3> storedPoints = points;
+    mass_properties::ConvexMassProperties properties;
+    if (mass > 0.0f) {
+        properties = mass_properties::convex(points);
+        for (Vec3& point : storedPoints) point -= properties.center;
+    }
     Body b;
-    b.position = position;
+    b.position = position + (mass > 0.0f ? properties.center : Vec3{});
     b.shape = ShapeType::Hull;
     b.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
-    b.hullCount = static_cast<uint32_t>(points.size());
+    b.hullCount = static_cast<uint32_t>(storedPoints.size());
     b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
-    meshes_.hullPoints.insert(meshes_.hullPoints.end(), points.begin(), points.end());
+    meshes_.hullPoints.insert(meshes_.hullPoints.end(), storedPoints.begin(),
+                              storedPoints.end());
     float r2 = 0.0f;
-    Vec3 lo = points[0], hi = lo;
-    for (const Vec3& p : points) {
+    for (const Vec3& p : storedPoints) {
         r2 = vmax(r2, lengthSq(p));
-        lo = vmin(lo, p);
-        hi = vmax(hi, p);
     }
     b.radius = sqrtf(r2); // bounding radius (AABB + maxPointSpeed)
     b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     if (mass > 0.0f) {
-        // Inertia approximated by the bounding box of the points.
-        Vec3 e = hi - lo;
-        float k = mass / 12.0f;
-        b.invInertia = {1.0f / (k * (e.y * e.y + e.z * e.z) + 1e-9f),
-                        1.0f / (k * (e.x * e.x + e.z * e.z) + 1e-9f),
-                        1.0f / (k * (e.x * e.x + e.y * e.y) + 1e-9f)};
+        float density = mass / float(properties.volume);
+        Vec3 inertia = properties.principalInertia * density;
+        b.invInertia = {1.0f / inertia.x, 1.0f / inertia.y,
+                        1.0f / inertia.z};
+        b.inertiaOrientation = properties.principalOrientation;
     }
     return addBody(b);
 }
