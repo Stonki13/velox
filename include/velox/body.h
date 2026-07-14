@@ -68,7 +68,8 @@ struct Body {
     Vec3 force;
     Vec3 torque;
     float invMass = 1.0f;       // 0 => static / infinite mass
-    Vec3 invInertia;            // body-space diagonal inverse inertia tensor
+    Vec3 invInertia;            // diagonal inverse principal moments
+    Quat inertiaOrientation;    // principal-inertia frame to body-local frame
     float restitution = 0.3f;
     float friction = 0.5f;
     Vec3 frictionScale{1, 1, 1}; // local-space anisotropic multiplier
@@ -107,13 +108,21 @@ struct Body {
     }
     VELOX_HD float solverInvMass() const { return isDynamic() ? invMass : 0.0f; }
 
+    VELOX_HD Quat inertiaFrameAt(const Quat& at) const {
+        if (inertiaOrientation.x == 0.0f && inertiaOrientation.y == 0.0f &&
+            inertiaOrientation.z == 0.0f && inertiaOrientation.w == 1.0f)
+            return at;
+        return mul(at, inertiaOrientation);
+    }
+
     // World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v))
     VELOX_HD Vec3 invInertiaMulAt(const Vec3& v, const Quat& at) const {
         if (!isDynamic()) return {};
-        Vec3 local = rotateInv(at, v);
-        return rotate(at, {local.x * invInertia.x,
-                           local.y * invInertia.y,
-                           local.z * invInertia.z});
+        Quat frame = inertiaFrameAt(at);
+        Vec3 local = rotateInv(frame, v);
+        return rotate(frame, {local.x * invInertia.x,
+                              local.y * invInertia.y,
+                              local.z * invInertia.z});
     }
 
     VELOX_HD Vec3 invInertiaMul(const Vec3& v) const {
@@ -121,12 +130,13 @@ struct Body {
     }
 
     VELOX_HD Vec3 inertiaMul(const Vec3& v) const {
-        Vec3 local = rotateInv(orientation, v);
+        Quat frame = inertiaFrameAt(orientation);
+        Vec3 local = rotateInv(frame, v);
         Vec3 weighted{
             invInertia.x > 0.0f ? local.x / invInertia.x : 0.0f,
             invInertia.y > 0.0f ? local.y / invInertia.y : 0.0f,
             invInertia.z > 0.0f ? local.z / invInertia.z : 0.0f};
-        return rotate(orientation, weighted);
+        return rotate(frame, weighted);
     }
 
     VELOX_HD Vec3 worldAngularMomentum() const {

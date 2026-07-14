@@ -105,6 +105,7 @@ void requireNonNegative(float value, const char* message) {
 
 void validateRuntimeBody(const Body& body) {
     if (!finiteVec(body.position) || !finiteQuat(body.orientation) ||
+        !finiteQuat(body.inertiaOrientation) ||
         !finiteVec(body.velocity) || !finiteVec(body.angularVelocity) ||
         !finiteVec(body.force) || !finiteVec(body.torque) ||
         !finiteFloat(body.invMass) || body.invMass < 0.0f ||
@@ -128,6 +129,13 @@ void validateRuntimeBody(const Body& body) {
                body.orientation.w * body.orientation.w;
     if (!finiteFloat(q2) || q2 < 1e-12f)
         throw std::invalid_argument("velox: body orientation must be a finite non-zero quaternion");
+    float iq2 = body.inertiaOrientation.x * body.inertiaOrientation.x +
+                body.inertiaOrientation.y * body.inertiaOrientation.y +
+                body.inertiaOrientation.z * body.inertiaOrientation.z +
+                body.inertiaOrientation.w * body.inertiaOrientation.w;
+    if (!finiteFloat(iq2) || iq2 < 1e-12f)
+        throw std::invalid_argument(
+            "velox: inertia orientation must be a finite non-zero quaternion");
 }
 
 } // namespace
@@ -746,6 +754,46 @@ void World::setMotionType(BodyId id, MotionType type) {
         b.velocity = {};
         b.angularVelocity = {};
     }
+}
+
+void World::setMassProperties(BodyId id, float mass, Vec3 principalInertia,
+                              Quat principalOrientation) {
+    requirePositive(mass, "velox: body mass must be finite and positive");
+    requireFiniteVec(principalInertia,
+                     "velox: principal inertia must be finite");
+    if (principalInertia.x <= 0.0f || principalInertia.y <= 0.0f ||
+        principalInertia.z <= 0.0f)
+        throw std::invalid_argument(
+            "velox: principal inertia must be positive on every axis");
+    if (!finiteQuat(principalOrientation))
+        throw std::invalid_argument(
+            "velox: principal inertia orientation must be finite");
+    float q2 = principalOrientation.x * principalOrientation.x +
+               principalOrientation.y * principalOrientation.y +
+               principalOrientation.z * principalOrientation.z +
+               principalOrientation.w * principalOrientation.w;
+    if (q2 < 1e-12f)
+        throw std::invalid_argument(
+            "velox: principal inertia orientation must be non-zero");
+    BodyIndex dense = resolve(id);
+    Body& b = bodies_[dense];
+    if (b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh)
+        throw std::invalid_argument(
+            "velox: static-only geometry cannot have mass properties");
+    b.invMass = 1.0f / mass;
+    b.invInertia = {1.0f / principalInertia.x,
+                    1.0f / principalInertia.y,
+                    1.0f / principalInertia.z};
+    b.inertiaOrientation = normalize(principalOrientation);
+    b.asleep = 0;
+    b.sleepTimer = 0.0f;
+    prevContacts_.erase(
+        std::remove_if(prevContacts_.begin(), prevContacts_.end(),
+                       [&](const Contact& contact) {
+                           return contact.a == dense || contact.b == dense;
+                       }),
+        prevContacts_.end());
+    backend_->invalidateCaches();
 }
 
 void World::setTransform(BodyId id, Vec3 position, Quat orientation) {

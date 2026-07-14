@@ -138,7 +138,8 @@ closed 3D polytope cannot exist.
   Per-joint force/torque thresholds support deferred breaking with observable
   break events and generation-safe stale handles.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
-  and torques, point impulses, per-body damping and gravity scaling
+  and torques, point impulses, per-body damping and gravity scaling, and custom
+  mass properties with independently oriented principal-inertia axes
 - **Materials**: average/geometric/minimum/multiply/maximum combine modes,
   body-local anisotropic friction, restitution, and load-bounded rolling and
   spinning resistance; all coefficients are shared by the CPU and CUDA solvers

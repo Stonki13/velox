@@ -588,6 +588,40 @@ static void testForcesAndStateApi() {
     ok &= throwsException([&] {
         w.setTransform(body, {}, {0, 0, 0, 0});
     });
+
+    velox::World principalCpu(velox::BackendType::Cpu);
+    velox::World principalAccelerated;
+    principalCpu.gravity = principalAccelerated.gravity = {};
+    principalCpu.substeps = principalAccelerated.substeps = 1;
+    auto principalCpuBody = principalCpu.addBox({}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    auto principalAcceleratedBody = principalAccelerated.addBox(
+        {}, {0.5f, 0.5f, 0.5f}, 1.0f);
+    velox::Quat principalFrame = velox::fromAxisAngle(
+        {0, 0, 1}, 3.14159265f * 0.5f);
+    principalCpu.setMassProperties(principalCpuBody, 2.0f, {1, 2, 4},
+                                   principalFrame);
+    principalAccelerated.setMassProperties(principalAcceleratedBody, 2.0f,
+                                           {1, 2, 4}, principalFrame);
+    velox::Vec3 inverseX = principalCpu.body(principalCpuBody).invInertiaMul(
+        {1, 0, 0});
+    ok &= std::fabs(principalCpu.body(principalCpuBody).invMass - 0.5f) < 1e-6f;
+    ok &= velox::length(inverseX - velox::Vec3{0.5f, 0, 0}) < 1e-5f;
+    principalCpu.addTorque(principalCpuBody, {1, 0, 0});
+    principalAccelerated.addTorque(principalAcceleratedBody, {1, 0, 0});
+    principalCpu.step(0.1f);
+    principalAccelerated.step(0.1f);
+    ok &= velox::length(principalCpu.body(principalCpuBody).angularVelocity -
+                        principalAccelerated.body(principalAcceleratedBody)
+                            .angularVelocity) < 1e-5f;
+    ok &= std::fabs(principalCpu.body(principalCpuBody).angularVelocity.x -
+                    0.05f) < 1e-5f;
+    ok &= throwsException([&] {
+        principalCpu.setMassProperties(principalCpuBody, 1.0f, {1, 0, 1});
+    });
+    auto plane = principalCpu.addStaticPlane({0, 1, 0}, 0.0f);
+    ok &= throwsException([&] {
+        principalCpu.setMassProperties(plane, 1.0f, {1, 1, 1});
+    });
     check(ok, "forces and state API (impulses, damping, gravity scale)");
 }
 

@@ -165,6 +165,10 @@ public:
     void removeBody(BodyId id); // also removes joints attached to the body
     MotionType motionType(BodyId id) const;
     void setMotionType(BodyId id, MotionType type);
+    // Overrides mass and principal moments/axes without changing motion type.
+    // principalOrientation rotates the principal frame into body-local space.
+    void setMassProperties(BodyId id, float mass, Vec3 principalInertia,
+                           Quat principalOrientation = {});
     void setTransform(BodyId id, Vec3 position, Quat orientation);
     void setLinearVelocity(BodyId id, Vec3 velocity);
     void setAngularVelocity(BodyId id, Vec3 velocity);
