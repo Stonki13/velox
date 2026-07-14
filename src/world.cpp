@@ -80,10 +80,6 @@ Vec3 sixDofRotationVector(const Joint& joint, const Body& a, const Body& b) {
     return v * (angle / sinHalf);
 }
 
-float component(const Vec3& v, int axis) {
-    return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
-}
-
 float& component(Vec3& v, int axis) {
     return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
 }

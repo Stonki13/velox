@@ -1,4 +1,4 @@
-// Scene queries: raycasts and overlap tests against every collider type,
+﻿// Scene queries: raycasts and overlap tests against every collider type,
 // accelerated by the World's incremental broad-phase AABB tree.
 #include "velox/world.h"
 #include "broadphase.h"
@@ -64,15 +64,19 @@ float validateQueryHull(const std::vector<Vec3>& points, Quat orientation) {
     return sqrtf(radius2);
 }
 
-struct LocalHit { bool hit; float t; Vec3 normal; };
+struct LocalHit {
+    bool hit = false;
+    float t = 0.0f;
+    Vec3 normal;
+};
 
 LocalHit raySphere(const Vec3& o, const Vec3& d, const Vec3& center, float r) {
     Vec3 m = o - center;
     float b = dot(m, d);
     float c = dot(m, m) - r * r;
-    if (c > 0.0f && b > 0.0f) return {false};
+    if (c > 0.0f && b > 0.0f) return {};
     float disc = b * b - c;
-    if (disc < 0.0f) return {false};
+    if (disc < 0.0f) return {};
     float t = -b - sqrtf(disc);
     if (t < 0.0f) t = 0.0f;
     Vec3 p = o + d * t;
@@ -82,9 +86,9 @@ LocalHit raySphere(const Vec3& o, const Vec3& d, const Vec3& center, float r) {
 LocalHit rayPlane(const Vec3& o, const Vec3& d, const Vec3& n, float offset) {
     float denom = dot(n, d);
     float dist = dot(n, o) - offset;
-    if (denom > -1e-8f) return {false};        // parallel or exiting
+    if (denom > -1e-8f) return {};        // parallel or exiting
     float t = -dist / denom;
-    if (t < 0.0f) return {false};
+    if (t < 0.0f) return {};
     return {true, t, n};
 }
 
@@ -99,7 +103,7 @@ LocalHit rayBox(const Vec3& o, const Vec3& d, const Body& box) {
     const float hv[3] = {h.x, h.y, h.z};
     for (int i = 0; i < 3; ++i) {
         if (std::fabs(ldv[i]) < 1e-9f) {
-            if (std::fabs(lov[i]) > hv[i]) return {false};
+            if (std::fabs(lov[i]) > hv[i]) return {};
             continue;
         }
         float inv = 1.0f / ldv[i];
@@ -113,7 +117,7 @@ LocalHit rayBox(const Vec3& o, const Vec3& d, const Body& box) {
             (&nLocal.x)[i] = sign;
         }
         if (t2 < tmax) tmax = t2;
-        if (tmin > tmax) return {false};
+        if (tmin > tmax) return {};
     }
     return {true, tmin, rotate(box.orientation, nLocal)};
 }
@@ -150,22 +154,22 @@ LocalHit rayCapsule(const Vec3& o, const Vec3& d, const Body& cap) {
     return best;
 }
 
-// Möller–Trumbore, front and back faces.
+// Moller-Trumbore, front and back faces.
 LocalHit rayTriangle(const Vec3& o, const Vec3& d,
                      const Vec3& v0, const Vec3& v1, const Vec3& v2) {
     Vec3 e1 = v1 - v0, e2 = v2 - v0;
     Vec3 p = cross(d, e2);
     float det = dot(e1, p);
-    if (std::fabs(det) < 1e-12f) return {false};
+    if (std::fabs(det) < 1e-12f) return {};
     float inv = 1.0f / det;
     Vec3 s = o - v0;
     float u = dot(s, p) * inv;
-    if (u < 0.0f || u > 1.0f) return {false};
+    if (u < 0.0f || u > 1.0f) return {};
     Vec3 q = cross(s, e1);
     float v = dot(d, q) * inv;
-    if (v < 0.0f || u + v > 1.0f) return {false};
+    if (v < 0.0f || u + v > 1.0f) return {};
     float t = dot(e2, q) * inv;
-    if (t < 0.0f) return {false};
+    if (t < 0.0f) return {};
     Vec3 n = normalize(cross(e1, e2));
     if (dot(n, d) > 0.0f) n = -n;
     return {true, t, n};
@@ -234,11 +238,11 @@ LocalHit rayConvex(const Vec3& o, const Vec3& d, const Body& body,
         lastNormal = r.normal;
         if (r.distance < 1e-4f) return {true, t, lastNormal};
         float advance = dot(r.normal, -d);   // closing rate along the ray
-        if (advance < 1e-6f) return {false}; // moving away or parallel
+        if (advance < 1e-6f) return {}; // moving away or parallel
         t += r.distance / advance;
-        if (t > maxDist) return {false};
+        if (t > maxDist) return {};
     }
-    return {false};
+    return {};
 }
 
 LocalHit rayBody(const Vec3& origin, const Vec3& dir, const Body& body,
@@ -269,7 +273,7 @@ LocalHit rayBody(const Vec3& origin, const Vec3& dir, const Body& body,
     case ShapeType::Cone:
         return rayConvex(origin, dir, body, soup, maxDist);
     default:
-        return {false};
+        return {};
     }
 }
 

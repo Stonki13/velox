@@ -33,7 +33,7 @@ struct HullFace {
 inline HullFace makeFace(uint32_t a, uint32_t b, uint32_t c,
                          const std::vector<Vec3>& points,
                          const Vec3& interior) {
-    HullFace face{a, b, c};
+    HullFace face{a, b, c, {}, 0.0f, {}, false};
     face.normal = normalize(cross(points[b] - points[a], points[c] - points[a]));
     face.offset = dot(face.normal, points[a]);
     if (dot(face.normal, interior) > face.offset) {

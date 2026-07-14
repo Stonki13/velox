@@ -48,8 +48,11 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
 else()
+    # NOT -ffast-math: it implies -ffinite-math-only, which folds
+    # std::isfinite to a constant and silently deletes every NaN/Inf
+    # validation path (three stress tests fail under Clang with it).
     target_compile_options(velox PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -ffast-math>)
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -fno-math-errno -ffp-contract=fast>)
 endif()
 
 if(VELOX_BUILD_EXAMPLES)

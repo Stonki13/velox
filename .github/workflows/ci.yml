@@ -14,10 +14,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S . -B build -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=ON
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=ON
       - name: Build
         run: cmake --build build --config Release
-      - name: Test
+      - name: Test (stress + fuzz + soak)
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Install package
         run: cmake --install build --config Release --prefix install
+
+  sanitizers:
+    name: Linux / Clang + ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++ -DVELOX_ENABLE_CUDA=OFF
+          -DVELOX_BUILD_EXAMPLES=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Stress suite (sanitized)
+        run: build/examples/stress_demo
+      - name: Fuzz (sanitized, reduced)
+        run: build/examples/fuzz_demo 15
+      - name: Soak (sanitized, reduced)
+        run: build/examples/fuzz_demo soak 3000
