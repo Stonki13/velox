@@ -467,6 +467,31 @@ static void testValidation() {
     });
     ok &= w.bodyCount() == initialCount;
 
+    constexpr float r = 0.5f, halfHeight = 1.0f, mass = 3.0f;
+    auto capsule = w.addCapsule({}, r, halfHeight, mass);
+    float cylinderWeight = 2.0f * halfHeight;
+    float sphereWeight = (4.0f / 3.0f) * r;
+    float cylinderMass = mass * cylinderWeight /
+                         (cylinderWeight + sphereWeight);
+    float sphereMass = mass - cylinderMass;
+    float expectedIy = 0.5f * cylinderMass * r * r +
+                       0.4f * sphereMass * r * r;
+    float expectedIx = cylinderMass *
+                           (3.0f * r * r +
+                            4.0f * halfHeight * halfHeight) /
+                           12.0f +
+                       sphereMass *
+                           (0.4f * r * r + 0.75f * halfHeight * r +
+                            halfHeight * halfHeight);
+    const velox::Body& capsuleBody = w.body(capsule);
+    ok &= std::fabs(capsuleBody.invInertia.x - 1.0f / expectedIx) < 1e-5f;
+    ok &= std::fabs(capsuleBody.invInertia.y - 1.0f / expectedIy) < 1e-5f;
+
+    auto zeroCoreCapsule = w.addCapsule({}, r, 0.0f, mass);
+    auto equalSphere = w.addSphere({}, r, mass);
+    ok &= velox::length(w.body(zeroCoreCapsule).invInertia -
+                        w.body(equalSphere).invInertia) < 1e-6f;
+
     auto ground = w.addStaticPlane({0, 1, 0}, 0.0f);
     auto body = w.addSphere({0, 2, 0}, 0.5f, 1.0f);
     ok &= throwsException([&] { (void)w.body(velox::BodyId::make(9999, 0)); });

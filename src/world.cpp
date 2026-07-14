@@ -275,10 +275,22 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
     b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     if (mass > 0.0f) {
-        // Approximated as a cylinder of the same core length plus end caps.
-        float h = halfHeight * 2.0f, r = radius;
-        float iy = 0.5f * mass * r * r;
-        float ix = mass * (h * h / 12.0f + r * r * 0.25f) + 0.4f * mass * r * r;
+        // Uniform solid capsule: split mass by the volumes of the cylinder
+        // core and the two hemispheres, then apply the parallel-axis theorem.
+        float r = radius;
+        float cylinderWeight = 2.0f * halfHeight;
+        float sphereWeight = (4.0f / 3.0f) * r;
+        float cylinderMass = mass * cylinderWeight /
+                             (cylinderWeight + sphereWeight);
+        float sphereMass = mass - cylinderMass;
+        float iy = 0.5f * cylinderMass * r * r +
+                   0.4f * sphereMass * r * r;
+        float ix = cylinderMass *
+                       (3.0f * r * r + 4.0f * halfHeight * halfHeight) /
+                       12.0f +
+                   sphereMass *
+                       (0.4f * r * r + 0.75f * halfHeight * r +
+                        halfHeight * halfHeight);
         b.invInertia = {1.0f / ix, 1.0f / iy, 1.0f / ix};
     }
     return addBody(b);
