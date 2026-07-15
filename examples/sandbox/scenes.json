@@ -1,0 +1,19 @@
+{
+  "stack": {
+    "boxes": 10,
+    "boxHalfExtent": 0.5
+  },
+  "rain": {
+    "spheres": 200,
+    "sphereRadius": 0.2
+  },
+  "ragdoll": {
+    "bodies": 8,
+    "rampDegrees": 20
+  },
+  "contraption": {
+    "chassis": 1,
+    "wheels": 4,
+    "rampDegrees": 12
+  }
+}
