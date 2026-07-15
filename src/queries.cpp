@@ -293,9 +293,14 @@ QueryGap queryGap(const Body& probe, const Body& target,
     }
     Convex query = makeConvex(probe, soup);
     if (target.shape == ShapeType::Plane) {
-        Vec3 point = query.support(-target.planeNormal);
-        float gap = dot(target.planeNormal, point) - target.planeOffset;
-        return {gap, target.planeNormal, point - target.planeNormal * (0.5f * gap)};
+        // Convex::support returns the core support point. Spheres and
+        // capsules carry their surface radius separately, so account for it
+        // just as the narrow phase and closest-points query do.
+        Vec3 corePoint = query.support(-target.planeNormal);
+        float gap = dot(target.planeNormal, corePoint) - target.planeOffset - query.radius;
+        Vec3 surfacePoint = corePoint - target.planeNormal * query.radius;
+        return {gap, target.planeNormal,
+                surfacePoint - target.planeNormal * (0.5f * gap)};
     }
     if (target.shape == ShapeType::Mesh) {
         float gap = 1e30f;

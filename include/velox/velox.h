@@ -5,3 +5,4 @@
 #include "body.h"
 #include "joint.h"
 #include "world.h"
+#include "character.h"

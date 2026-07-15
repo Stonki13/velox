@@ -24,3 +24,9 @@ endif()
 
 add_executable(proto_manifold proto_manifold.cpp)
 target_link_libraries(proto_manifold PRIVATE velox)
+
+add_executable(character_demo character_demo.cpp)
+target_link_libraries(character_demo PRIVATE velox)
+if(BUILD_TESTING)
+    add_test(NAME velox.character COMMAND character_demo)
+endif()
