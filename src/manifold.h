@@ -55,7 +55,7 @@ VELOX_HD inline uint32_t edgeFeature(uint32_t a, uint32_t b) {
     uint32_t hi = a < b ? b : a;
     // A symmetric, deterministic pair hash. The high tag makes it disjoint
     // from raw vertex ids and face ids while keeping the old 32-bit key format.
-    return kEdgeTag | ((lo * 0x1f123bb5u) ^ (hi * 0x5f356495u)) & 0x1fffffffu;
+    return kEdgeTag | (((lo * 0x1f123bb5u) ^ (hi * 0x5f356495u)) & 0x1fffffffu);
 }
 
 VELOX_HD inline uint32_t faceFeature(const uint32_t* ids, int count) {

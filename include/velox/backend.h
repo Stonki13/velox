@@ -77,6 +77,8 @@ struct Contact {
     float spinningImpulse;
 };
 
+// Cpu is portable across supported Intel and AMD processor hosts. Cuda is an
+// NVIDIA-only accelerator backend; Auto falls back to Cpu when CUDA is absent.
 enum class BackendType { Auto, Cpu, Cuda };
 
 // Compute backend interface. The CPU reference backend lives in solver.cpp;

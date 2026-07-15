@@ -157,8 +157,9 @@ struct BroadPhaseData;
 
 class World {
 public:
-    // Auto picks the CUDA backend when built with VELOX_ENABLE_CUDA and a
-    // device is present, otherwise the CPU backend. Cuda throws if unavailable.
+    // Auto picks the NVIDIA CUDA backend when built with VELOX_ENABLE_CUDA and
+    // a device is present, otherwise the portable CPU backend. Cuda throws if
+    // unavailable.
     explicit World(BackendType type = BackendType::Auto);
     ~World();
 
