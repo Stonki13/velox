@@ -10,8 +10,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(VELOX_BUILD_EXAMPLES "Build example programs" ON)
-option(VELOX_ENABLE_CUDA "Build the CUDA GPU backend if a toolkit is found" ON)
+option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
+set(VELOX_HAS_CUDA 0)
 
 add_library(velox
     src/world.cpp
@@ -33,7 +34,7 @@ if(VELOX_ENABLE_CUDA)
         set(CMAKE_CUDA_STANDARD 17)
         set_property(TARGET velox PROPERTY CUDA_ARCHITECTURES native)
         target_sources(velox PRIVATE src/backend_cuda.cu)
-        target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=1)
+        set(VELOX_HAS_CUDA 1)
         find_package(CUDAToolkit REQUIRED)
         target_link_libraries(velox PUBLIC CUDA::cudart)
         set(VELOX_PACKAGE_NEEDS_CUDA ON)
@@ -43,16 +44,24 @@ if(VELOX_ENABLE_CUDA)
     endif()
 endif()
 
+# Consumers and implementation files must see an explicit value in CPU-only
+# builds too. Undefined preprocessor symbols silently evaluate to zero and can
+# conceal an accidental CUDA-only dependency.
+target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
+
 if(MSVC)
     target_compile_options(velox PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
-else()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang|IntelLLVM")
     # NOT -ffast-math: it implies -ffinite-math-only, which folds
     # std::isfinite to a constant and silently deletes every NaN/Inf
-    # validation path (three stress tests fail under Clang with it).
+    # validation path (three stress tests fail under Clang with it). Keep this
+    # free of -march/-mtune so one CPU build runs on both Intel and AMD hosts.
     target_compile_options(velox PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -fno-math-errno -ffp-contract=fast>)
+else()
+    message(STATUS "velox: no compiler-specific floating-point flags for ${CMAKE_CXX_COMPILER_ID}")
 endif()
 
 if(VELOX_BUILD_EXAMPLES)

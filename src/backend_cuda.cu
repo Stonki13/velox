@@ -232,6 +232,7 @@ public:
         release(dNodes_);
         release(dTriRefs_);
         release(dHullPts_);
+        release(dHullFaceIndices_);
         release(dCompoundChildren_);
     }
 
@@ -279,7 +280,7 @@ public:
                                              dSortedIndices_);
         VELOX_CUDA_LAUNCH_CHECK();
         MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_,
-                          dHullPts_, dCompoundChildren_};
+                          dHullPts_, dHullFaceIndices_, dCompoundChildren_};
         int threads = 256;
         auto collectContacts = [&](auto&& launch) {
             int count = 0;
@@ -542,7 +543,8 @@ public:
 
     void invalidateCaches() override {
         bodiesDirty_ = true;
-        meshVerts_ = meshNodes_ = hullPts_ = compoundChildren_ = (size_t)-1;
+        meshVerts_ = meshNodes_ = hullPts_ = hullFaceIndices_ =
+            compoundChildren_ = (size_t)-1;
         solveCount_ = 0;
         if (solveGraph_) {
             cudaGraphExecDestroy(solveGraph_);
@@ -666,10 +668,12 @@ private:
         // Static geometry: upload once, re-upload only if it grew.
         if (m.vertices.size() == meshVerts_ && m.bvhNodes.size() == meshNodes_ &&
             m.hullPoints.size() == hullPts_ &&
+            m.hullFaceIndices.size() == hullFaceIndices_ &&
             m.compoundChildren.size() == compoundChildren_) return;
         meshVerts_ = m.vertices.size();
         meshNodes_ = m.bvhNodes.size();
         hullPts_ = m.hullPoints.size();
+        hullFaceIndices_ = m.hullFaceIndices.size();
         compoundChildren_ = m.compoundChildren.size();
         upload(dVertices_, m.vertices);
         upload(dIndices_, m.indices);
@@ -677,6 +681,7 @@ private:
         upload(dNodes_, m.bvhNodes);
         upload(dTriRefs_, m.bvhTriRefs);
         upload(dHullPts_, m.hullPoints);
+        upload(dHullFaceIndices_, m.hullFaceIndices);
         upload(dCompoundChildren_, m.compoundChildren);
     }
 
@@ -731,8 +736,10 @@ private:
     BvhNode* dNodes_ = nullptr;
     uint32_t* dTriRefs_ = nullptr;
     Vec3* dHullPts_ = nullptr;
+    uint32_t* dHullFaceIndices_ = nullptr;
     CompoundChild* dCompoundChildren_ = nullptr;
     size_t hullPts_ = ~size_t(0);
+    size_t hullFaceIndices_ = ~size_t(0);
     size_t compoundChildren_ = ~size_t(0);
     size_t bodyCap_ = 0;
     size_t contactCap_ = 0;

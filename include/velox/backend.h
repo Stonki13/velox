@@ -12,6 +12,7 @@ struct MeshSoup {
     std::vector<BvhNode> bvhNodes;   // all meshes' BVHs, concatenated
     std::vector<uint32_t> bvhTriRefs; // leaf -> triangle number within its mesh
     std::vector<Vec3> hullPoints;    // convex hull local-space points
+    std::vector<uint32_t> hullFaceIndices; // triples of local hull-point indices
     std::vector<CompoundChild> compoundChildren;
 };
 
@@ -23,13 +24,14 @@ struct MeshSoupView {
     const BvhNode* bvhNodes;
     const uint32_t* bvhTriRefs;
     const Vec3* hullPoints;
+    const uint32_t* hullFaceIndices;
     const CompoundChild* compoundChildren;
 };
 
 inline MeshSoupView view(const MeshSoup& s) {
     return {s.vertices.data(), s.indices.data(), s.meshes.data(),
             s.bvhNodes.data(), s.bvhTriRefs.data(), s.hullPoints.data(),
-            s.compoundChildren.data()};
+            s.hullFaceIndices.data(), s.compoundChildren.data()};
 }
 
 VELOX_HD inline Body compoundChildBody(const Body& parent,
@@ -43,6 +45,8 @@ VELOX_HD inline Body compoundChildBody(const Body& parent,
     result.capsuleHalfHeight = child.capsuleHalfHeight;
     result.hullFirst = child.hullFirst;
     result.hullCount = child.hullCount;
+    result.hullFaceFirst = child.hullFaceFirst;
+    result.hullFaceCount = child.hullFaceCount;
     result.compoundFirst = result.compoundCount = 0;
     return result;
 }
@@ -73,6 +77,8 @@ struct Contact {
     float spinningImpulse;
 };
 
+// Cpu is portable across supported Intel and AMD processor hosts. Cuda is an
+// NVIDIA-only accelerator backend; Auto falls back to Cpu when CUDA is absent.
 enum class BackendType { Auto, Cpu, Cuda };
 
 // Compute backend interface. The CPU reference backend lives in solver.cpp;

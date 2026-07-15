@@ -10,6 +10,16 @@ namespace velox {
 
 enum class ContactEventType : uint8_t { Begin, Persist, End };
 
+// Stable geometric primitive tags used to form persistent contact keys.
+enum class ContactFeature : uint32_t {
+    None = 0,
+    Vertex = 1u << 0,
+    Edge = 1u << 1,
+    Face = 1u << 2,
+    Implicit = 1u << 30,
+    Triangle = 1u << 31,
+};
+
 // A body pair touching this step. End events carry handles and zero impulse;
 // point/normal retain their default values because the pair no longer meets.
 struct ContactEvent {
@@ -48,6 +58,17 @@ struct ClosestPointResult {
     float distance = 0.0f;
     Vec3 pointA, pointB; // witness points on each body's surface
     Vec3 normal;         // from B towards A
+};
+
+// Computed from the body's current local geometry. Querying by BodyId keeps
+// diagnostics tied to geometry owned by this World and validates stale handles.
+struct GeometryDiagnostics {
+    float minEdgeLength = 0.0f;
+    float maxEdgeLength = 0.0f;
+    float aspectRatio = 1.0f;
+    float volume = 0.0f;
+    bool isDegenerate = false;
+    int nearCoplanarFaceCount = 0;
 };
 
 struct ShapeCastHit {
@@ -136,8 +157,9 @@ struct BroadPhaseData;
 
 class World {
 public:
-    // Auto picks the CUDA backend when built with VELOX_ENABLE_CUDA and a
-    // device is present, otherwise the CPU backend. Cuda throws if unavailable.
+    // Auto picks the NVIDIA CUDA backend when built with VELOX_ENABLE_CUDA and
+    // a device is present, otherwise the portable CPU backend. Cuda throws if
+    // unavailable.
     explicit World(BackendType type = BackendType::Auto);
     ~World();
 
@@ -176,6 +198,7 @@ public:
 
     Body& body(BodyId id);
     const Body& body(BodyId id) const;
+    GeometryDiagnostics queryGeometryDiagnostics(BodyId id) const;
     size_t bodyCount() const { return bodies_.size(); }
     bool isValid(BodyId id) const noexcept;
     void removeBody(BodyId id); // also removes joints attached to the body

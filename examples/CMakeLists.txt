@@ -15,3 +15,12 @@ target_link_libraries(benchmark PRIVATE velox)
 
 add_executable(fuzz_demo fuzz_demo.cpp)
 target_link_libraries(fuzz_demo PRIVATE velox)
+
+add_executable(geometry_fuzz geometry_fuzz.cpp)
+target_link_libraries(geometry_fuzz PRIVATE velox)
+if(BUILD_TESTING)
+    add_test(NAME velox.geometry_fuzz COMMAND geometry_fuzz 1000)
+endif()
+
+add_executable(proto_manifold proto_manifold.cpp)
+target_link_libraries(proto_manifold PRIVATE velox)

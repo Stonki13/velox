@@ -5,6 +5,13 @@ namespace velox::joint_solver {
 
 constexpr int kIterations = 8;
 constexpr float kBeta = 0.2f;
+constexpr float kMaxPositionBias = 10.0f;
+
+VELOX_HD inline Vec3 clampPositionBias(const Vec3& bias) {
+    float magnitudeSq = lengthSq(bias);
+    if (magnitudeSq <= kMaxPositionBias * kMaxPositionBias) return bias;
+    return bias * (kMaxPositionBias / sqrtf(magnitudeSq));
+}
 
 struct Mat3 {
     Vec3 c0, c1, c2;
@@ -311,7 +318,7 @@ VELOX_HD inline void solveHinge(Joint& joint, Body& a, Body& b,
                                 const Vec3& ra, const Vec3& rb,
                                 const Vec3& pa, const Vec3& pb, float dt) {
     Vec3 velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
-    Vec3 bias = (pa - pb) * (kBeta / dt);
+    Vec3 bias = clampPositionBias((pa - pb) * (kBeta / dt));
     Vec3 impulse = mul(inverse(pointMass(a, b, ra, rb)),
                        -(velocity + bias));
     applyLinear(joint, a, b, ra, rb, impulse, 1.0f);

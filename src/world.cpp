@@ -1,5 +1,6 @@
 #include "velox/world.h"
 #include "broadphase.h"
+#include "geometry_diagnostics.h"
 #include "mass_properties.h"
 #include "narrowphase.h"
 #include <algorithm>
@@ -17,6 +18,14 @@ bool finiteVec(const Vec3& v) {
 bool finiteQuat(const Quat& q) {
     return finiteFloat(q.x) && finiteFloat(q.y) &&
            finiteFloat(q.z) && finiteFloat(q.w);
+}
+
+void rejectDuplicateHullPoints(const std::vector<Vec3>& points, const char* message) {
+    constexpr float kDuplicateDistanceSq = 1e-16f;
+    for (size_t i = 0; i < points.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (lengthSq(points[i] - points[j]) <= kDuplicateDistanceSq)
+                throw std::invalid_argument(message);
 }
 
 bool validCombineMode(MaterialCombineMode mode) {
@@ -226,6 +235,10 @@ const Body& World::body(BodyId id) const {
     return bodies_[resolve(id)];
 }
 
+GeometryDiagnostics World::queryGeometryDiagnostics(BodyId id) const {
+    return geometry_detail::diagnostics(bodies_[resolve(id)], meshes_);
+}
+
 Joint& World::joint(JointId id) {
     return joints_[resolve(id)];
 }
@@ -359,6 +372,8 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
         throw std::invalid_argument("velox: convex hull has too many points");
     for (const Vec3& p : points)
         requireFiniteVec(p, "velox: convex hull points must be finite");
+    rejectDuplicateHullPoints(points,
+                              "velox: convex hull contains duplicate points");
 
     // Reject point, line, and plane clouds. GJK can represent them, but they
     // have zero volume and cannot produce valid 3D mass properties or EPA seeds.
@@ -388,9 +403,8 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     if (maxPlaneDistance <= scale * scale * scale * 1e-6f)
         throw std::invalid_argument("velox: convex hull points are coplanar");
     std::vector<Vec3> storedPoints = points;
-    mass_properties::ConvexMassProperties properties;
+    mass_properties::ConvexMassProperties properties = mass_properties::convex(points);
     if (mass > 0.0f) {
-        properties = mass_properties::convex(points);
         for (Vec3& point : storedPoints) point -= properties.center;
     }
     Body b;
@@ -398,9 +412,18 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     b.shape = ShapeType::Hull;
     b.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
     b.hullCount = static_cast<uint32_t>(storedPoints.size());
+    if (properties.triangles.size() > UINT32_MAX / 3 ||
+        meshes_.hullFaceIndices.size() >
+            UINT32_MAX - properties.triangles.size() * 3)
+        throw std::length_error("velox: convex hull face capacity exceeded");
+    b.hullFaceFirst = static_cast<uint32_t>(meshes_.hullFaceIndices.size());
+    b.hullFaceCount = static_cast<uint32_t>(properties.triangles.size());
     b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     meshes_.hullPoints.insert(meshes_.hullPoints.end(), storedPoints.begin(),
                               storedPoints.end());
+    for (const auto& triangle : properties.triangles)
+        meshes_.hullFaceIndices.insert(meshes_.hullFaceIndices.end(),
+                                       triangle.begin(), triangle.end());
     float r2 = 0.0f;
     for (const Vec3& p : storedPoints) {
         r2 = vmax(r2, lengthSq(p));
@@ -429,6 +452,7 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
 
     std::vector<CompoundChild> children;
     std::vector<Vec3> hullPoints;
+    std::vector<uint32_t> hullFaceIndices;
     struct ChildMassData {
         double volume = 0.0;
         Vec3 principalInertia;
@@ -565,6 +589,8 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             for (const Vec3& p : shape.hullPoints) {
                 requireFiniteVec(p, "velox: compound hull points must be finite");
             }
+            rejectDuplicateHullPoints(
+                shape.hullPoints, "velox: compound hull contains duplicate points");
             const Vec3 p0 = shape.hullPoints[0];
             float scale2 = 0.0f;
             size_t i1 = 0;
@@ -594,9 +620,18 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             child.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size() +
                                                     hullPoints.size());
             child.hullCount = static_cast<uint32_t>(shape.hullPoints.size());
+            mass_properties::ConvexMassProperties hullProperties =
+                mass_properties::convex(shape.hullPoints);
+            if (hullProperties.triangles.size() > UINT32_MAX / 3 ||
+                meshes_.hullFaceIndices.size() + hullFaceIndices.size() >
+                    UINT32_MAX - hullProperties.triangles.size() * 3)
+                throw std::length_error("velox: compound hull face capacity exceeded");
+            child.hullFaceFirst = static_cast<uint32_t>(meshes_.hullFaceIndices.size() +
+                                                        hullFaceIndices.size());
+            child.hullFaceCount = static_cast<uint32_t>(hullProperties.triangles.size());
+            for (const auto& triangle : hullProperties.triangles)
+                hullFaceIndices.insert(hullFaceIndices.end(), triangle.begin(), triangle.end());
             if (mass > 0.0f) {
-                mass_properties::ConvexMassProperties hullProperties =
-                    mass_properties::convex(shape.hullPoints);
                 child.localPosition += rotate(child.localOrientation,
                                               hullProperties.center);
                 massData.volume = hullProperties.volume;
@@ -675,6 +710,8 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
                            1.0f / inertia.z};
     }
     meshes_.hullPoints.insert(meshes_.hullPoints.end(), hullPoints.begin(), hullPoints.end());
+    meshes_.hullFaceIndices.insert(meshes_.hullFaceIndices.end(),
+                                   hullFaceIndices.begin(), hullFaceIndices.end());
     meshes_.compoundChildren.insert(meshes_.compoundChildren.end(),
                                     children.begin(), children.end());
     return addBody(body);
@@ -1548,6 +1585,13 @@ Vec3 anchorVelocity(const Body& x, const Vec3& r) {
     return x.velocity + cross(x.angularVelocity, r);
 }
 
+Vec3 clampJointPositionBias(const Vec3& bias) {
+    constexpr float kMaxPositionBias = 10.0f;
+    float magnitudeSq = lengthSq(bias);
+    if (magnitudeSq <= kMaxPositionBias * kMaxPositionBias) return bias;
+    return bias * (kMaxPositionBias / std::sqrt(magnitudeSq));
+}
+
 void applyImpulse(Body& x, const Vec3& r, const Vec3& P, float sign) {
     if (!x.isDynamic()) return;
     x.velocity += P * (sign * x.solverInvMass());
@@ -1898,7 +1942,7 @@ void World::solveJoints(float dt) {
             }
             case JointType::Hinge: {
                 // Point constraint...
-                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 bias = clampJointPositionBias((pa - pb) * (kBeta / dt));
                 Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
                 applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
                 // ...plus two angular rows keeping the axes aligned.
@@ -2177,7 +2221,10 @@ void World::step(float dt) {
             break;
         case ShapeType::Hull:
             if (body.hullCount < 4 || (size_t)body.hullFirst + body.hullCount >
-                                        meshes_.hullPoints.size())
+                                        meshes_.hullPoints.size() ||
+                body.hullFaceCount == 0 ||
+                (size_t)body.hullFaceFirst + size_t(body.hullFaceCount) * 3 >
+                    meshes_.hullFaceIndices.size())
                 throw std::out_of_range("velox: hull body references invalid point storage");
             break;
         case ShapeType::Compound:

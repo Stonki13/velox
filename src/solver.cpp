@@ -314,7 +314,11 @@ private:
     size_t chunkCount(size_t items, size_t parallelThreshold) const {
         if (items == 0 || items < parallelThreshold || workers_.workerCount() == 1)
             return items == 0 ? 0 : 1;
-        return std::min(items, size_t(workers_.workerCount()) * 4);
+        // Tiny chunks cost more in worker synchronization than they save. Cap
+        // the fan-out by useful work as well as by available CPU workers.
+        constexpr size_t kMinItemsPerChunk = 128;
+        size_t usefulChunks = (items + kMinItemsPerChunk - 1) / kMinItemsPerChunk;
+        return std::min({items, size_t(workers_.workerCount()), usefulChunks});
     }
 
     template <typename F>
