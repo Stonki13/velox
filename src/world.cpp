@@ -1548,6 +1548,13 @@ Vec3 anchorVelocity(const Body& x, const Vec3& r) {
     return x.velocity + cross(x.angularVelocity, r);
 }
 
+Vec3 clampJointPositionBias(const Vec3& bias) {
+    constexpr float kMaxPositionBias = 10.0f;
+    float magnitudeSq = lengthSq(bias);
+    if (magnitudeSq <= kMaxPositionBias * kMaxPositionBias) return bias;
+    return bias * (kMaxPositionBias / std::sqrt(magnitudeSq));
+}
+
 void applyImpulse(Body& x, const Vec3& r, const Vec3& P, float sign) {
     if (!x.isDynamic()) return;
     x.velocity += P * (sign * x.solverInvMass());
@@ -1898,7 +1905,7 @@ void World::solveJoints(float dt) {
             }
             case JointType::Hinge: {
                 // Point constraint...
-                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 bias = clampJointPositionBias((pa - pb) * (kBeta / dt));
                 Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
                 applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
                 // ...plus two angular rows keeping the axes aligned.

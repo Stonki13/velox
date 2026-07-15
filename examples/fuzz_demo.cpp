@@ -135,6 +135,7 @@ struct SceneResult {
     bool ok = true;
     const char* failure = nullptr;
     int failStep = -1;
+    int failBody = -1;
     std::vector<velox::Vec3> finalPositions; // determinism fingerprint
 };
 
@@ -153,13 +154,15 @@ SceneResult runScene(uint32_t seed, int steps) {
 
     for (int s = 0; s < steps; ++s) {
         w.step(1.0f / 60.0f);
-        for (const BodyRecord& record : bodies) {
+        for (size_t index = 0; index < bodies.size(); ++index) {
+            const BodyRecord& record = bodies[index];
             const velox::Body& b = w.body(record.id);
             if (!finite(b.position) || !finite(b.velocity) ||
                 !finite(b.angularVelocity) || !std::isfinite(b.orientation.w)) {
                 result.ok = false;
                 result.failure = "non-finite body state";
                 result.failStep = s;
+                result.failBody = (int)index;
                 return result;
             }
             // Tunneling: a body's center below the plane by more than its
@@ -168,12 +171,20 @@ SceneResult runScene(uint32_t seed, int steps) {
                 result.ok = false;
                 result.failure = "tunneled through ground plane";
                 result.failStep = s;
+                result.failBody = (int)index;
+                std::printf("  body shape=%u p=(%.3f %.3f %.3f) v=(%.3f %.3f %.3f)\n",
+                            (unsigned)b.shape, b.position.x, b.position.y, b.position.z,
+                            b.velocity.x, b.velocity.y, b.velocity.z);
                 return result;
             }
             if (velox::length(b.velocity) > speedBound) {
                 result.ok = false;
                 result.failure = "energy explosion (speed bound exceeded)";
                 result.failStep = s;
+                result.failBody = (int)index;
+                std::printf("  body shape=%u p=(%.3f %.3f %.3f) v=(%.3f %.3f %.3f)\n",
+                            (unsigned)b.shape, b.position.x, b.position.y, b.position.z,
+                            b.velocity.x, b.velocity.y, b.velocity.z);
                 return result;
             }
         }
@@ -190,8 +201,8 @@ int runFuzz(int scenes, uint32_t baseSeed) {
         uint32_t seed = baseSeed + (uint32_t)scene * 2654435761u;
         SceneResult a = runScene(seed, 150);
         if (!a.ok) {
-            std::printf("FUZZ FAIL scene=%d seed=%u step=%d: %s\n",
-                        scene, seed, a.failStep, a.failure);
+            std::printf("FUZZ FAIL scene=%d seed=%u step=%d body=%d: %s\n",
+                        scene, seed, a.failStep, a.failBody, a.failure);
             ++failures;
             continue;
         }

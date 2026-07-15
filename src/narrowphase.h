@@ -1,6 +1,7 @@
 #pragma once
 #include "velox/backend.h"
 #include "gjk.h"
+#include "manifold.h"
 
 // Shared narrow phase, header-only and VELOX_HD: the CPU backend and the CUDA
 // kernels execute this exact code. Contacts are written into a caller-provided
@@ -327,7 +328,6 @@ VELOX_HD inline void planeConvex(const Body& conv, const Body& plane,
                     bestGap = g; bestP = p; bestIndex = i;
                 }
             }
-            if (bestGap > 0.1f) break; // rest are far from the plane
             selected[selectedCount++] = bestIndex;
             emit(conv, plane, ic, ip, pn, bestP, bestGap, dt, out, cap, n,
                  contactFeatureKey(bestIndex, kFaceFeature));
@@ -400,119 +400,51 @@ VELOX_HD inline void convexConvex(const Body& a, const Body& b, BodyIndex ia, Bo
     Convex ca = makeConvex(a, soup), cb = makeConvex(b, soup);
     GjkResult r = gjkDistance(ca, cb);
 
-    // A single GJK witness is not a stable resting manifold for a hull face.
-    // Emit up to four hull vertices on the near-support plane. This keeps the
-    // response data-oriented (no face topology required) while giving both
-    // the sequential CPU solver and graph-colored GPU solver enough torque
-    // constraints to settle a face instead of repeatedly hitting one point.
-    if ((a.shape == ShapeType::Hull || b.shape == ShapeType::Hull) &&
-        r.distance < 0.05f) {
-        const bool hullIsA = a.shape == ShapeType::Hull;
-        const Body& hull = hullIsA ? a : b;
-        const Vec3* pts = soup.hullPoints + hull.hullFirst;
-        uint32_t selected[4]{};
-        int selectedCount = 0;
-        float reference = hullIsA ? dot(r.normal, cb.support(r.normal))
-                                  : dot(r.normal, ca.support(-r.normal));
-        for (int pick = 0; pick < 4 && pick < (int)hull.hullCount; ++pick) {
-            uint32_t best = 0;
-            float bestGap = 1e30f;
-            Vec3 bestPoint{};
-            bool found = false;
-            for (uint32_t i = 0; i < hull.hullCount; ++i) {
-                bool used = false;
-                for (int k = 0; k < selectedCount; ++k)
-                    if (selected[k] == i) used = true;
-                if (used) continue;
-                Vec3 p = hull.position + rotate(hull.orientation, pts[i]);
-                float gap = hullIsA ? dot(r.normal, p) - reference
-                                    : reference - dot(r.normal, p);
-                if (gap < bestGap) {
-                    best = i;
-                    bestGap = gap;
-                    bestPoint = p;
-                    found = true;
-                }
-            }
-            if (!found || bestGap > r.distance + 0.02f) break;
-            selected[selectedCount++] = best;
-            uint64_t feature = hullIsA
-                ? contactFeatureKey(best, kImplicitFeature)
-                : contactFeatureKey(kImplicitFeature, best);
-            emit(a, b, ia, ib, r.normal, bestPoint, bestGap, dt, out, cap, n, feature);
-        }
-        if (n > 0) return;
-    }
-
-    if (a.shape == ShapeType::Box && b.shape == ShapeType::Box && r.distance < 0.05f) {
-        // Between parallel box faces the GJK witness pair is ill-defined (any
-        // opposing points are equally close), so its normal can tilt with
-        // floating-point noise and slowly shove stacks sideways. Test the 6
-        // face normals as separating axes; if one explains the separation,
-        // snap the contact normal to it and build the manifold from vertices
-        // against that face plane — deterministic geometry, no witness points.
-        Vec3 nrm = r.normal;
-        float best = -1e30f;
-        uint32_t referenceFeature = kFaceFeature;
-        for (int side = 0; side < 2; ++side) {
-            const Body& box = side ? b : a;
-            for (int ax = 0; ax < 3; ++ax) {
-                Vec3 axis = rotate(box.orientation,
-                                   {ax == 0 ? 1.0f : 0.0f, ax == 1 ? 1.0f : 0.0f,
-                                    ax == 2 ? 1.0f : 0.0f});
-                if (dot(axis, a.position - b.position) < 0.0f) axis = -axis;
-                float sep = dot(axis, ca.support(-axis) - cb.support(axis));
-                if (sep > best) {
-                    best = sep;
-                    nrm = axis;
-                    referenceFeature = kFaceFeature | (uint32_t)(side * 3 + ax);
+    // Face clipping replaces sampled support points for planar Box/Hull
+    // contacts. For boxes, snap nearly parallel faces to a geometric axis
+    // before clipping: GJK witnesses on parallel faces are underdetermined.
+    if (r.distance < 0.05f &&
+        ((a.shape == ShapeType::Box || a.shape == ShapeType::Hull) &&
+         (b.shape == ShapeType::Box || b.shape == ShapeType::Hull))) {
+        Vec3 manifoldNormal = r.normal;
+        if (a.shape == ShapeType::Box && b.shape == ShapeType::Box) {
+            float best = -1e30f;
+            for (int side = 0; side < 2; ++side) {
+                const Body& box = side ? b : a;
+                for (int axis = 0; axis < 3; ++axis) {
+                    Vec3 candidate = rotate(box.orientation,
+                        {axis == 0 ? 1.0f : 0.0f, axis == 1 ? 1.0f : 0.0f,
+                         axis == 2 ? 1.0f : 0.0f});
+                    if (dot(candidate, a.position - b.position) < 0.0f)
+                        candidate = -candidate;
+                    float separation = dot(candidate,
+                        ca.support(-candidate) - cb.support(candidate));
+                    if (separation > best) {
+                        best = separation;
+                        manifoldNormal = candidate;
+                    }
                 }
             }
         }
-        if (best < 0.05f) {
-            // Select one incident face. Emitting vertices from both boxes
-            // creates eight nearly duplicate constraints while speculative
-            // faces are still separated, biasing the sequential solver.
-            float refB = dot(nrm, cb.support(nrm));   // B surface along +nrm
-            float refA = dot(nrm, ca.support(-nrm));  // A surface along -nrm
-            Vec3 ptsA[8], ptsB[8];
-            float gapsA[8], gapsB[8];
-            uint32_t idsA[8], idsB[8];
-            int countA = 0, countB = 0;
-            for (int i = 0; i < 8; ++i) {
-                Vec3 v;
-                boxVertex(a, i, v);
-                float gap = dot(nrm, v) - refB;
-                if (gap < best + 0.02f) {
-                    ptsA[countA] = v;
-                    gapsA[countA++] = gap;
-                    idsA[countA - 1] = (uint32_t)i;
-                }
-                boxVertex(b, i, v);
-                gap = refA - dot(nrm, v);
-                if (gap < best + 0.02f) {
-                    ptsB[countB] = v;
-                    gapsB[countB++] = gap;
-                    idsB[countB - 1] = (uint32_t)i;
-                }
+        Manifold manifold{};
+        int pointCount = clipFaceManifold(ca, cb, manifoldNormal, &manifold);
+        if (pointCount > 0) {
+            bool emitted = false;
+            for (int i = 0; i < pointCount && n < cap; ++i) {
+                const ManifoldPoint& mp = manifold.points[i];
+                uint64_t featureKey = computeFeatureKey(mp.featureIdA, mp.featureIdB);
+                // Anchors are regenerated from this frame's witness midpoint.
+                // Only the impulses are warm-started by the stable key, never
+                // a previous frame's world-space anchor or penetration depth.
+                emit(a, b, ia, ib, mp.normal, (mp.pointA + mp.pointB) * 0.5f,
+                     mp.gap, dt, out, cap, n, featureKey);
+                emitted = true;
             }
-            bool useA = countA >= countB;
-            int count = useA ? countA : countB;
-            const int balancedOrder[4] = {0, 3, 1, 2};
-            for (int k = 0; k < count && k < 4; ++k) {
-                int i = count >= 4 ? balancedOrder[k] : k;
-                float gap = useA ? gapsA[i] : gapsB[i];
-                Vec3 p = useA ? ptsA[i] - nrm * (gap * 0.5f)
-                              : ptsB[i] + nrm * (gap * 0.5f);
-                uint64_t feature = useA
-                    ? contactFeatureKey(idsA[i], referenceFeature)
-                    : contactFeatureKey(referenceFeature, idsB[i]);
-                emit(a, b, ia, ib, nrm, p, gap, dt, out, cap, n, feature);
-            }
-            if (count > 0) return;
+            if (emitted) return;
         }
     }
 
+    // Fallback: single GJK witness for non-Box/Hull pairs or when manifold generation fails.
     emit(a, b, ia, ib, r.normal, (r.pointA + r.pointB) * 0.5f, r.distance, dt, out, cap, n);
 }
 

@@ -10,6 +10,16 @@ namespace velox {
 
 enum class ContactEventType : uint8_t { Begin, Persist, End };
 
+// Stable geometric primitive tags used to form persistent contact keys.
+enum class ContactFeature : uint32_t {
+    None = 0,
+    Vertex = 1u << 0,
+    Edge = 1u << 1,
+    Face = 1u << 2,
+    Implicit = 1u << 30,
+    Triangle = 1u << 31,
+};
+
 // A body pair touching this step. End events carry handles and zero impulse;
 // point/normal retain their default values because the pair no longer meets.
 struct ContactEvent {

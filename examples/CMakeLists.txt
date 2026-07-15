@@ -15,3 +15,6 @@ target_link_libraries(benchmark PRIVATE velox)
 
 add_executable(fuzz_demo fuzz_demo.cpp)
 target_link_libraries(fuzz_demo PRIVATE velox)
+
+add_executable(proto_manifold proto_manifold.cpp)
+target_link_libraries(proto_manifold PRIVATE velox)
