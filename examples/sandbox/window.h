@@ -13,7 +13,6 @@ public:
     Window& operator=(const Window&) = delete;
 
     void pollEvents() const;
-    void swapBuffers() const;
     bool shouldClose() const;
     int width() const { return width_; }
     int height() const { return height_; }
