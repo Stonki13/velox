@@ -1,5 +1,6 @@
 #include "velox/world.h"
 #include "broadphase.h"
+#include "geometry_diagnostics.h"
 #include "mass_properties.h"
 #include "narrowphase.h"
 #include <algorithm>
@@ -17,6 +18,14 @@ bool finiteVec(const Vec3& v) {
 bool finiteQuat(const Quat& q) {
     return finiteFloat(q.x) && finiteFloat(q.y) &&
            finiteFloat(q.z) && finiteFloat(q.w);
+}
+
+void rejectDuplicateHullPoints(const std::vector<Vec3>& points, const char* message) {
+    constexpr float kDuplicateDistanceSq = 1e-16f;
+    for (size_t i = 0; i < points.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (lengthSq(points[i] - points[j]) <= kDuplicateDistanceSq)
+                throw std::invalid_argument(message);
 }
 
 bool validCombineMode(MaterialCombineMode mode) {
@@ -226,6 +235,10 @@ const Body& World::body(BodyId id) const {
     return bodies_[resolve(id)];
 }
 
+GeometryDiagnostics World::queryGeometryDiagnostics(BodyId id) const {
+    return geometry_detail::diagnostics(bodies_[resolve(id)], meshes_);
+}
+
 Joint& World::joint(JointId id) {
     return joints_[resolve(id)];
 }
@@ -359,6 +372,8 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
         throw std::invalid_argument("velox: convex hull has too many points");
     for (const Vec3& p : points)
         requireFiniteVec(p, "velox: convex hull points must be finite");
+    rejectDuplicateHullPoints(points,
+                              "velox: convex hull contains duplicate points");
 
     // Reject point, line, and plane clouds. GJK can represent them, but they
     // have zero volume and cannot produce valid 3D mass properties or EPA seeds.
@@ -574,6 +589,8 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             for (const Vec3& p : shape.hullPoints) {
                 requireFiniteVec(p, "velox: compound hull points must be finite");
             }
+            rejectDuplicateHullPoints(
+                shape.hullPoints, "velox: compound hull contains duplicate points");
             const Vec3 p0 = shape.hullPoints[0];
             float scale2 = 0.0f;
             size_t i1 = 0;

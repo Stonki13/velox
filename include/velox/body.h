@@ -30,6 +30,10 @@ enum class ShapeType : uint8_t {
     Sphere, Plane, Box, Capsule, Mesh, Hull, Compound, Cylinder, Cone
 };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
+// Controls the amount of numerical work spent on this body's convex geometry.
+// Robust and Paranoid are intended for imported or fuzzed geometry; the value
+// remains plain data so CPU and CUDA consume the same body representation.
+enum class GeometryQuality : uint8_t { Normal, Robust, Paranoid };
 // When two modes differ, the mode later in this enum takes precedence.
 enum class MaterialCombineMode : uint8_t {
     Average, GeometricMean, Minimum, Multiply, Maximum
@@ -82,6 +86,7 @@ struct Body {
     float angularDamping = 0.0f;
     float gravityScale = 1.0f;
     MotionType motionType = MotionType::Dynamic;
+    GeometryQuality geometryQuality = GeometryQuality::Normal;
     uint32_t categoryBits = 1u;
     uint32_t maskBits = UINT32_MAX;
     uint8_t sensor = 0;

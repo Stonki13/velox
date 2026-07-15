@@ -60,6 +60,17 @@ struct ClosestPointResult {
     Vec3 normal;         // from B towards A
 };
 
+// Computed from the body's current local geometry. Querying by BodyId keeps
+// diagnostics tied to geometry owned by this World and validates stale handles.
+struct GeometryDiagnostics {
+    float minEdgeLength = 0.0f;
+    float maxEdgeLength = 0.0f;
+    float aspectRatio = 1.0f;
+    float volume = 0.0f;
+    bool isDegenerate = false;
+    int nearCoplanarFaceCount = 0;
+};
+
 struct ShapeCastHit {
     bool hit = false;
     BodyId body;
@@ -186,6 +197,7 @@ public:
 
     Body& body(BodyId id);
     const Body& body(BodyId id) const;
+    GeometryDiagnostics queryGeometryDiagnostics(BodyId id) const;
     size_t bodyCount() const { return bodies_.size(); }
     bool isValid(BodyId id) const noexcept;
     void removeBody(BodyId id); // also removes joints attached to the body
