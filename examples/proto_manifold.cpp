@@ -2,6 +2,7 @@
 // Tests face extraction, polygon clipping, and feature ID persistence.
 
 #include "../src/narrowphase.h"
+#include "../include/velox/world.h"
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -41,8 +42,15 @@ static Convex makeHull(Vec3 pos, Vec3 extents, Quat rot = {}) {
         {-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f},
         {-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}
     };
+    static const uint32_t faces[] = {
+        0, 1, 5, 0, 5, 4, 2, 6, 7, 2, 7, 3,
+        0, 2, 3, 0, 3, 1, 4, 5, 7, 4, 7, 6,
+        0, 4, 6, 0, 6, 2, 1, 3, 7, 1, 7, 5,
+    };
     c.hullPts = pts;
     c.hullCount = 8;
+    c.hullFaceIndices = faces;
+    c.hullFaceCount = 12;
     return c;
 }
 
@@ -209,6 +217,36 @@ int main() {
             for (int i = 0; i < count; ++i) previous[i] = contacts[i];
         }
         check(stable);
+    }
+
+    // Test 8: the CUDA backend executes the same clipped manifold code. The
+    // public API intentionally hides contacts, so verify the externally
+    // observable contract: an active four-contact manifold and matching motion.
+    {
+        printf("\nTest 8: CPU/CUDA clipped-manifold parity\n");
+        World cpu(BackendType::Cpu), accelerated(BackendType::Auto);
+        cpu.gravity = accelerated.gravity = {0, -9.81f, 0};
+        auto setup = [](World& world) {
+            world.addBox({0, -0.5f, 0}, {4, 0.5f, 4}, 0.0f);
+            return world.addBox({0, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
+        };
+        BodyId cpuBox = setup(cpu);
+        BodyId acceleratedBox = setup(accelerated);
+        bool initialManifold = false, trajectoryMatch = true;
+        for (int frame = 0; frame < 60; ++frame) {
+            cpu.step(1.0f / 60.0f);
+            accelerated.step(1.0f / 60.0f);
+            if (frame == 0)
+                initialManifold = cpu.lastStepStats().generatedContacts == 4 &&
+                                  accelerated.lastStepStats().generatedContacts == 4;
+            const Body& expected = cpu.body(cpuBox);
+            const Body& actual = accelerated.body(acceleratedBox);
+            trajectoryMatch &= length(expected.position - actual.position) < 1e-2f &&
+                               length(expected.velocity - actual.velocity) < 1e-2f;
+        }
+        bool cuda = std::strcmp(accelerated.backendName(), "cuda") == 0;
+        if (!cuda) printf("  CUDA unavailable; checked CPU fallback\n");
+        check(initialManifold && (!cuda || trajectoryMatch));
     }
 
     printf("\n=== Results: %d failures ===\n", failures);

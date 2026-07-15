@@ -130,6 +130,70 @@ VELOX_HD inline int boxFace(const Convex& convex, const Vec3& direction,
 VELOX_HD inline int hullFace(const Convex& convex, const Vec3& direction,
                              FacePolygon& out) {
     if (!convex.hullPts || convex.hullCount == 0) return 0;
+    if (convex.hullFaceIndices && convex.hullFaceCount > 0) {
+        int seed = -1;
+        Vec3 seedNormal{};
+        float bestAlignment = -1e30f;
+        for (uint32_t face = 0; face < convex.hullFaceCount; ++face) {
+            const uint32_t* indices = convex.hullFaceIndices + face * 3;
+            if (indices[0] >= convex.hullCount || indices[1] >= convex.hullCount ||
+                indices[2] >= convex.hullCount) return 0;
+            Vec3 localNormal = cross(convex.hullPts[indices[1]] - convex.hullPts[indices[0]],
+                                     convex.hullPts[indices[2]] - convex.hullPts[indices[0]]);
+            if (lengthSq(localNormal) < 1e-16f) return 0;
+            Vec3 worldNormal = rotate(convex.orientation, normalize(localNormal));
+            float alignment = dot(direction, worldNormal);
+            if (alignment > bestAlignment) {
+                bestAlignment = alignment;
+                seed = (int)face;
+                seedNormal = worldNormal;
+            }
+        }
+        // A sloped triangle is not a valid reference face for a vertex or
+        // edge contact. Its projection would invent a contact plane; retain
+        // the GJK witness fallback unless the face nearly matches the axis.
+        if (seed < 0 || bestAlignment < 0.95f) return 0;
+
+        const uint32_t* seedIndices = convex.hullFaceIndices + seed * 3;
+        Vec3 seedPoint = convex.position +
+                         rotate(convex.orientation, convex.hullPts[seedIndices[0]]);
+        float scale = 1.0f;
+        for (uint32_t i = 0; i < convex.hullCount; ++i)
+            scale = vmax(scale, length(convex.hullPts[i]));
+        float planeTolerance = 1e-5f + 1e-4f * scale;
+        out.count = 0;
+        uint32_t ids[64];
+        for (uint32_t face = 0; face < convex.hullFaceCount; ++face) {
+            const uint32_t* indices = convex.hullFaceIndices + face * 3;
+            Vec3 localNormal = cross(convex.hullPts[indices[1]] - convex.hullPts[indices[0]],
+                                     convex.hullPts[indices[2]] - convex.hullPts[indices[0]]);
+            if (lengthSq(localNormal) < 1e-16f) return 0;
+            Vec3 worldNormal = rotate(convex.orientation, normalize(localNormal));
+            Vec3 point = convex.position + rotate(convex.orientation,
+                                                   convex.hullPts[indices[0]]);
+            if (dot(seedNormal, worldNormal) < 1.0f - 1e-4f ||
+                fabsf(dot(seedNormal, point - seedPoint)) > planeTolerance)
+                continue;
+            for (int corner = 0; corner < 3; ++corner) {
+                uint32_t id = indices[corner];
+                bool present = false;
+                for (int i = 0; i < out.count; ++i)
+                    if (out.vertices[i].id == id) present = true;
+                if (!present) {
+                    if (out.count >= 64) return 0;
+                    out.vertices[out.count] = {
+                        convex.position + rotate(convex.orientation, convex.hullPts[id]), id};
+                    ids[out.count++] = id;
+                }
+            }
+        }
+        if (out.count < 3) return 0;
+        out.faceId = faceFeature(ids, out.count);
+        return out.count;
+    }
+
+    // Compatibility fallback for Convex values assembled directly by callers
+    // that have a point cloud but no retained QuickHull topology.
     float support = -1e30f, minSupport = 1e30f;
     Vec3 world[64];
     int total = convex.hullCount < 64u ? (int)convex.hullCount : 64;

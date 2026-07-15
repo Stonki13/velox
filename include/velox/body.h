@@ -56,6 +56,7 @@ struct CompoundChild {
     Vec3 halfExtents{0.5f, 0.5f, 0.5f};
     float capsuleHalfHeight = 0.5f;
     uint32_t hullFirst = 0, hullCount = 0;
+    uint32_t hullFaceFirst = 0, hullFaceCount = 0;
 };
 
 // Data-oriented body layout: plain structs in contiguous arrays so the same
@@ -96,6 +97,7 @@ struct Body {
     float planeOffset = 0.0f;
     uint32_t meshIndex = 0;     // Mesh: index into World's mesh storage
     uint32_t hullFirst = 0, hullCount = 0; // Hull: local-space points in soup
+    uint32_t hullFaceFirst = 0, hullFaceCount = 0; // Packed QuickHull triangles
     uint32_t compoundFirst = 0, compoundCount = 0;
 
     VELOX_HD bool isStatic() const { return motionType == MotionType::Static; }

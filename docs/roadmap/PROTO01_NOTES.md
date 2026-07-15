@@ -37,16 +37,22 @@ three solver iterations.
    the shared `VELOX_HD` joint solver.
 9. `ContactFeature` is now exposed through `include/velox/world.h` as required
    by the roadmap.
+10. Runtime hulls now retain packed QuickHull triangle indices in `MeshSoup`.
+    Clipping selects and merges coplanar support triangles into one stable
+    support polygon; the same immutable topology is uploaded to CUDA.
+11. Topology clipping now requires the selected face to be within 0.95 of the
+    contact-normal alignment. Vertex and edge contacts, such as an octahedron
+    landing on its tip, retain the GJK witness fallback instead of inventing a
+    projected face plane.
 
 ## Scope and Fallbacks
 
 - Face clipping is used for Box/Hull pairs while their GJK distance is within
   the existing speculative-contact threshold. Other pairs, degenerate support
   faces, and empty clips retain the single GJK witness fallback.
-- Hull faces are derived from the co-planar support vertices already retained
-  in the runtime hull point cloud. The current runtime body format does not
-  retain QuickHull triangle topology; a future public manifold API can store
-  those face indices if callers need to inspect them.
+- Hull support faces are selected from retained QuickHull triangles and merged
+  by coplanarity before clipping. Directly assembled `Convex` values without
+  topology retain the co-planar-point fallback for test and tool compatibility.
 - The device implementation shares the same header-only clipping code. It has
   a fixed 64-vertex working limit and falls back when a support face is
   degenerate.
@@ -58,14 +64,16 @@ Release build, CUDA enabled:
 - `cmake -S . -B build && cmake --build build --config Release -j 8`: passed.
 - `ctest --test-dir build -C Release --output-on-failure`: passed
   `velox.stress`, `velox.fuzz`, and `velox.soak`.
-- `build/examples/Release/proto_manifold.exe`: passed all seven checks.
+- `build/examples/Release/proto_manifold.exe`: passed all eight checks,
+  including CPU/CUDA clipped-manifold parity.
 - `build/examples/Release/stress_demo.exe`: passed, including the 10-box tower.
 - `build/examples/Release/fuzz_demo.exe 80`: passed twice consecutively.
 
 `proto_manifold` checks a four-point Box-on-Box manifold, exact witness-plane
 gap, partial overlap, hull contact, bitwise deterministic output, feature-key
-persistence through a tangential slide, and 180 frames of a warm-started box
-resting with exactly three solver iterations.
+persistence through a tangential slide, topology-backed hull clipping, 180
+frames of a warm-started box resting with exactly three solver iterations, and
+CPU/CUDA agreement on the active four-contact manifold and its 60-frame motion.
 
 ## Benchmark
 
@@ -83,11 +91,18 @@ run use the same command: `build/examples/Release/benchmark.exe 2`.
 | Terrain, 2048 spheres | cpu-1 | 0.969 | 0.701 | -27.7% |
 | Terrain, 2048 spheres | cpu-auto | 0.844 | 0.738 | -12.6% |
 
-No CPU regression exceeded 10%. The two-step measurement is intended as a
-smoke comparison, not a statistically stable performance benchmark.
+No CPU regression exceeded 10% in the initial comparison.
+
+The benchmark executable now restores an identical snapshot for every sample
+and reports the median. Its default is 10 steps and 3 samples (30 timed steps
+per configuration, versus the former two-step smoke run); larger values remain
+available through `benchmark.exe <steps> <samples>`. The current 10x3 median
+results are 0.804/0.720 ms for 512-sphere CPU rain, 4.078/2.921 ms for
+2048-sphere CPU rain, 17.041/11.367 ms for 8192-sphere CPU rain, and
+0.834/0.901 ms for CPU terrain (single-worker/auto-worker respectively).
 
 ## Merge Recommendation
 
 Ready to merge after normal review. The required behavior and regression gates
-pass, CUDA compilation succeeds, and the remaining Hull topology limitation is
-documented rather than hidden behind unstable identifiers.
+pass, CUDA compilation succeeds, and runtime hull face topology now backs the
+stable clipping identifiers.

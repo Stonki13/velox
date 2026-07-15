@@ -388,9 +388,8 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     if (maxPlaneDistance <= scale * scale * scale * 1e-6f)
         throw std::invalid_argument("velox: convex hull points are coplanar");
     std::vector<Vec3> storedPoints = points;
-    mass_properties::ConvexMassProperties properties;
+    mass_properties::ConvexMassProperties properties = mass_properties::convex(points);
     if (mass > 0.0f) {
-        properties = mass_properties::convex(points);
         for (Vec3& point : storedPoints) point -= properties.center;
     }
     Body b;
@@ -398,9 +397,18 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     b.shape = ShapeType::Hull;
     b.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
     b.hullCount = static_cast<uint32_t>(storedPoints.size());
+    if (properties.triangles.size() > UINT32_MAX / 3 ||
+        meshes_.hullFaceIndices.size() >
+            UINT32_MAX - properties.triangles.size() * 3)
+        throw std::length_error("velox: convex hull face capacity exceeded");
+    b.hullFaceFirst = static_cast<uint32_t>(meshes_.hullFaceIndices.size());
+    b.hullFaceCount = static_cast<uint32_t>(properties.triangles.size());
     b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
     meshes_.hullPoints.insert(meshes_.hullPoints.end(), storedPoints.begin(),
                               storedPoints.end());
+    for (const auto& triangle : properties.triangles)
+        meshes_.hullFaceIndices.insert(meshes_.hullFaceIndices.end(),
+                                       triangle.begin(), triangle.end());
     float r2 = 0.0f;
     for (const Vec3& p : storedPoints) {
         r2 = vmax(r2, lengthSq(p));
@@ -429,6 +437,7 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
 
     std::vector<CompoundChild> children;
     std::vector<Vec3> hullPoints;
+    std::vector<uint32_t> hullFaceIndices;
     struct ChildMassData {
         double volume = 0.0;
         Vec3 principalInertia;
@@ -594,9 +603,18 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             child.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size() +
                                                     hullPoints.size());
             child.hullCount = static_cast<uint32_t>(shape.hullPoints.size());
+            mass_properties::ConvexMassProperties hullProperties =
+                mass_properties::convex(shape.hullPoints);
+            if (hullProperties.triangles.size() > UINT32_MAX / 3 ||
+                meshes_.hullFaceIndices.size() + hullFaceIndices.size() >
+                    UINT32_MAX - hullProperties.triangles.size() * 3)
+                throw std::length_error("velox: compound hull face capacity exceeded");
+            child.hullFaceFirst = static_cast<uint32_t>(meshes_.hullFaceIndices.size() +
+                                                        hullFaceIndices.size());
+            child.hullFaceCount = static_cast<uint32_t>(hullProperties.triangles.size());
+            for (const auto& triangle : hullProperties.triangles)
+                hullFaceIndices.insert(hullFaceIndices.end(), triangle.begin(), triangle.end());
             if (mass > 0.0f) {
-                mass_properties::ConvexMassProperties hullProperties =
-                    mass_properties::convex(shape.hullPoints);
                 child.localPosition += rotate(child.localOrientation,
                                               hullProperties.center);
                 massData.volume = hullProperties.volume;
@@ -675,6 +693,8 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
                            1.0f / inertia.z};
     }
     meshes_.hullPoints.insert(meshes_.hullPoints.end(), hullPoints.begin(), hullPoints.end());
+    meshes_.hullFaceIndices.insert(meshes_.hullFaceIndices.end(),
+                                   hullFaceIndices.begin(), hullFaceIndices.end());
     meshes_.compoundChildren.insert(meshes_.compoundChildren.end(),
                                     children.begin(), children.end());
     return addBody(body);
@@ -2184,7 +2204,10 @@ void World::step(float dt) {
             break;
         case ShapeType::Hull:
             if (body.hullCount < 4 || (size_t)body.hullFirst + body.hullCount >
-                                        meshes_.hullPoints.size())
+                                        meshes_.hullPoints.size() ||
+                body.hullFaceCount == 0 ||
+                (size_t)body.hullFaceFirst + size_t(body.hullFaceCount) * 3 >
+                    meshes_.hullFaceIndices.size())
                 throw std::out_of_range("velox: hull body references invalid point storage");
             break;
         case ShapeType::Compound:

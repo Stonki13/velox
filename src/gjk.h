@@ -18,6 +18,8 @@ struct Convex {
     Vec3 triC;
     const Vec3* hullPts = nullptr; // Hull: local-space point cloud
     uint32_t hullCount = 0;
+    const uint32_t* hullFaceIndices = nullptr; // triples of local point indices
+    uint32_t hullFaceCount = 0;
     float radius;       // inflation
     float geomRadius = 0.0f; // Cylinder/Cone geometric radius
 
@@ -108,6 +110,9 @@ VELOX_HD inline Convex makeConvex(const Body& b, const MeshSoupView& soup) {
         c.kind = Convex::Hull;
         c.hullPts = soup.hullPoints + b.hullFirst;
         c.hullCount = b.hullCount;
+        c.hullFaceIndices = b.hullFaceCount
+            ? soup.hullFaceIndices + b.hullFaceFirst : nullptr;
+        c.hullFaceCount = b.hullFaceCount;
         c.radius = 0.0f;
         break;
     case ShapeType::Cylinder:

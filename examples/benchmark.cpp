@@ -13,13 +13,23 @@
 
 using Clock = std::chrono::high_resolution_clock;
 
-static float runScene(velox::World& w, int steps) {
-    // Warm-up step excluded from timing (GPU buffer allocation, BVH upload).
-    w.step(1.0f / 60.0f);
-    auto t0 = Clock::now();
-    for (int i = 0; i < steps; ++i) w.step(1.0f / 60.0f);
-    auto t1 = Clock::now();
-    return std::chrono::duration<float, std::milli>(t1 - t0).count() / steps;
+static float runScene(velox::World& w, int steps, int samples) {
+    // Restore the same initial state for every sample. The excluded warm-up
+    // keeps allocation, upload, and graph creation out of the measurement.
+    velox::WorldSnapshot baseline = w.saveSnapshot();
+    std::vector<float> timings;
+    timings.reserve(samples);
+    for (int sample = 0; sample < samples; ++sample) {
+        w.restoreSnapshot(baseline);
+        w.step(1.0f / 60.0f);
+        auto t0 = Clock::now();
+        for (int i = 0; i < steps; ++i) w.step(1.0f / 60.0f);
+        auto t1 = Clock::now();
+        timings.push_back(std::chrono::duration<float, std::milli>(t1 - t0).count() /
+                          steps);
+    }
+    std::sort(timings.begin(), timings.end());
+    return timings[timings.size() / 2];
 }
 
 static void sceneRain(velox::World& w, int n) {
@@ -90,8 +100,10 @@ static void sceneMeshArchipelago(velox::World& w, int meshCount,
 }
 
 int main(int argc, char** argv) {
-    const int steps = argc > 1 ? std::max(1, std::atoi(argv[1])) : 120;
-    std::printf("Velox benchmark — ms per step, %d steps, 60 Hz\n\n", steps);
+    const int steps = argc > 1 ? std::max(1, std::atoi(argv[1])) : 10;
+    const int samples = argc > 2 ? std::max(1, std::atoi(argv[2])) : 3;
+    std::printf("Velox benchmark: median ms per step, %d steps, %d samples, 60 Hz\n\n",
+                steps, samples);
 
     struct Configuration {
         velox::BackendType backend;
@@ -111,7 +123,7 @@ int main(int argc, char** argv) {
                 if (configuration.backend == velox::BackendType::Cpu)
                     w.setWorkerCount(configuration.workers);
                 sceneRain(w, n);
-                float ms = runScene(w, steps);
+                float ms = runScene(w, steps, samples);
                 std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
                             configuration.label, w.backendName(),
                             w.workerCount(), ms);
@@ -129,7 +141,7 @@ int main(int argc, char** argv) {
                 if (configuration.backend == velox::BackendType::Cpu)
                     w.setWorkerCount(configuration.workers);
                 sceneMesh(w, n, 100);
-                float ms = runScene(w, steps);
+                float ms = runScene(w, steps, samples);
                 std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
                             configuration.label, w.backendName(),
                             w.workerCount(), ms);
@@ -147,7 +159,7 @@ int main(int argc, char** argv) {
                 if (configuration.backend == velox::BackendType::Cpu)
                     w.setWorkerCount(configuration.workers);
                 sceneJoints(w, n);
-                float ms = runScene(w, steps);
+                float ms = runScene(w, steps, samples);
                 std::printf("  %-8s (%s, %u workers, device=%s) %8.3f ms/step\n",
                             configuration.label, w.backendName(),
                             w.workerCount(),
@@ -165,7 +177,7 @@ int main(int argc, char** argv) {
             if (configuration.backend == velox::BackendType::Cpu)
                 w.setWorkerCount(configuration.workers);
             sceneMeshArchipelago(w, 4096, 64);
-            float ms = runScene(w, steps);
+            float ms = runScene(w, steps, samples);
             std::printf("  %-8s (%s, %u workers) %8.3f ms/step\n",
                         configuration.label, w.backendName(),
                         w.workerCount(), ms);

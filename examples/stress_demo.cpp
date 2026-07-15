@@ -371,6 +371,9 @@ static void testHull() {
     ok &= velox::length(exterior.position - velox::Vec3{5, -4, 2}) < 1e-3f;
     ok &= exterior.invInertia.x > 0.0f && exterior.invInertia.y > 0.0f &&
           exterior.invInertia.z > 0.0f;
+    if (!ok)
+        std::printf("  hull rest p=(%.4f %.4f %.4f) v=%.4f\n", b.position.x,
+                    b.position.y, b.position.z, velox::length(b.velocity));
     check(ok, "convex hull vs box (broad phase, rest, raycast)");
 }
 
