@@ -95,11 +95,23 @@ ccd_wall           1.8064     57.353    0.0000    0.0000  0.929  PASS
   engine-agnostic behavioral invariants catch regressions without false
   alarms.
 
-## Known residual differences (documented, not bugs)
+## Follow-up fix: rolling-contact energy bleed (4th bug)
 
-- Velox's rolling sphere bleeds ~10% speed over 5 s where Jolt holds the
-  rolling velocity exactly; TGS friction dissipates slightly through the
-  rolling transition. Tracked as a solver-quality follow-up.
+The "known residual" rolling-speed bleed turned out to be a fourth solver
+defect, also found by this suite: `solveContact`/`warmStartContact` applied
+impulses at the midpoint of the two witness anchors, and the static body's
+anchor is frozen at detection while the dynamic body advances through the
+substeps — so the midpoint lagged the true contact tangentially and the
+NORMAL impulse acquired a spurious torque arm. Symptoms: a frictionless
+sphere sliding on a plane slowly gained spin, and a rolling sphere held a
+permanent ~3 mm/s phantom slip that friction dissipated (~10%/5 s). Fixed by
+computing each body's torque arm from its OWN witness anchor. After the fix,
+Velox reproduces the analytical 5/7 rolling transition exactly
+(vx = 4.285714 for a 6 m/s launch) and `sphere_roll` matches Jolt with
+maxPositionDelta 0.0000; `ccd_wall` correlation rose to 0.999.
+
+## Notes
+
 - `velox_difftest_diag` (EXCLUDE_FROM_ALL) is a scratch target for trajectory
   comparisons when investigating future differences.
 
