@@ -84,14 +84,15 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
     Vec3 angularImpulse = tangent1 * c.rollingImpulse1 +
                           tangent2 * c.rollingImpulse2 +
                           c.normal * c.spinningImpulse;
+    // Per-body witness arms, matching solveContact (see the comment there).
     if (a.isDynamic()) {
         a.velocity += impulse * a.solverInvMass();
-        a.angularVelocity += a.invInertiaMul(cross(c.point - a.position, impulse));
+        a.angularVelocity += a.invInertiaMul(cross(pa - a.position, impulse));
         a.angularVelocity += a.invInertiaMul(angularImpulse);
     }
     if (b.isDynamic()) {
         b.velocity -= impulse * b.solverInvMass();
-        b.angularVelocity -= b.invInertiaMul(cross(c.point - b.position, impulse));
+        b.angularVelocity -= b.invInertiaMul(cross(pb - b.position, impulse));
         b.angularVelocity -= b.invInertiaMul(angularImpulse);
     }
 }
@@ -104,8 +105,15 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     Vec3 pa = contactAnchorWorld(a, c.localAnchorA);
     Vec3 pb = contactAnchorWorld(b, c.localAnchorB);
     c.point = (pa + pb) * 0.5f;
-    Vec3 ra = c.point - a.position;
-    Vec3 rb = c.point - b.position;
+    // Each body's torque arm comes from its OWN witness anchor, not the
+    // shared midpoint. A static body's anchor is frozen at detection while
+    // the dynamic body advances through the substeps, so the midpoint lags
+    // the true contact tangentially and the NORMAL impulse acquires a bogus
+    // torque arm (differential testing vs Jolt: a frictionless sphere
+    // sliding on a plane slowly gained spin, and a rolling sphere bled ~10%
+    // speed against a persistent phantom slip).
+    Vec3 ra = pa - a.position;
+    Vec3 rb = pb - b.position;
 
     // Effective mass along the normal, including rotation.
     Vec3 raxn = cross(ra, c.normal);
@@ -115,7 +123,7 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
                     dot(rbxn, b.invInertiaMul(rbxn));
     if (kNormal <= 0.0f) return;
 
-    float vn = dot(npPointVelocity(a, c.point) - npPointVelocity(b, c.point), c.normal);
+    float vn = dot(npPointVelocity(a, pa) - npPointVelocity(b, pb), c.normal);
 
     // Target normal velocity: may still close the remaining gap, and must
     // bounce with restitution if the approach was fast.
@@ -154,7 +162,7 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     // Two-axis Coulomb friction. A deterministic tangent basis makes the two
     // accumulated rows stable across frames, and circular clamping avoids the
     // directional bias of independent box constraints.
-    Vec3 rv = npPointVelocity(a, c.point) - npPointVelocity(b, c.point);
+    Vec3 rv = npPointVelocity(a, pa) - npPointVelocity(b, pb);
     Vec3 tangent1, tangent2;
     contactTangents(c.normal, tangent1, tangent2);
     Vec3 raxt1 = cross(ra, tangent1), rbxt1 = cross(rb, tangent1);
