@@ -26,8 +26,9 @@ does not affect library consumers or the default build graph.
    GLFW reports a minimized zero-size framebuffer.
 5. Bodies are batched by procedural unit mesh and rendered as instanced solid
    geometry. The cache provides cube, icosphere (two subdivisions), capsule,
-   cylinder, cone, ground, and generated convex-hull meshes. Hull meshes cache
-   by immutable point data rather than a reusable body handle.
+   cylinder, cone, ground, and generated convex-hull meshes. Capsule meshes
+   cache by radius/half-height ratio; hull/compound meshes cache per body
+   handle (each spawned hull is unique).
 6. The mesh fragment shader provides directional Lambert light, ambient fill,
    rim light, distance haze, stable palette colors, and desaturation for
    sleeping bodies. The sky shader uses a procedural blue-to-warm-horizon

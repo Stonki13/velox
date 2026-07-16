@@ -855,7 +855,10 @@ int runInteractive(const SceneParameters& parameters) {
     DragState drag;
     bool paused = false;
     bool showLines = false;
-    int substeps = 4;
+    // Interactive demos let users pile bodies deep; more substeps keeps tall
+    // stacks solid under real-time (non-uniform) frame pacing. Cheap here: the
+    // step budget is well under 1 ms even for the CUDA backend.
+    int substeps = 8;
     float accumulator = 0.0f;
     float spawnCooldown = 0.0f;
     float fps = 0.0f;
