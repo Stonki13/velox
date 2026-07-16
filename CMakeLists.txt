@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(VELOX_BUILD_EXAMPLES "Build example programs" ON)
-option(VELOX_BUILD_SANDBOX "Build the optional GLFW/OpenGL interactive sandbox" OFF)
+option(VELOX_BUILD_SANDBOX "Build the optional GLFW/Vulkan interactive sandbox" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
 set(VELOX_HAS_CUDA 0)

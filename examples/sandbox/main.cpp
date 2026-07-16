@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +30,21 @@ constexpr float Pi = 3.14159265358979323846f;
 constexpr float FixedDt = 1.0f / 60.0f;
 
 enum class Preset { Stack, Rain, Ragdoll, Contraption };
+
+enum class SpawnShape { Sphere, Box, Capsule, Cylinder, Cone, RandomHull, Complex };
+
+const char* spawnShapeName(SpawnShape shape) {
+    switch (shape) {
+    case SpawnShape::Sphere: return "SPHERE";
+    case SpawnShape::Box: return "BOX";
+    case SpawnShape::Capsule: return "CAPSULE";
+    case SpawnShape::Cylinder: return "CYLINDER";
+    case SpawnShape::Cone: return "CONE";
+    case SpawnShape::RandomHull: return "HULL";
+    case SpawnShape::Complex: return "COMPLEX";
+    }
+    return "UNKNOWN";
+}
 
 struct SceneParameters {
     int stackBoxes = 10;
@@ -82,6 +99,39 @@ bool finite(Vec3 value) {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
 
+// Curated palette; assignment is stable per body slot so colors never flicker.
+constexpr float kPalette[][3] = {
+    {0.91f, 0.34f, 0.32f}, // coral red
+    {0.98f, 0.69f, 0.25f}, // amber
+    {0.96f, 0.87f, 0.44f}, // sun yellow
+    {0.48f, 0.78f, 0.46f}, // leaf green
+    {0.30f, 0.70f, 0.67f}, // teal
+    {0.36f, 0.57f, 0.89f}, // sky blue
+    {0.55f, 0.45f, 0.86f}, // violet
+    {0.89f, 0.50f, 0.74f}, // pink
+    {0.79f, 0.60f, 0.42f}, // tan
+    {0.62f, 0.79f, 0.88f}, // ice
+};
+constexpr int kPaletteCount = static_cast<int>(sizeof(kPalette) / sizeof(kPalette[0]));
+
+// One renderable piece of a body: a mesh id (assigned lazily by the render
+// layer) plus a local transform and scale. Compounds contribute several.
+struct RenderPiece {
+    enum class Kind { Sphere, Box, Capsule, Cylinder, Cone, Hull, Ground };
+    Kind kind = Kind::Sphere;
+    Vec3 localPosition{};
+    Quat localOrientation{};
+    Vec3 scale{1.0f, 1.0f, 1.0f};
+    float capsuleRatio = 1.0f; // Capsule only: radius / halfHeight
+    std::vector<std::array<float, 3>> hullPoints; // Hull only
+};
+
+struct RenderBody {
+    BodyId id;
+    bool isStatic = false;
+    std::vector<RenderPiece> pieces;
+};
+
 class SandboxScene {
 public:
     explicit SandboxScene(SceneParameters parameters) : parameters_(parameters) {}
@@ -90,6 +140,9 @@ public:
         preset_ = preset;
         world_ = std::make_unique<World>();
         dynamicBodies_.clear();
+        renderBodies_.clear();
+        complexCycle_ = 0;
+        spawnSeed_ = 0x9e3779b9u;
         switch (preset) {
         case Preset::Stack: buildStack(); break;
         case Preset::Rain: buildRain(); break;
@@ -102,14 +155,232 @@ public:
     const World& world() const { return *world_; }
     Preset preset() const { return preset_; }
     const std::vector<BodyId>& dynamicBodies() const { return dynamicBodies_; }
+    const std::vector<RenderBody>& renderBodies() const { return renderBodies_; }
 
-    void addSphereAt(Vec3 position) {
-        const BodyId sphere = world_->addSphere(position, 0.25f, 1.0f);
-        world_->body(sphere).friction = 0.6f;
-        dynamicBodies_.push_back(sphere);
+    void spawnAt(SpawnShape shape, Vec3 position) {
+        switch (shape) {
+        case SpawnShape::Sphere: {
+            const BodyId id = sphere(position, 0.25f, 1.0f);
+            pieceSphere(id, 0.25f);
+            break;
+        }
+        case SpawnShape::Box: {
+            const Vec3 half{0.24f, 0.24f, 0.24f};
+            const BodyId id = box(position, half, 1.0f);
+            pieceBox(id, half);
+            break;
+        }
+        case SpawnShape::Capsule: {
+            const BodyId id = capsule(position, 0.16f, 0.26f, 1.0f);
+            pieceCapsule(id, 0.16f, 0.26f);
+            break;
+        }
+        case SpawnShape::Cylinder: {
+            const BodyId id = world_->addCylinder(position, 0.22f, 0.26f, 1.0f);
+            world_->body(id).friction = 0.7f;
+            dynamicBodies_.push_back(id);
+            RenderBody body{id, false, {}};
+            RenderPiece piece;
+            piece.kind = RenderPiece::Kind::Cylinder;
+            piece.scale = {0.22f, 0.26f, 0.22f};
+            body.pieces.push_back(std::move(piece));
+            renderBodies_.push_back(std::move(body));
+            break;
+        }
+        case SpawnShape::Cone: {
+            const BodyId id = world_->addCone(position, 0.26f, 0.5f, 1.0f);
+            world_->body(id).friction = 0.7f;
+            dynamicBodies_.push_back(id);
+            RenderBody body{id, false, {}};
+            RenderPiece piece;
+            piece.kind = RenderPiece::Kind::Cone;
+            piece.scale = {0.26f, 0.25f, 0.26f}; // y scale = half total height
+            body.pieces.push_back(std::move(piece));
+            renderBodies_.push_back(std::move(body));
+            break;
+        }
+        case SpawnShape::RandomHull: {
+            spawnRandomHull(position);
+            break;
+        }
+        case SpawnShape::Complex: {
+            switch (complexCycle_++ % 3) {
+            case 0: spawnRingCompound(position); break;
+            case 1: spawnLCompound(position); break;
+            default: spawnBlobHull(position); break;
+            }
+            break;
+        }
+        }
     }
 
+    void spawnDefault(Vec3 position) { spawnAt(SpawnShape::Sphere, position); }
+
 private:
+    uint32_t nextRandom() {
+        spawnSeed_ = spawnSeed_ * 1664525u + 1013904223u;
+        return spawnSeed_;
+    }
+    float random01() { return static_cast<float>(nextRandom() >> 8) / 16777216.0f; }
+
+    void pieceSphere(BodyId id, float radius, bool isStatic = false) {
+        RenderBody body{id, isStatic, {}};
+        RenderPiece piece;
+        piece.kind = RenderPiece::Kind::Sphere;
+        piece.scale = {radius, radius, radius};
+        body.pieces.push_back(std::move(piece));
+        renderBodies_.push_back(std::move(body));
+    }
+
+    void pieceBox(BodyId id, Vec3 half, bool isStatic = false) {
+        RenderBody body{id, isStatic, {}};
+        RenderPiece piece;
+        piece.kind = RenderPiece::Kind::Box;
+        piece.scale = half;
+        body.pieces.push_back(std::move(piece));
+        renderBodies_.push_back(std::move(body));
+    }
+
+    void pieceCapsule(BodyId id, float radius, float halfHeight, bool isStatic = false) {
+        RenderBody body{id, isStatic, {}};
+        RenderPiece piece;
+        piece.kind = RenderPiece::Kind::Capsule;
+        piece.scale = {halfHeight, halfHeight, halfHeight};
+        piece.capsuleRatio = radius / halfHeight;
+        body.pieces.push_back(std::move(piece));
+        renderBodies_.push_back(std::move(body));
+    }
+
+    void spawnRandomHull(Vec3 position) {
+        std::vector<Vec3> points;
+        std::vector<std::array<float, 3>> renderPoints;
+        const int count = 8 + static_cast<int>(random01() * 8.0f);
+        const Vec3 radii{0.20f + random01() * 0.18f, 0.20f + random01() * 0.18f,
+                         0.20f + random01() * 0.18f};
+        for (int i = 0; i < count; ++i) {
+            const float z = random01() * 2.0f - 1.0f;
+            const float a = random01() * 2.0f * Pi;
+            const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+            const Vec3 p{r * std::cos(a) * radii.x, z * radii.y, r * std::sin(a) * radii.z};
+            points.push_back(p);
+            renderPoints.push_back({p.x, p.y, p.z});
+        }
+        const BodyId id = world_->addConvexHull(position, points, 1.0f);
+        world_->body(id).friction = 0.7f;
+        dynamicBodies_.push_back(id);
+        RenderBody body{id, false, {}};
+        RenderPiece piece;
+        piece.kind = RenderPiece::Kind::Hull;
+        piece.hullPoints = std::move(renderPoints);
+        body.pieces.push_back(std::move(piece));
+        renderBodies_.push_back(std::move(body));
+    }
+
+    void spawnBlobHull(Vec3 position) {
+        // Low-poly blob: jittered icosahedron directions.
+        const float t = (1.0f + std::sqrt(5.0f)) * 0.5f;
+        const Vec3 base[12] = {
+            {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+            {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+            {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
+        std::vector<Vec3> points;
+        std::vector<std::array<float, 3>> renderPoints;
+        for (const Vec3& direction : base) {
+            const Vec3 d = velox::normalize(direction);
+            const float radius = 0.28f + random01() * 0.14f;
+            const Vec3 p = d * radius;
+            points.push_back(p);
+            renderPoints.push_back({p.x, p.y, p.z});
+        }
+        const BodyId id = world_->addConvexHull(position, points, 1.2f);
+        world_->body(id).friction = 0.75f;
+        dynamicBodies_.push_back(id);
+        RenderBody body{id, false, {}};
+        RenderPiece piece;
+        piece.kind = RenderPiece::Kind::Hull;
+        piece.hullPoints = std::move(renderPoints);
+        body.pieces.push_back(std::move(piece));
+        renderBodies_.push_back(std::move(body));
+    }
+
+    void spawnRingCompound(Vec3 position) {
+        // Eight boxes arranged as a ring standing in the XY plane.
+        std::vector<velox::CompoundShape> shapes;
+        const int segments = 8;
+        const float ringRadius = 0.42f;
+        for (int i = 0; i < segments; ++i) {
+            const float a = 2.0f * Pi * static_cast<float>(i) / segments;
+            velox::CompoundShape shape;
+            shape.shape = velox::ShapeType::Box;
+            shape.localPosition = {std::cos(a) * ringRadius, std::sin(a) * ringRadius, 0.0f};
+            shape.localOrientation = velox::fromAxisAngle({0, 0, 1}, a);
+            shape.halfExtents = {0.20f, 0.09f, 0.09f};
+            shapes.push_back(shape);
+        }
+        addCompoundWithRender(position, shapes, 1.5f);
+    }
+
+    void spawnLCompound(Vec3 position) {
+        std::vector<velox::CompoundShape> shapes;
+        velox::CompoundShape a;
+        a.shape = velox::ShapeType::Box;
+        a.localPosition = {0.0f, 0.0f, 0.0f};
+        a.halfExtents = {0.42f, 0.12f, 0.12f};
+        shapes.push_back(a);
+        velox::CompoundShape b;
+        b.shape = velox::ShapeType::Box;
+        b.localPosition = {-0.30f, 0.28f, 0.0f};
+        b.halfExtents = {0.12f, 0.28f, 0.12f};
+        shapes.push_back(b);
+        addCompoundWithRender(position, shapes, 1.4f);
+    }
+
+    void addCompoundWithRender(Vec3 position, const std::vector<velox::CompoundShape>& shapes,
+                               float mass) {
+        const BodyId id = world_->addCompound(position, shapes, mass);
+        world_->body(id).friction = 0.7f;
+        dynamicBodies_.push_back(id);
+        // addCompound recenters geometry on the center of mass; authored child
+        // locals must shift by (authored origin - computed COM) to line up.
+        const Vec3 shift = position - world_->body(id).position;
+        RenderBody body{id, false, {}};
+        for (const velox::CompoundShape& shape : shapes) {
+            RenderPiece piece;
+            piece.localPosition = shape.localPosition + shift;
+            piece.localOrientation = shape.localOrientation;
+            switch (shape.shape) {
+            case velox::ShapeType::Box:
+                piece.kind = RenderPiece::Kind::Box;
+                piece.scale = shape.halfExtents;
+                break;
+            case velox::ShapeType::Sphere:
+                piece.kind = RenderPiece::Kind::Sphere;
+                piece.scale = {shape.radius, shape.radius, shape.radius};
+                break;
+            case velox::ShapeType::Capsule:
+                piece.kind = RenderPiece::Kind::Capsule;
+                piece.scale = {shape.capsuleHalfHeight, shape.capsuleHalfHeight,
+                               shape.capsuleHalfHeight};
+                piece.capsuleRatio = shape.radius / shape.capsuleHalfHeight;
+                break;
+            case velox::ShapeType::Cylinder:
+                piece.kind = RenderPiece::Kind::Cylinder;
+                piece.scale = {shape.radius, shape.capsuleHalfHeight, shape.radius};
+                break;
+            case velox::ShapeType::Cone:
+                piece.kind = RenderPiece::Kind::Cone;
+                piece.scale = {shape.radius, shape.capsuleHalfHeight, shape.radius};
+                break;
+            default:
+                piece.kind = RenderPiece::Kind::Box;
+                piece.scale = {0.1f, 0.1f, 0.1f};
+                break;
+            }
+            body.pieces.push_back(std::move(piece));
+        }
+        renderBodies_.push_back(std::move(body));
+    }
+
     BodyId sphere(Vec3 position, float radius = 0.2f, float mass = 1.0f) {
         const BodyId id = world_->addSphere(position, radius, mass);
         world_->body(id).friction = 0.65f;
@@ -133,14 +404,24 @@ private:
         return id;
     }
 
-    void ground() { world_->addStaticPlane({0.0f, 1.0f, 0.0f}, 0.0f); }
+    void ground() {
+        const BodyId id = world_->addStaticPlane({0.0f, 1.0f, 0.0f}, 0.0f);
+        RenderBody body{id, true, {}};
+        RenderPiece piece;
+        piece.kind = RenderPiece::Kind::Ground;
+        piece.scale = {400.0f, 1.0f, 400.0f};
+        body.pieces.push_back(std::move(piece));
+        renderBodies_.push_back(std::move(body));
+    }
 
     void buildStack() {
         ground();
         const float extent = parameters_.boxHalfExtent;
-        for (int i = 0; i < parameters_.stackBoxes; ++i)
-            box({0.0f, extent + (extent * 2.02f) * static_cast<float>(i), 0.0f},
-                {extent, extent, extent});
+        for (int i = 0; i < parameters_.stackBoxes; ++i) {
+            const BodyId id = box({0.0f, extent + (extent * 2.0f) * static_cast<float>(i), 0.0f},
+                                  {extent, extent, extent});
+            pieceBox(id, {extent, extent, extent});
+        }
     }
 
     void buildRain() {
@@ -148,10 +429,11 @@ private:
         for (int i = 0; i < parameters_.rainSpheres; ++i) {
             const int x = i % 20;
             const int layer = i / 20;
-            sphere({-5.7f + 0.6f * static_cast<float>(x),
-                    1.5f + 0.55f * static_cast<float>(layer),
-                    static_cast<float>((x * 7 + layer * 3) % 9) * 0.18f - 0.7f},
-                   parameters_.sphereRadius);
+            const BodyId id = sphere({-5.7f + 0.6f * static_cast<float>(x),
+                                      1.5f + 0.55f * static_cast<float>(layer),
+                                      static_cast<float>((x * 7 + layer * 3) % 9) * 0.18f - 0.7f},
+                                     parameters_.sphereRadius);
+            pieceSphere(id, parameters_.sphereRadius);
         }
     }
 
@@ -161,10 +443,13 @@ private:
         world_->setTransform(ramp, {0.0f, 0.45f, 0.0f},
                              velox::fromAxisAngle({0.0f, 0.0f, 1.0f},
                                                   -parameters_.ragdollRampDegrees * Pi / 180.0f));
+        pieceBox(ramp, {6.0f, 0.25f, 3.0f}, true);
 
         std::vector<BodyId> bodies(static_cast<size_t>(parameters_.ragdollBodies));
-        for (int i = 0; i < static_cast<int>(bodies.size()); ++i)
+        for (int i = 0; i < static_cast<int>(bodies.size()); ++i) {
             bodies[i] = capsule({-2.0f, 5.5f + 0.58f * static_cast<float>(i), 0.0f}, 0.18f, 0.28f);
+            pieceCapsule(bodies[i], 0.18f, 0.28f);
+        }
         for (size_t i = 1; i < bodies.size(); ++i)
             world_->addBallJoint(bodies[i - 1], bodies[i],
                                  {-2.0f, 5.5f + 0.58f * static_cast<float>(i) - 0.29f, 0.0f});
@@ -176,7 +461,9 @@ private:
         world_->setTransform(ramp, {0.5f, 0.35f, 0.0f},
                              velox::fromAxisAngle({0.0f, 0.0f, 1.0f},
                                                   -parameters_.contraptionRampDegrees * Pi / 180.0f));
+        pieceBox(ramp, {7.0f, 0.25f, 3.5f}, true);
         const BodyId chassis = box({-4.0f, 2.5f, 0.0f}, {1.1f, 0.28f, 0.65f}, 4.0f);
+        pieceBox(chassis, {1.1f, 0.28f, 0.65f});
         const std::array<Vec3, 4> offsets{{
             {-0.75f, -0.48f, -0.72f}, {-0.75f, -0.48f, 0.72f},
             {0.75f, -0.48f, -0.72f}, {0.75f, -0.48f, 0.72f}}};
@@ -184,15 +471,21 @@ private:
             const Vec3 offset = offsets[static_cast<size_t>(i) % offsets.size()];
             const Vec3 wheelPosition{-4.0f + offset.x, 2.5f + offset.y, offset.z};
             const BodyId wheel = sphere(wheelPosition, 0.38f, 0.8f);
+            pieceSphere(wheel, 0.38f);
             world_->addHingeJoint(chassis, wheel, wheelPosition, {0.0f, 0.0f, 1.0f});
         }
     }
 
     std::unique_ptr<World> world_;
     std::vector<BodyId> dynamicBodies_;
+    std::vector<RenderBody> renderBodies_;
     SceneParameters parameters_;
     Preset preset_ = Preset::Stack;
+    int complexCycle_ = 0;
+    uint32_t spawnSeed_ = 0x9e3779b9u;
 };
+
+// --- matrices ----------------------------------------------------------------
 
 std::array<float, 16> multiply(const std::array<float, 16>& a,
                                const std::array<float, 16>& b) {
@@ -222,6 +515,48 @@ std::array<float, 16> lookAt(Vec3 eye, Vec3 forward) {
             -velox::dot(s, eye), -velox::dot(u, eye), velox::dot(f, eye), 1.0f};
 }
 
+// General 4x4 inverse (column-major); used for the sky's ray reconstruction.
+std::array<float, 16> inverse(const std::array<float, 16>& m) {
+    std::array<float, 16> inv;
+    inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] +
+             m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] -
+             m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] +
+             m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] -
+              m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] -
+             m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] +
+             m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] -
+             m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] +
+              m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] +
+             m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] -
+             m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] +
+              m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] -
+              m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] -
+             m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] +
+             m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] -
+              m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] +
+              m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+    float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (std::fabs(det) < 1e-20f) return inv;
+    det = 1.0f / det;
+    for (float& v : inv) v *= det;
+    return inv;
+}
+
 struct Camera {
     Vec3 position{8.0f, 6.0f, 10.0f};
     float yaw = -2.25f;
@@ -235,17 +570,197 @@ struct Camera {
     Vec3 right() const { return velox::normalize(velox::cross(forward(), {0.0f, 1.0f, 0.0f})); }
 };
 
-void spawnAtCursor(SandboxScene& scene, const Camera& camera, const sandbox::Input& input,
-                   int width, int height) {
+Vec3 cursorRay(const Camera& camera, const sandbox::Input& input, int width, int height) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     const float x = static_cast<float>(2.0 * input.cursorX() / static_cast<double>(width) - 1.0);
     const float y = static_cast<float>(1.0 - 2.0 * input.cursorY() / static_cast<double>(height));
     const float tangent = std::tan(60.0f * Pi / 360.0f);
-    const Vec3 direction = velox::normalize(camera.forward() + camera.right() * (x * tangent * aspect) +
-                                            velox::cross(camera.right(), camera.forward()) * (y * tangent));
-    const RayHit hit = scene.world().rayCast(camera.position, direction, 200.0f);
-    if (hit.hit) scene.addSphereAt(hit.point + hit.normal * 0.32f);
+    return velox::normalize(camera.forward() + camera.right() * (x * tangent * aspect) +
+                            velox::cross(camera.right(), camera.forward()) * (y * tangent));
 }
+
+// --- dragging ----------------------------------------------------------------
+
+struct DragState {
+    bool active = false;
+    BodyId body;
+    Vec3 localAnchor{};
+    float distance = 0.0f;
+};
+
+void updateDrag(DragState& drag, SandboxScene& scene, const Camera& camera,
+                const sandbox::Input& input, int width, int height) {
+    World& world = scene.world();
+    if (input.dragPressed() && !input.mouseLook()) {
+        const Vec3 direction = cursorRay(camera, input, width, height);
+        const RayHit hit = world.rayCast(camera.position, direction, 200.0f);
+        if (hit.hit && world.isValid(hit.body) &&
+            world.motionType(hit.body) == velox::MotionType::Dynamic) {
+            drag.active = true;
+            drag.body = hit.body;
+            drag.distance = hit.t;
+            const velox::Body& body = world.body(hit.body);
+            drag.localAnchor = velox::rotateInv(body.orientation, hit.point - body.position);
+        }
+    }
+    if (drag.active && (!input.dragDown() || !world.isValid(drag.body))) drag.active = false;
+    if (!drag.active) return;
+
+    // Scroll pulls the grabbed body nearer or pushes it farther.
+    drag.distance *= 1.0f + input.scrollDelta() * 0.09f;
+    drag.distance = std::clamp(drag.distance, 0.6f, 120.0f);
+
+    const Vec3 direction = cursorRay(camera, input, width, height);
+    const Vec3 target = camera.position + direction * drag.distance;
+    const velox::Body& body = world.body(drag.body);
+    const Vec3 anchorWorld = body.position + velox::rotate(body.orientation, drag.localAnchor);
+    const Vec3 armVector = anchorWorld - body.position;
+    const Vec3 pointVelocity = body.velocity + velox::cross(body.angularVelocity, armVector);
+
+    // Critically damped spring at the grabbed point, applied as a force so
+    // the solver can still push back (no teleporting, no stack explosions).
+    const float mass = body.invMass > 0.0f ? 1.0f / body.invMass : 0.0f;
+    if (mass <= 0.0f) { drag.active = false; return; }
+    const float stiffness = 90.0f;
+    const float damping = 2.0f * std::sqrt(stiffness); // critical
+    Vec3 spring = (target - anchorWorld) * stiffness - pointVelocity * damping;
+    const float maxAcceleration = 220.0f;
+    const float springLength = velox::length(spring);
+    if (springLength > maxAcceleration) spring *= maxAcceleration / springLength;
+    world.wake(drag.body);
+    world.addForceAtPoint(drag.body, spring * mass, anchorWorld);
+}
+
+// --- rendering helpers ---------------------------------------------------------
+
+class RenderCache {
+public:
+    explicit RenderCache(sandbox::Renderer& renderer) : renderer_(renderer) {
+        cube_ = renderer.registerMesh(sandbox::makeCube());
+        sphere_ = renderer.registerMesh(sandbox::makeIcosphere(2));
+        cylinder_ = renderer.registerMesh(sandbox::makeCylinder());
+        cone_ = renderer.registerMesh(sandbox::makeCone());
+        ground_ = renderer.registerMesh(sandbox::makeGroundQuad());
+    }
+
+    uint32_t cube() const { return cube_; }
+    uint32_t sphere() const { return sphere_; }
+    uint32_t cylinder() const { return cylinder_; }
+    uint32_t cone() const { return cone_; }
+    uint32_t ground() const { return ground_; }
+
+    uint32_t capsule(float ratio) {
+        const int key = static_cast<int>(ratio * 1000.0f + 0.5f);
+        auto found = capsules_.find(key);
+        if (found != capsules_.end()) return found->second;
+        const uint32_t id = renderer_.registerMesh(sandbox::makeCapsule(ratio));
+        capsules_[key] = id;
+        return id;
+    }
+
+    // Cache by geometry, not body handle: world resets reuse body slots while
+    // a freshly generated random hull needs its own triangle mesh.
+    uint32_t hull(const std::vector<std::array<float, 3>>& points) {
+        uint64_t key = 1469598103934665603ull;
+        for (const auto& point : points) {
+            for (float component : point) {
+                uint32_t bits = 0;
+                std::memcpy(&bits, &component, sizeof(bits));
+                key ^= bits;
+                key *= 1099511628211ull;
+            }
+        }
+        auto found = hulls_.find(key);
+        if (found != hulls_.end()) return found->second;
+        const uint32_t id = renderer_.registerMesh(sandbox::makeHullMesh(points));
+        hulls_[key] = id;
+        return id;
+    }
+
+private:
+    sandbox::Renderer& renderer_;
+    uint32_t cube_ = 0, sphere_ = 0, cylinder_ = 0, cone_ = 0, ground_ = 0;
+    std::map<int, uint32_t> capsules_;
+    std::map<uint64_t, uint32_t> hulls_;
+};
+
+sandbox::Instance makeInstance(Vec3 position, Quat orientation, Vec3 scale,
+                               const float color[3], float colorW) {
+    const Vec3 cx = velox::rotate(orientation, {1.0f, 0.0f, 0.0f}) * scale.x;
+    const Vec3 cy = velox::rotate(orientation, {0.0f, 1.0f, 0.0f}) * scale.y;
+    const Vec3 cz = velox::rotate(orientation, {0.0f, 0.0f, 1.0f}) * scale.z;
+    sandbox::Instance instance;
+    instance.row0[0] = cx.x; instance.row0[1] = cy.x; instance.row0[2] = cz.x; instance.row0[3] = position.x;
+    instance.row1[0] = cx.y; instance.row1[1] = cy.y; instance.row1[2] = cz.y; instance.row1[3] = position.y;
+    instance.row2[0] = cx.z; instance.row2[1] = cy.z; instance.row2[2] = cz.z; instance.row2[3] = position.z;
+    instance.color[0] = color[0];
+    instance.color[1] = color[1];
+    instance.color[2] = color[2];
+    instance.color[3] = colorW;
+    return instance;
+}
+
+void buildBatches(const SandboxScene& scene, RenderCache& cache,
+                  std::vector<sandbox::DrawBatch>& batches) {
+    std::map<uint32_t, size_t> batchIndex;
+    auto batchFor = [&](uint32_t meshId) -> sandbox::DrawBatch& {
+        auto found = batchIndex.find(meshId);
+        if (found != batchIndex.end()) return batches[found->second];
+        batchIndex[meshId] = batches.size();
+        batches.push_back({meshId, {}});
+        return batches.back();
+    };
+
+    const World& world = scene.world();
+    for (const RenderBody& renderBody : scene.renderBodies()) {
+        if (!world.isValid(renderBody.id)) continue;
+        const velox::Body& body = world.body(renderBody.id);
+
+        float color[3];
+        float colorW = 1.0f;
+        if (renderBody.isStatic) {
+            color[0] = 0.62f; color[1] = 0.63f; color[2] = 0.58f;
+        } else {
+            const float* palette = kPalette[renderBody.id.slot() % kPaletteCount];
+            color[0] = palette[0]; color[1] = palette[1]; color[2] = palette[2];
+            if (body.asleep) {
+                // Desaturate sleeping bodies so islands visibly settle.
+                const float gray = (color[0] + color[1] + color[2]) / 3.0f;
+                color[0] = color[0] * 0.35f + gray * 0.65f;
+                color[1] = color[1] * 0.35f + gray * 0.65f;
+                color[2] = color[2] * 0.35f + gray * 0.65f;
+            }
+        }
+
+        for (const RenderPiece& piece : renderBody.pieces) {
+            const Vec3 world_position =
+                body.position + velox::rotate(body.orientation, piece.localPosition);
+            const Quat world_orientation = velox::mul(body.orientation, piece.localOrientation);
+            uint32_t meshId = 0;
+            switch (piece.kind) {
+            case RenderPiece::Kind::Sphere: meshId = cache.sphere(); break;
+            case RenderPiece::Kind::Box: meshId = cache.cube(); break;
+            case RenderPiece::Kind::Capsule: meshId = cache.capsule(piece.capsuleRatio); break;
+            case RenderPiece::Kind::Cylinder: meshId = cache.cylinder(); break;
+            case RenderPiece::Kind::Cone: meshId = cache.cone(); break;
+            case RenderPiece::Kind::Hull:
+                meshId = cache.hull(piece.hullPoints);
+                break;
+            case RenderPiece::Kind::Ground: {
+                meshId = cache.ground();
+                const float groundColor[3] = {0.62f, 0.68f, 0.60f};
+                batchFor(meshId).instances.push_back(makeInstance(
+                    {0.0f, 0.0f, 0.0f}, {}, piece.scale, groundColor, 2.0f));
+                continue;
+            }
+            }
+            batchFor(meshId).instances.push_back(
+                makeInstance(world_position, world_orientation, piece.scale, color, colorW));
+        }
+    }
+}
+
+// --- selftest ------------------------------------------------------------------
 
 bool selfTest(const SceneParameters& parameters) {
     constexpr std::array<Preset, 4> presets{
@@ -271,41 +786,84 @@ bool selfTest(const SceneParameters& parameters) {
             return false;
         }
     }
+
+    // Every spawnable palette shape must simulate stably too.
+    constexpr std::array<SpawnShape, 7> shapes{
+        SpawnShape::Sphere, SpawnShape::Box, SpawnShape::Capsule, SpawnShape::Cylinder,
+        SpawnShape::Cone, SpawnShape::RandomHull, SpawnShape::Complex};
+    SandboxScene scene(parameters);
+    scene.reset(Preset::Stack);
+    float x = -6.0f;
+    for (SpawnShape shape : shapes) {
+        scene.spawnAt(shape, {x, 2.0f, 3.0f});
+        scene.spawnAt(shape, {x, 3.2f, 3.0f}); // Complex preset cycles variants
+        x += 2.0f;
+    }
+    bool sawContact = false;
+    for (int step = 0; step < 120; ++step) {
+        scene.world().step(FixedDt);
+        sawContact = sawContact || scene.world().lastStepStats().generatedContacts > 0;
+        for (BodyId id : scene.dynamicBodies()) {
+            if (!finite(scene.world().body(id).position)) {
+                std::fprintf(stderr, "sandbox self-test: spawn palette produced a non-finite position\n");
+                return false;
+            }
+        }
+    }
+    if (!sawContact) {
+        std::fprintf(stderr, "sandbox self-test: spawn palette produced no contacts\n");
+        return false;
+    }
     std::puts("sandbox self-test passed");
     return true;
 }
 
-std::vector<std::string> overlay(const SandboxScene& scene, int substeps, bool paused, float fps) {
+// --- overlay -------------------------------------------------------------------
+
+std::vector<std::string> overlay(const SandboxScene& scene, int substeps, bool paused,
+                                 float fps, SpawnShape spawnShape, bool showLines,
+                                 bool dragging) {
     const velox::StepStats& stats = scene.world().lastStepStats();
-    char line[128];
+    char line[160];
     std::vector<std::string> result;
-    std::snprintf(line, sizeof(line), "PRESET: %s", presetName(scene.preset()));
+    std::snprintf(line, sizeof(line), "PRESET: %s   SHAPE: %s%s", presetName(scene.preset()),
+                  spawnShapeName(spawnShape), dragging ? "   DRAGGING" : "");
     result.emplace_back(line);
     std::snprintf(line, sizeof(line), "BODIES: %zu ACTIVE: %zu", stats.bodyCount, stats.awakeDynamicBodies);
     result.emplace_back(line);
     std::snprintf(line, sizeof(line), "CONTACTS: %zu STEP: %.2F MS", stats.generatedContacts, stats.totalMs);
     result.emplace_back(line);
-    std::snprintf(line, sizeof(line), "SUBSTEPS: %d %s FPS: %.0F", substeps, paused ? "PAUSED" : "RUNNING", fps);
+    std::snprintf(line, sizeof(line), "SUBSTEPS: %d %s FPS: %.0F%s", substeps,
+                  paused ? "PAUSED" : "RUNNING", fps, showLines ? "  LINES ON" : "");
     result.emplace_back(line);
-    result.emplace_back("WASD MOVE  QE TURN  RMB LOOK");
-    result.emplace_back("SPACE SPAWN  R RESET  P PAUSE  +/- SUBSTEPS");
+    result.emplace_back("WASD MOVE  QE TURN  RMB LOOK  LMB DRAG  WHEEL DEPTH");
+    result.emplace_back("1-7 SHAPE  SPACE SPAWN  R RESET  P PAUSE  +/- SUBSTEPS  L LINES");
     result.emplace_back("F1 STACK  F2 RAIN  F3 RAGDOLL  F4 CONTRAPTION");
     return result;
 }
 
+// --- interactive loop ------------------------------------------------------------
+
 int runInteractive(const SceneParameters& parameters) {
     sandbox::Window window(1280, 720, "Velox Interactive Sandbox");
-    sandbox::Renderer renderer;
+    sandbox::Renderer renderer(window);
+    RenderCache cache(renderer);
     sandbox::Input input;
     SandboxScene scene(parameters);
     scene.reset(Preset::Stack);
     Camera camera;
+    DragState drag;
     bool paused = false;
-    int substeps = 4;
+    bool showLines = false;
+    // Interactive demos let users pile bodies deep; more substeps keeps tall
+    // stacks solid under real-time (non-uniform) frame pacing. Cheap here: the
+    // step budget is well under 1 ms even for the CUDA backend.
+    int substeps = 8;
     float accumulator = 0.0f;
     float spawnCooldown = 0.0f;
     float fps = 0.0f;
     int frameCount = 0;
+    SpawnShape spawnShape = SpawnShape::Sphere;
     auto last = std::chrono::steady_clock::now();
     auto fpsStart = last;
 
@@ -318,15 +876,24 @@ int runInteractive(const SceneParameters& parameters) {
         last = now;
         accumulator += frameSeconds;
         spawnCooldown += frameSeconds;
+        const bool drawable = window.width() > 0 && window.height() > 0;
 
-        if (input.pressed(sandbox::Action::Reset)) scene.reset(scene.preset());
+        if (input.pressed(sandbox::Action::Reset)) { scene.reset(scene.preset()); drag.active = false; }
         if (input.pressed(sandbox::Action::Pause)) paused = !paused;
+        if (input.pressed(sandbox::Action::ToggleLines)) showLines = !showLines;
         if (input.pressed(sandbox::Action::IncreaseSubsteps)) substeps = std::min(substeps + 1, 16);
         if (input.pressed(sandbox::Action::DecreaseSubsteps)) substeps = std::max(substeps - 1, 1);
-        if (input.pressed(sandbox::Action::Stack)) scene.reset(Preset::Stack);
-        if (input.pressed(sandbox::Action::Rain)) scene.reset(Preset::Rain);
-        if (input.pressed(sandbox::Action::Ragdoll)) scene.reset(Preset::Ragdoll);
-        if (input.pressed(sandbox::Action::Contraption)) scene.reset(Preset::Contraption);
+        if (input.pressed(sandbox::Action::Stack)) { scene.reset(Preset::Stack); drag.active = false; }
+        if (input.pressed(sandbox::Action::Rain)) { scene.reset(Preset::Rain); drag.active = false; }
+        if (input.pressed(sandbox::Action::Ragdoll)) { scene.reset(Preset::Ragdoll); drag.active = false; }
+        if (input.pressed(sandbox::Action::Contraption)) { scene.reset(Preset::Contraption); drag.active = false; }
+        if (input.pressed(sandbox::Action::Shape1)) spawnShape = SpawnShape::Sphere;
+        if (input.pressed(sandbox::Action::Shape2)) spawnShape = SpawnShape::Box;
+        if (input.pressed(sandbox::Action::Shape3)) spawnShape = SpawnShape::Capsule;
+        if (input.pressed(sandbox::Action::Shape4)) spawnShape = SpawnShape::Cylinder;
+        if (input.pressed(sandbox::Action::Shape5)) spawnShape = SpawnShape::Cone;
+        if (input.pressed(sandbox::Action::Shape6)) spawnShape = SpawnShape::RandomHull;
+        if (input.pressed(sandbox::Action::Shape7)) spawnShape = SpawnShape::Complex;
 
         if (input.mouseLook()) {
             camera.yaw += input.mouseDeltaX() * 0.004f;
@@ -343,11 +910,15 @@ int runInteractive(const SceneParameters& parameters) {
         if (input.down(sandbox::Action::Left)) move -= camera.right();
         if (velox::lengthSq(move) > 0.0f) camera.position += velox::normalize(move) * (7.0f * frameSeconds);
 
-        if (input.pressed(sandbox::Action::Spawn) ||
-            (input.down(sandbox::Action::Spawn) && spawnCooldown >= 0.1f)) {
-            spawnAtCursor(scene, camera, input, window.width(), window.height());
+        if (drawable && (input.pressed(sandbox::Action::Spawn) ||
+            (input.down(sandbox::Action::Spawn) && spawnCooldown >= 0.1f))) {
+            const Vec3 direction = cursorRay(camera, input, window.width(), window.height());
+            const RayHit hit = scene.world().rayCast(camera.position, direction, 200.0f);
+            if (hit.hit) scene.spawnAt(spawnShape, hit.point + hit.normal * 0.45f);
             spawnCooldown = 0.0f;
         }
+
+        if (drawable) updateDrag(drag, scene, camera, input, window.width(), window.height());
 
         scene.world().substeps = substeps;
         if (!paused) {
@@ -359,12 +930,46 @@ int runInteractive(const SceneParameters& parameters) {
             accumulator = 0.0f;
         }
 
-        std::vector<DebugLine> lines;
-        scene.world().debugLines(lines);
-        const auto viewProjection = multiply(perspective(60.0f * Pi / 180.0f,
-                                                          static_cast<float>(window.width()) / window.height(),
-                                                          0.05f, 300.0f),
-                                             lookAt(camera.position, camera.forward()));
+        if (!drawable) continue;
+
+        // Camera matrices and globals.
+        const auto projection = perspective(60.0f * Pi / 180.0f,
+                                            static_cast<float>(window.width()) / window.height(),
+                                            0.05f, 500.0f);
+        const auto view = lookAt(camera.position, camera.forward());
+        const auto viewProjection = multiply(projection, view);
+        const auto invViewProjection = inverse(viewProjection);
+        sandbox::FrameGlobals globals{};
+        std::copy(viewProjection.begin(), viewProjection.end(), globals.viewProj);
+        std::copy(invViewProjection.begin(), invViewProjection.end(), globals.invViewProj);
+        globals.cameraPos[0] = camera.position.x;
+        globals.cameraPos[1] = camera.position.y;
+        globals.cameraPos[2] = camera.position.z;
+        globals.cameraPos[3] = 1.0f;
+        const Vec3 sun = velox::normalize(Vec3{0.35f, 0.75f, 0.30f});
+        globals.sunDir[0] = sun.x;
+        globals.sunDir[1] = sun.y;
+        globals.sunDir[2] = sun.z;
+        globals.sunDir[3] = 0.0f;
+
+        std::vector<sandbox::DrawBatch> batches;
+        buildBatches(scene, cache, batches);
+
+        std::vector<sandbox::LineVertex> lineVertices;
+        if (showLines) {
+            std::vector<DebugLine> lines;
+            scene.world().debugLines(lines);
+            lineVertices.reserve(lines.size() * 2);
+            for (const DebugLine& line : lines) {
+                const float r = static_cast<float>((line.color >> 24) & 0xff) / 255.0f;
+                const float g = static_cast<float>((line.color >> 16) & 0xff) / 255.0f;
+                const float b = static_cast<float>((line.color >> 8) & 0xff) / 255.0f;
+                const float a = static_cast<float>(line.color & 0xff) / 255.0f;
+                lineVertices.push_back({line.a.x, line.a.y, line.a.z, r, g, b, a});
+                lineVertices.push_back({line.b.x, line.b.y, line.b.z, r, g, b, a});
+            }
+        }
+
         ++frameCount;
         const float fpsSeconds = std::chrono::duration<float>(now - fpsStart).count();
         if (fpsSeconds >= 0.5f) {
@@ -372,9 +977,15 @@ int runInteractive(const SceneParameters& parameters) {
             frameCount = 0;
             fpsStart = now;
         }
-        renderer.render(lines, viewProjection, overlay(scene, substeps, paused, fps),
+
+        std::vector<sandbox::UiVertex> uiVertices;
+        sandbox::appendText(uiVertices,
+                            overlay(scene, substeps, paused, fps, spawnShape, showLines,
+                                    drag.active),
+                            window.width(), window.height());
+
+        renderer.render(globals, batches, lineVertices, uiVertices,
                         window.width(), window.height());
-        window.swapBuffers();
     }
     return 0;
 }
