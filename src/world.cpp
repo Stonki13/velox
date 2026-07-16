@@ -2438,11 +2438,27 @@ void World::step(float dt) {
                         c.rollingImpulse1 = it->rollingImpulse1;
                         c.rollingImpulse2 = it->rollingImpulse2;
                         c.spinningImpulse = it->spinningImpulse;
+                        // A high-speed approach braked across the speculative
+                        // gap can span several frames before touchdown; keep
+                        // the ORIGINAL approach speed as the restitution
+                        // reference while the pair is still closing fast, or
+                        // the bounce reflects only the residual speed of the
+                        // final frame. Once the body is slow or separating,
+                        // the fresh vn0 takes over (no perpetual bouncing).
+                        if (c.vn0 < -1.0f && it->vn0 < c.vn0) c.vn0 = it->vn0;
                         matched = true;
                         break;
                     }
                 if (matched) continue;
             }
+            // Restitution reference carry (see the featureKey branch): a fast
+            // approach braked across the speculative gap spans frames, and a
+            // fast mover travels far beyond any positional matching radius,
+            // so the carry matches on the body PAIR alone. All contacts of
+            // one pair share the rigid approach, making this exact enough.
+            if (c.vn0 < -1.0f)
+                for (auto it = lo; it != prevContacts_.end() && keyOf(*it) == key; ++it)
+                    if (it->vn0 < c.vn0) c.vn0 = it->vn0;
             float bestDistSq = 2.5e-3f; // 5 cm matching radius
             for (auto it = lo; it != prevContacts_.end() && keyOf(*it) == key; ++it) {
                 float d = lengthSq(it->point - c.point);
@@ -2571,13 +2587,21 @@ void World::step(float dt) {
                 b.advanceOrientation(dt * t);
             }
 
-            // Remove only the remaining approach velocity with an
-            // inverse-mass impulse. Linear momentum is conserved for two
+            // Remove the remaining approach velocity with an inverse-mass
+            // impulse, bouncing with the pair's combined restitution just as
+            // the contact solver would have (differential testing vs Jolt:
+            // an inelastic rescue silently ate the bounce of every impact
+            // fast enough to need CCD). Linear momentum is conserved for two
             // dynamic bodies; static geometry receives no velocity update.
             float vn = dot(a.velocity - b.velocity, n);
             float invMassSum = a.solverInvMass() + b.solverInvMass();
             if (vn < 0.0f && invMassSum > 0.0f) {
-                float impulse = -vn / invMassSum;
+                constexpr float kRestitutionThreshold = 1.0f; // matches solver
+                float restitution = vn < -kRestitutionThreshold
+                    ? combineMaterial(a.restitution, b.restitution,
+                                      a.restitutionCombine, b.restitutionCombine)
+                    : 0.0f;
+                float impulse = -(1.0f + restitution) * vn / invMassSum;
                 a.velocity += n * (impulse * a.solverInvMass());
                 if (b.isDynamic()) b.velocity -= n * (impulse * b.solverInvMass());
             }

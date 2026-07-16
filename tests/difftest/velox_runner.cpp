@@ -1,0 +1,80 @@
+#include "diff_test.h"
+
+#include <velox/velox.h>
+
+#include <stdexcept>
+
+namespace difftest {
+namespace {
+
+velox::Vec3 toVelox(const Vec3f& v) { return {v.x, v.y, v.z}; }
+Vec3f fromVelox(const velox::Vec3& v) { return {v.x, v.y, v.z}; }
+Quatf fromVelox(const velox::Quat& q) { return {q.x, q.y, q.z, q.w}; }
+
+} // namespace
+
+Trajectory runVelox(const SceneDesc& scene) {
+    // Differential runs use the CPU backend: bitwise deterministic and the
+    // reference path the CUDA backend is itself validated against.
+    velox::World world(velox::BackendType::Cpu);
+    world.gravity = toVelox(scene.gravity);
+    world.substeps = scene.substeps;
+
+    std::vector<velox::BodyId> ids;
+    ids.reserve(scene.bodies.size());
+    for (const BodyDesc& desc : scene.bodies) {
+        velox::BodyId id;
+        switch (desc.shape) {
+        case BodyDesc::Shape::Sphere:
+            id = world.addSphere(toVelox(desc.position), desc.radius, desc.mass);
+            break;
+        case BodyDesc::Shape::Capsule:
+            id = world.addCapsule(toVelox(desc.position), desc.radius,
+                                  desc.capsuleHalfHeight, desc.mass);
+            break;
+        case BodyDesc::Shape::Box:
+        case BodyDesc::Shape::GroundBox:
+            id = world.addBox(toVelox(desc.position), toVelox(desc.halfExtents), desc.mass);
+            break;
+        default:
+            throw std::runtime_error("unsupported shape");
+        }
+        velox::Body& body = world.body(id);
+        body.restitution = desc.restitution;
+        body.friction = desc.friction;
+        body.orientation = {desc.orientation.x, desc.orientation.y,
+                            desc.orientation.z, desc.orientation.w};
+        if (desc.mass > 0.0f) {
+            world.setLinearVelocity(id, toVelox(desc.initialVelocity));
+        }
+        ids.push_back(id);
+    }
+
+    for (const JointDesc& joint : scene.joints)
+        world.addBallJoint(ids[static_cast<size_t>(joint.bodyA)],
+                           ids[static_cast<size_t>(joint.bodyB)],
+                           toVelox(joint.worldAnchor));
+
+    Trajectory trajectory;
+    trajectory.reserve(static_cast<size_t>(scene.frames));
+    for (int frame = 0; frame < scene.frames; ++frame) {
+        world.step(scene.dt);
+        FrameState state;
+        state.frame = frame;
+        state.time = scene.dt * static_cast<float>(frame + 1);
+        state.bodies.reserve(scene.tracked.size());
+        for (int index : scene.tracked) {
+            const velox::Body& body = world.body(ids[static_cast<size_t>(index)]);
+            BodySample sample;
+            sample.position = fromVelox(body.position);
+            sample.orientation = fromVelox(body.orientation);
+            sample.velocity = fromVelox(body.velocity);
+            sample.angularVelocity = fromVelox(body.angularVelocity);
+            state.bodies.push_back(sample);
+        }
+        trajectory.push_back(std::move(state));
+    }
+    return trajectory;
+}
+
+} // namespace difftest

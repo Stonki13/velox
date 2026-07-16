@@ -302,10 +302,14 @@ VELOX_HD inline void solveTriangle(Simplex& s) {
 
 // Returns true if the origin is inside the tetrahedron.
 VELOX_HD inline bool solveTetrahedron(Simplex& s, float scale, bool robust) {
+    (void)robust;
     float volume = dot(s.v[1].p - s.v[0].p,
                        cross(s.v[2].p - s.v[0].p, s.v[3].p - s.v[0].p));
     float volumeFloor = 1e-10f * scale * scale * scale;
-    if (robust && fabsf(volume) < volumeFloor) {
+    // A sliver tetrahedron cannot certify containment at any quality level:
+    // its face-plane signs drown in rounding noise. Reduce it to its nearest
+    // triangle and let the iteration keep converging on the surface instead.
+    if (fabsf(volume) < volumeFloor) {
         Simplex best{};
         float bestDist = 1e30f;
         const int faces[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
@@ -327,15 +331,26 @@ VELOX_HD inline bool solveTetrahedron(Simplex& s, float scale, bool robust) {
     Simplex best{};
     float bestDist = 1e30f;
     bool inside = true;
+    // Origin-side tests are normalized to plane distances and compared against
+    // a scale-relative band: with support coordinates of magnitude ~scale,
+    // float dot/cross noise reaches ~scale * 1e-6, and a raw sign test lets a
+    // grazing contact (origin within noise of a face) report "inside", feeding
+    // EPA a polytope whose nearest face is at ~zero distance and produces a
+    // garbage penetration axis (found by differential testing: a sphere
+    // resting on a 100 m static box teleported through it).
+    const float boundary = 3e-6f * scale;
     const int faces[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
     for (int f = 0; f < 4; ++f) {
         int i0 = faces[f][0], i1 = faces[f][1], i2 = faces[f][2];
         Vec3 a = s.v[i0].p, b = s.v[i1].p, c = s.v[i2].p;
         Vec3 n = cross(b - a, c - a);
+        float nLen = length(n);
+        if (nLen < 1e-20f) continue; // degenerate face; volume gate handles it
         Vec3 opposite = s.v[6 - i0 - i1 - i2].p;
-        float signOrigin = dot(n, -a);
-        float signOpp = dot(n, opposite - a);
-        if (signOrigin * signOpp < 0.0f) {
+        float originPlaneDist = dot(n, -a) / nLen;
+        float oppositePlaneDist = dot(n, opposite - a) / nLen;
+        if (originPlaneDist * oppositePlaneDist < 0.0f ||
+            fabsf(originPlaneDist) <= boundary) {
             inside = false;
             Simplex tri{};
             tri.count = 3;
