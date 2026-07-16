@@ -126,7 +126,14 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     // by velocity bias (no energy gain).
     float liveGap = c.bias0 + dot(c.normal, pa - pb);
     float target = liveGap > 0.0f ? -liveGap / dt : 0.0f;
-    if (c.vn0 < -kRestitutionThreshold)
+    // Restitution only fires once the surfaces actually meet. A speculative
+    // contact can be created a full step's travel ahead of the surface;
+    // bouncing from that distance reflects the body early (differential
+    // testing vs Jolt: a 150 m/s sphere bounced 2 m before the wall). Once
+    // the body separates again (vn > 0), the restitution floor must remain:
+    // the impulse accumulated while braking across the speculative gap would
+    // otherwise act as glue and cancel the exit velocity on later substeps.
+    if (c.vn0 < -kRestitutionThreshold && (liveGap <= 0.0f || vn > 0.0f))
         target = vmax(target, -c.restitution * c.vn0);
 
     float jn = (target - vn) / kNormal;
