@@ -7,3 +7,4 @@
 #include "world.h"
 #include "character.h"
 #include "vehicle.h"
+#include "serialization.h"

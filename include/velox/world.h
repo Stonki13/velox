@@ -130,6 +130,7 @@ public:
 
 private:
     friend class World;
+    friend struct SerializationAccess; // serialization.cpp: snapshot <-> bytes
     struct Slot { uint32_t dense = UINT32_MAX, generation = 0; };
     struct Previous { Vec3 position; Quat orientation; };
 
@@ -318,6 +319,8 @@ public:
     void step(float dt);
 
 private:
+    friend struct SerializationAccess; // serialization.cpp: dense state access
+
     struct HandleSlot {
         uint32_t dense = UINT32_MAX;
         uint32_t generation = 0;
