@@ -10,6 +10,11 @@ if(BUILD_TESTING)
     add_test(NAME velox.soak COMMAND fuzz_demo soak 6000)
     add_test(NAME velox.islands COMMAND islands_demo)
     add_test(NAME velox.vehicle COMMAND vehicle_demo)
+    add_test(NAME velox.serialize COMMAND serialize_demo)
+    # Every test normally finishes in seconds; a generous cap turns a rare
+    # hang into a fast failure instead of a 25-minute default timeout.
+    set_tests_properties(velox.stress velox.fuzz velox.soak velox.islands
+        velox.vehicle velox.serialize PROPERTIES TIMEOUT 180)
 endif()
 
 add_executable(benchmark benchmark.cpp)
@@ -23,6 +28,9 @@ target_link_libraries(islands_demo PRIVATE velox)
 
 add_executable(vehicle_demo vehicle_demo.cpp)
 target_link_libraries(vehicle_demo PRIVATE velox)
+
+add_executable(serialize_demo serialize_demo.cpp)
+target_link_libraries(serialize_demo PRIVATE velox)
 
 add_executable(geometry_fuzz geometry_fuzz.cpp)
 target_link_libraries(geometry_fuzz PRIVATE velox)
