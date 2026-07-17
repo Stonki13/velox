@@ -156,6 +156,8 @@ public:
         });
     }
 
+    void setParallelIslands(bool enabled) override { parallelIslands_ = enabled; }
+
     void solveVelocities(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts, float dt,
                          bool warmStart) override {
@@ -170,6 +172,37 @@ public:
                     if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
                         solveContact(bodies[c.a], bodies[c.b], c, dt);
             return;
+        }
+
+        // Independent contact islands solve concurrently with each island's
+        // contacts in their global sequential order. Islands share no dynamic
+        // bodies, so this is BITWISE identical to single-threaded solving —
+        // unlike the conflict-batch fallback below, which reorders impulses.
+        // Islands are rebuilt on the first substep (contacts are stable
+        // within a step) and reused afterwards.
+        if (parallelIslands_) {
+            if (warmStart || islandOfContact_.size() != contacts.size())
+                buildIslands(bodies, contacts);
+            if (islandRanges_.size() >= 2) {
+                workers_.parallelFor(islandRanges_.size(), [&](size_t island) {
+                    const IslandRange range = islandRanges_[island];
+                    if (warmStart)
+                        for (size_t k = range.begin; k < range.end; ++k) {
+                            Contact& c = contacts[islandContacts_[k]];
+                            if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
+                                warmStartContact(bodies[c.a], bodies[c.b], c);
+                        }
+                    for (int iter = 0; iter < kVelocityIterations; ++iter)
+                        for (size_t k = range.begin; k < range.end; ++k) {
+                            Contact& c = contacts[islandContacts_[k]];
+                            if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
+                                solveContact(bodies[c.a], bodies[c.b], c, dt);
+                        }
+                });
+                return;
+            }
+            // A single island (one big pile) has no island-level parallelism;
+            // fall through to conflict-free batches.
         }
 
         buildSolverBatches(bodies, contacts);
@@ -281,6 +314,67 @@ public:
 
 private:
     struct SolverBatch { size_t begin, end; };
+    struct IslandRange { size_t begin, end; };
+
+    // Union-find over dynamic bodies connected by contacts, then bucket the
+    // contact indices by island preserving global contact order (so each
+    // island's sequential solve matches the single-threaded reference).
+    // Islands are emitted largest-first for worker load balance; ordering
+    // between islands cannot affect results because they are disjoint.
+    void buildIslands(const std::vector<Body>& bodies,
+                      const std::vector<Contact>& contacts) {
+        islandParent_.resize(bodies.size());
+        for (uint32_t i = 0; i < islandParent_.size(); ++i) islandParent_[i] = i;
+        auto find = [&](uint32_t x) {
+            while (islandParent_[x] != x) {
+                islandParent_[x] = islandParent_[islandParent_[x]];
+                x = islandParent_[x];
+            }
+            return x;
+        };
+        for (const Contact& c : contacts)
+            if (bodies[c.a].isDynamic() && bodies[c.b].isDynamic()) {
+                uint32_t ra = find(c.a), rb = find(c.b);
+                if (ra != rb) islandParent_[ra] = rb;
+            }
+
+        // Map island roots to dense ids in first-appearance order.
+        islandIdOfRoot_.assign(bodies.size(), UINT32_MAX);
+        islandSizes_.clear();
+        islandOfContact_.resize(contacts.size());
+        for (size_t i = 0; i < contacts.size(); ++i) {
+            const Contact& c = contacts[i];
+            uint32_t representative = bodies[c.a].isDynamic() ? c.a : c.b;
+            uint32_t root = find(representative);
+            uint32_t id = islandIdOfRoot_[root];
+            if (id == UINT32_MAX) {
+                id = (uint32_t)islandSizes_.size();
+                islandIdOfRoot_[root] = id;
+                islandSizes_.push_back(0);
+            }
+            islandOfContact_[i] = id;
+            ++islandSizes_[id];
+        }
+
+        // Bucket contact indices by island (counting sort keeps global order).
+        const size_t islandCount = islandSizes_.size();
+        islandRanges_.resize(islandCount);
+        size_t offset = 0;
+        for (size_t island = 0; island < islandCount; ++island) {
+            islandRanges_[island] = {offset, offset};
+            offset += islandSizes_[island];
+        }
+        islandContacts_.resize(contacts.size());
+        for (size_t i = 0; i < contacts.size(); ++i) {
+            IslandRange& range = islandRanges_[islandOfContact_[i]];
+            islandContacts_[range.end++] = (uint32_t)i;
+        }
+        std::sort(islandRanges_.begin(), islandRanges_.end(),
+                  [](const IslandRange& x, const IslandRange& y) {
+                      size_t sx = x.end - x.begin, sy = y.end - y.begin;
+                      return sx != sy ? sx > sy : x.begin < y.begin;
+                  });
+    }
 
     void buildSolverBatches(const std::vector<Body>& bodies,
                             const std::vector<Contact>& contacts) {
@@ -331,6 +425,13 @@ private:
 
     struct Aabb { Vec3 lo, hi; };
     WorkerPool workers_;
+    bool parallelIslands_ = true;
+    std::vector<uint32_t> islandParent_;
+    std::vector<uint32_t> islandIdOfRoot_;
+    std::vector<uint32_t> islandOfContact_;
+    std::vector<size_t> islandSizes_;
+    std::vector<uint32_t> islandContacts_;
+    std::vector<IslandRange> islandRanges_;
     std::vector<Aabb> aabbs_;
     std::vector<BodyIndex> sorted_;
     std::vector<BodyIndex> boundless_;
