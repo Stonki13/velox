@@ -6,3 +6,4 @@
 #include "joint.h"
 #include "world.h"
 #include "character.h"
+#include "vehicle.h"

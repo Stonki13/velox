@@ -22,6 +22,7 @@ add_library(velox
     src/queries.cpp
     src/debug.cpp
     src/character.cpp
+    src/vehicle.cpp
 )
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
