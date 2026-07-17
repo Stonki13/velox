@@ -123,6 +123,10 @@ public:
     // CPU backend: 0 selects hardware concurrency. GPU backends report 0.
     virtual void setWorkerCount(uint32_t) {}
     virtual uint32_t workerCount() const { return 0; }
+    // CPU backend: solve independent contact islands on the worker pool.
+    // Bitwise identical to sequential solving because islands share no
+    // dynamic bodies. GPU backends ignore it (graph coloring instead).
+    virtual void setParallelIslands(bool) {}
 };
 
 Backend* createCpuBackend();

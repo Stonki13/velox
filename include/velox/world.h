@@ -155,6 +155,12 @@ private:
 
 struct BroadPhaseData;
 
+// CPU contact solving strategy. Parallel solves independent contact islands
+// concurrently on the worker pool; results are bitwise identical to
+// Sequential because islands share no dynamic bodies. The GPU backend uses
+// graph coloring and ignores this setting.
+enum class IslandSolvingMode : uint8_t { Sequential = 0, Parallel = 1 };
+
 class World {
 public:
     // Auto picks the NVIDIA CUDA backend when built with VELOX_ENABLE_CUDA and
@@ -162,6 +168,12 @@ public:
     // unavailable.
     explicit World(BackendType type = BackendType::Auto);
     ~World();
+
+    IslandSolvingMode islandSolvingMode() const { return islandSolvingMode_; }
+    void setIslandSolvingMode(IslandSolvingMode mode) {
+        islandSolvingMode_ = mode;
+        backend_->setParallelIslands(mode == IslandSolvingMode::Parallel);
+    }
 
     const char* backendName() const;
     void setWorkerCount(uint32_t count) { backend_->setWorkerCount(count); }
@@ -356,6 +368,7 @@ private:
     std::vector<JointBreakEvent> jointBreakEvents_;
     std::vector<uint64_t> prevPairKeys_;
     ContactModifier contactModifier_;
+    IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;
     StepStats lastStepStats_;
     MeshSoup meshes_;
     std::vector<uint64_t> candidatePairs_;
