@@ -56,6 +56,19 @@ Tolerances tolerancesFor(const std::string& name) {
         t.maxVelocityDelta = 2.0f;
         t.minCorrelation = 0.97f;
         t.maxEnergyDrift = 0.02f;
+    } else if (name == "gyro_spin") {
+        // Pure rotation at the origin: compare angular velocity, not the
+        // (constant) position. Jolt's explicit gyroscopic force visibly
+        // DECAYS the spin (|w| 8.0 -> 5.6 over 8 s) while Velox's
+        // momentum-preserving integrator precesses in a closed orbit, so
+        // pointwise agreement is bounded by Jolt's drift; the real gate is
+        // the angular-momentum conservation behavioral check on Velox.
+        t.maxPositionDelta = 0.05f;
+        t.maxVelocityDelta = 0.5f;
+        t.maxAngularDelta = 5.0f;
+        t.minCorrelation = 0.85f;
+        t.correlateAngular = true;
+        t.maxEnergyDrift = 0.05f;
     } else if (name == "ccd_wall") {
         // The wall must stop the bullet in both engines (behavioral check is
         // the real gate). A one-frame difference in the bounce instant shows
@@ -105,6 +118,56 @@ bool behavioralChecks(const SceneDesc& scene, const char* engine,
             if (std::fabs(arm - 2.0f) > 0.15f) {
                 std::fprintf(stderr, "  [%s] pendulum: arm length %.3f at frame %d\n",
                              engine, arm, frame.frame);
+                return false;
+            }
+        }
+    }
+    if (scene.name == "gyro_spin" && std::string(engine) == "velox") {
+        // Torque-free rigid rotation must conserve world angular momentum.
+        // (Asserted for Velox only: Jolt's opt-in gyroscopic force is
+        // documented as approximate and demonstrably bleeds momentum.)
+        const BodyDesc& box = scene.bodies[static_cast<size_t>(scene.tracked[0])];
+        const float hx = box.halfExtents.x, hy = box.halfExtents.y, hz = box.halfExtents.z;
+        const float ix = box.mass / 3.0f * (hy * hy + hz * hz);
+        const float iy = box.mass / 3.0f * (hx * hx + hz * hz);
+        const float iz = box.mass / 3.0f * (hx * hx + hy * hy);
+        auto momentum = [&](const BodySample& sample) {
+            // L = R * I_body * R^T * w, with quaternion rotation applied
+            // component-wise through the body frame.
+            const Quatf& q = sample.orientation;
+            auto rotateInverse = [&](const Vec3f& v) {
+                // conjugate quaternion rotation
+                const float x = q.x, y = q.y, z = q.z, w = q.w;
+                const Vec3f u{-x, -y, -z};
+                const Vec3f t{2.0f * (u.y * v.z - u.z * v.y),
+                              2.0f * (u.z * v.x - u.x * v.z),
+                              2.0f * (u.x * v.y - u.y * v.x)};
+                return Vec3f{v.x + w * t.x + (u.y * t.z - u.z * t.y),
+                             v.y + w * t.y + (u.z * t.x - u.x * t.z),
+                             v.z + w * t.z + (u.x * t.y - u.y * t.x)};
+            };
+            auto rotateForward = [&](const Vec3f& v) {
+                const float x = q.x, y = q.y, z = q.z, w = q.w;
+                const Vec3f u{x, y, z};
+                const Vec3f t{2.0f * (u.y * v.z - u.z * v.y),
+                              2.0f * (u.z * v.x - u.x * v.z),
+                              2.0f * (u.x * v.y - u.y * v.x)};
+                return Vec3f{v.x + w * t.x + (u.y * t.z - u.z * t.y),
+                             v.y + w * t.y + (u.z * t.x - u.x * t.z),
+                             v.z + w * t.z + (u.x * t.y - u.y * t.x)};
+            };
+            Vec3f local = rotateInverse(sample.angularVelocity);
+            local = {local.x * ix, local.y * iy, local.z * iz};
+            return rotateForward(local);
+        };
+        const Vec3f initial = momentum(trajectory.front().bodies[0]);
+        const float initialLength = length(initial);
+        for (const FrameState& frame : trajectory) {
+            const Vec3f now = momentum(frame.bodies[0]);
+            const Vec3f delta{now.x - initial.x, now.y - initial.y, now.z - initial.z};
+            if (length(delta) > 0.02f * initialLength) {
+                std::fprintf(stderr, "  [%s] gyro_spin: |dL|/|L| = %.4f at frame %d\n",
+                             engine, length(delta) / initialLength, frame.frame);
                 return false;
             }
         }

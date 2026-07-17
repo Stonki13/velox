@@ -68,8 +68,12 @@ DiffResult compare(const SceneDesc& scene, const Trajectory& a, const Trajectory
                            sa.position.z - sb.position.z};
             const Vec3f dv{sa.velocity.x - sb.velocity.x, sa.velocity.y - sb.velocity.y,
                            sa.velocity.z - sb.velocity.z};
+            const Vec3f dw{sa.angularVelocity.x - sb.angularVelocity.x,
+                           sa.angularVelocity.y - sb.angularVelocity.y,
+                           sa.angularVelocity.z - sb.angularVelocity.z};
             result.maxPositionDelta = std::max(result.maxPositionDelta, length(dp));
             result.maxVelocityDelta = std::max(result.maxVelocityDelta, length(dv));
+            result.maxAngularDelta = std::max(result.maxAngularDelta, length(dw));
         }
     }
 
@@ -91,14 +95,19 @@ DiffResult compare(const SceneDesc& scene, const Trajectory& a, const Trajectory
     result.energyDriftA = drift(a);
     result.energyDriftB = drift(b);
 
-    // Pearson correlation per body per axis; keep the minimum.
+    // Pearson correlation per body per axis; keep the minimum. Scenes with
+    // stationary tumbling bodies correlate angular velocity instead.
     result.trajectoryCorrelation = 1.0f;
     for (size_t body = 0; body < bodies; ++body) {
         for (int axis = 0; axis < 3; ++axis) {
             std::vector<float> seriesA(frames), seriesB(frames);
             for (size_t frame = 0; frame < frames; ++frame) {
-                const Vec3f& pa = a[frame].bodies[body].position;
-                const Vec3f& pb = b[frame].bodies[body].position;
+                const Vec3f& pa = tolerances.correlateAngular
+                    ? a[frame].bodies[body].angularVelocity
+                    : a[frame].bodies[body].position;
+                const Vec3f& pb = tolerances.correlateAngular
+                    ? b[frame].bodies[body].angularVelocity
+                    : b[frame].bodies[body].position;
                 seriesA[frame] = axis == 0 ? pa.x : axis == 1 ? pa.y : pa.z;
                 seriesB[frame] = axis == 0 ? pb.x : axis == 1 ? pb.y : pb.z;
             }
@@ -109,6 +118,7 @@ DiffResult compare(const SceneDesc& scene, const Trajectory& a, const Trajectory
 
     result.passed = result.maxPositionDelta <= tolerances.maxPositionDelta &&
                     result.maxVelocityDelta <= tolerances.maxVelocityDelta &&
+                    result.maxAngularDelta <= tolerances.maxAngularDelta &&
                     result.energyDriftA <= tolerances.maxEnergyDrift &&
                     result.energyDriftB <= tolerances.maxEnergyDrift &&
                     result.trajectoryCorrelation >= tolerances.minCorrelation;

@@ -31,7 +31,9 @@ struct BodyDesc {
     float restitution = 0.0f;
     float friction = 0.5f;
     Vec3f initialVelocity{};
+    Vec3f initialAngularVelocity{};
     bool highSpeedCcd = false;       // request continuous collision handling
+    bool gyroscopic = false;         // Jolt: enable gyroscopic force
 };
 
 // Point (ball-socket) joint between two bodies by scene index.
@@ -71,6 +73,7 @@ using Trajectory = std::vector<FrameState>;
 struct DiffResult {
     float maxPositionDelta = 0.0f;   // meters, over all frames and bodies
     float maxVelocityDelta = 0.0f;   // m/s
+    float maxAngularDelta = 0.0f;    // rad/s
     float energyDriftA = 0.0f;       // relative KE+PE drift of engine A
     float energyDriftB = 0.0f;       // relative KE+PE drift of engine B
     float trajectoryCorrelation = 1.0f; // min Pearson r across axes/bodies
@@ -83,8 +86,10 @@ struct DiffResult {
 struct Tolerances {
     float maxPositionDelta = 5e-3f;
     float maxVelocityDelta = 0.25f;
+    float maxAngularDelta = 1e30f;   // opt-in per scene
     float maxEnergyDrift = 0.05f;
     float minCorrelation = 0.99f;
+    bool correlateAngular = false;   // Pearson over angular velocity series
 };
 
 inline float length(const Vec3f& v) {
