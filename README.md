@@ -63,30 +63,31 @@ contact and joint solving, and transform integration on the device across all
 solver substeps, then download body state once. Smaller joint sets use the CPU
 joint path to avoid graph overhead.
 
-`examples/benchmark` on an RTX 5080 vs the single-threaded CPU reference
-(60 Hz steps, full pipeline, 4 solver substeps, 60-step run):
+`examples/benchmark` on an RTX 5080, median ms/step (60 Hz steps, full
+pipeline, 4 solver substeps):
 
-| Scene | CPU | CUDA |
-|---|---|---|
-| 512-sphere rain | 4.70 ms | **2.56 ms** |
-| 2048-sphere rain | 21.65 ms | **5.89 ms** |
-| 8192-sphere rain | 124.46 ms | **39.54 ms** |
-| 2048 spheres on 20k-triangle terrain | 17.77 ms | **4.05 ms** |
-| 4096 disjoint meshes, 64 active bodies | **0.58 ms** | 1.72 ms |
+| Scene | CPU 1 thread | CPU 16 threads | CUDA |
+|---|---|---|---|
+| 512-sphere rain | 2.06 ms | **0.70 ms** | 1.24 ms |
+| 2048-sphere rain | 4.37 ms | 3.46 ms | **1.59 ms** |
+| 8192-sphere rain | 18.94 ms | **12.61 ms** | 12.94 ms |
+| 2048 spheres on 20k-triangle terrain | **0.83 ms** | 0.89 ms | 1.41 ms |
+| 4096 disjoint meshes, 64 active bodies | **1.05 ms** | 1.17 ms | 4.12 ms |
 
-The incremental AABB-tree broad phase halved the CPU mesh-terrain scene
-(previously 34.8 ms) and makes the disjoint-mesh archipelago effectively free
-on the CPU — small active sets over large static worlds no longer pay for the
-world's size, and the CPU beats the GPU there (transfer overhead dominates
-tiny workloads).
+Profiling the 8192-body pile exposed a host-side hot spot that dominated the
+whole step regardless of backend: contact-event pairing rescanned the entire
+contact array once per active pair (O(pairs x contacts), ~60 ms at ~11k
+contacts). Replacing it with one sorted pass cut the CUDA step from 83 ms to
+18 ms and the CPU step from 124 ms to 19 ms on that scene. Small active sets
+over large static worlds remain effectively free on the CPU thanks to the
+incremental AABB-tree broad phase.
 
-The independent-distance-joint scene added to the same benchmark measures the
-new resident constraint path (10-step local Release sample):
+The independent-distance-joint scene measures the resident constraint path:
 
 | Joints | CPU | CUDA |
 |---|---|---|
-| 1024 | 2.02 ms | **0.69 ms** |
-| 4096 | 8.07 ms | **1.47 ms** |
+| 1024 | 2.15 ms | **1.53 ms** |
+| 4096 | 8.65 ms | **3.28 ms** |
 
 These are a current local Release run on an RTX 5080. The GPU broad phase is
 hybrid: compact all-pairs culling keeps small scenes highly occupied, while
