@@ -141,10 +141,32 @@ SceneDesc ccdWall() {
     return scene;
 }
 
+// 6. Gyroscopic precession: a box spinning about its minor inertia axis with
+// a transverse component precesses regularly (non-chaotic, unlike the
+// intermediate-axis tumble, so cross-engine comparison stays meaningful).
+// No gravity, no contacts: pure rotational dynamics.
+SceneDesc gyroSpin() {
+    SceneDesc scene;
+    scene.name = "gyro_spin";
+    scene.gravity = {0.0f, 0.0f, 0.0f};
+    scene.frames = 600;
+    BodyDesc box;
+    box.shape = BodyDesc::Shape::Box;
+    box.halfExtents = {0.1f, 0.4f, 0.05f};
+    box.position = {0.0f, 2.0f, 0.0f};
+    box.mass = 1.0f;
+    box.initialAngularVelocity = {0.5f, 8.0f, 0.0f}; // minor axis + transverse
+    box.gyroscopic = true;
+    scene.bodies.push_back(box);
+    scene.tracked = {0};
+    return scene;
+}
+
 } // namespace
 
 std::vector<SceneDesc> canonicalScenes() {
-    return {sphereDrop(), boxStack(), pendulum(), sphereRoll(), ccdWall()};
+    return {sphereDrop(), boxStack(), pendulum(), sphereRoll(), ccdWall(),
+            gyroSpin()};
 }
 
 } // namespace difftest

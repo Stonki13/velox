@@ -137,6 +137,11 @@ Trajectory runJolt(const SceneDesc& scene) {
                 JPH::EOverrideMassProperties::CalculateInertia;
             settings.mMassPropertiesOverride.mMass = desc.mass;
             settings.mLinearVelocity = toJolt(desc.initialVelocity);
+            settings.mAngularVelocity = toJolt(desc.initialAngularVelocity);
+            // Velox always integrates gyroscopic precession (momentum-
+            // preserving orientation advance); Jolt makes it opt-in.
+            settings.mApplyGyroscopicForce = desc.gyroscopic;
+            if (desc.gyroscopic) settings.mMaxAngularVelocity = 100.0f;
             if (desc.highSpeedCcd)
                 settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
         }

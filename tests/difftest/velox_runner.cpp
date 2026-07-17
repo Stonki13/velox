@@ -46,6 +46,7 @@ Trajectory runVelox(const SceneDesc& scene) {
                             desc.orientation.z, desc.orientation.w};
         if (desc.mass > 0.0f) {
             world.setLinearVelocity(id, toVelox(desc.initialVelocity));
+            world.setAngularVelocity(id, toVelox(desc.initialAngularVelocity));
         }
         ids.push_back(id);
     }
