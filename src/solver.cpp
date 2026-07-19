@@ -1,6 +1,7 @@
 #include "narrowphase.h"
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <exception>
 #include <functional>
@@ -206,12 +207,22 @@ public:
                          std::vector<Contact>& contacts, float dt,
                          bool warmStart) override {
         if (contacts.empty()) return;
+        // Elliptical anisotropic limits couple the two tangent rows. The GPU
+        // path already runs two sweeps per base iteration for graph coloring;
+        // match that convergence budget on CPU only when the directional
+        // limits differ, without taxing ordinary isotropic contacts.
+        const bool hasAnisotropicContact = std::any_of(
+            contacts.begin(), contacts.end(), [](const Contact& contact) {
+                return std::fabs(contact.friction1 - contact.friction2) > 1e-6f;
+            });
+        const int velocityIterations = hasAnisotropicContact
+            ? 2 * kVelocityIterations : kVelocityIterations;
         if (workers_.workerCount() == 1) {
             if (warmStart)
                 for (Contact& c : contacts)
                     if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
                         warmStartContact(bodies[c.a], bodies[c.b], c);
-            for (int iter = 0; iter < kVelocityIterations; ++iter)
+            for (int iter = 0; iter < velocityIterations; ++iter)
                 for (Contact& c : contacts)
                     if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
                         solveContact(bodies[c.a], bodies[c.b], c, dt);
@@ -236,7 +247,7 @@ public:
                             if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
                                 warmStartContact(bodies[c.a], bodies[c.b], c);
                         }
-                    for (int iter = 0; iter < kVelocityIterations; ++iter)
+                    for (int iter = 0; iter < velocityIterations; ++iter)
                         for (size_t k = range.begin; k < range.end; ++k) {
                             Contact& c = contacts[islandContacts_[k]];
                             if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
@@ -272,7 +283,7 @@ public:
             runBatches([&](Contact& contact) {
                 warmStartContact(bodies[contact.a], bodies[contact.b], contact);
             });
-        for (int iteration = 0; iteration < kVelocityIterations; ++iteration)
+        for (int iteration = 0; iteration < velocityIterations; ++iteration)
             runBatches([&](Contact& contact) {
                 solveContact(bodies[contact.a], bodies[contact.b], contact, dt);
             });
