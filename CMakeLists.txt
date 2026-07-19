@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(velox VERSION 0.1.0 LANGUAGES CXX)
+include(cmake/version.cmake)
+velox_read_version("${CMAKE_CURRENT_SOURCE_DIR}/include/velox/version.h" VELOX_VERSION)
+project(velox VERSION ${VELOX_VERSION} LANGUAGES CXX)
 
 include(CTest)
 include(GNUInstallDirs)
