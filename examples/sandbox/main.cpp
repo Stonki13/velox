@@ -29,7 +29,7 @@ using velox::World;
 constexpr float Pi = 3.14159265358979323846f;
 constexpr float FixedDt = 1.0f / 60.0f;
 
-enum class Preset { Stack, Rain, Ragdoll, Contraption };
+enum class Preset { Stack, Rain, Ragdoll, Contraption, Gyro };
 
 enum class SpawnShape { Sphere, Box, Capsule, Cylinder, Cone, RandomHull, Complex };
 
@@ -91,6 +91,7 @@ const char* presetName(Preset preset) {
     case Preset::Rain: return "RAIN";
     case Preset::Ragdoll: return "RAGDOLL";
     case Preset::Contraption: return "CONTRAPTION";
+    case Preset::Gyro: return "GYRO";
     }
     return "UNKNOWN";
 }
@@ -148,6 +149,7 @@ public:
         case Preset::Rain: buildRain(); break;
         case Preset::Ragdoll: buildRagdoll(); break;
         case Preset::Contraption: buildContraption(); break;
+        case Preset::Gyro: buildGyro(); break;
         }
     }
 
@@ -476,6 +478,30 @@ private:
         }
     }
 
+    // Gyroscopic showcase: three long boxes floating in zero gravity, spun
+    // about their three principal axes. The middle one spins about the
+    // UNSTABLE intermediate axis and periodically somersaults (Dzhanibekov
+    // effect) — dynamics validated against Jolt in tests/difftest.
+    void buildGyro() {
+        world_->gravity = {0.0f, 0.0f, 0.0f};
+        ground(); // visual reference; nothing falls onto it
+        const Vec3 half{0.2f, 0.8f, 0.1f};
+        struct Spin { Vec3 axis; const char* label; };
+        const Vec3 spins[3] = {
+            {0.0f, 9.0f, 0.05f},  // minor axis: fast stable spin + precession
+            {6.0f, 0.06f, 0.0f},  // intermediate axis: Dzhanibekov flips
+            {0.05f, 0.0f, 5.0f},  // major axis: stable
+        };
+        for (int i = 0; i < 3; ++i) {
+            const Vec3 position{-3.0f + 3.0f * static_cast<float>(i), 3.0f, 0.0f};
+            const BodyId id = world_->addBox(position, half, 1.0f);
+            world_->body(id).friction = 0.6f;
+            world_->setAngularVelocity(id, spins[i]);
+            dynamicBodies_.push_back(id);
+            pieceBox(id, half);
+        }
+    }
+
     std::unique_ptr<World> world_;
     std::vector<BodyId> dynamicBodies_;
     std::vector<RenderBody> renderBodies_;
@@ -763,8 +789,9 @@ void buildBatches(const SandboxScene& scene, RenderCache& cache,
 // --- selftest ------------------------------------------------------------------
 
 bool selfTest(const SceneParameters& parameters) {
-    constexpr std::array<Preset, 4> presets{
-        Preset::Stack, Preset::Rain, Preset::Ragdoll, Preset::Contraption};
+    constexpr std::array<Preset, 5> presets{
+        Preset::Stack, Preset::Rain, Preset::Ragdoll, Preset::Contraption,
+        Preset::Gyro};
     for (Preset preset : presets) {
         SandboxScene scene(parameters);
         scene.reset(preset);
@@ -781,6 +808,19 @@ bool selfTest(const SceneParameters& parameters) {
         }
         std::vector<DebugLine> lines;
         scene.world().debugLines(lines);
+        // The zero-gravity gyro preset is contact-free by design; its gate is
+        // that the tumbling boxes keep spinning (no artificial damping).
+        if (preset == Preset::Gyro) {
+            bool spinning = true;
+            for (BodyId id : scene.dynamicBodies())
+                spinning = spinning &&
+                    velox::lengthSq(scene.world().body(id).angularVelocity) > 1.0f;
+            if (!spinning || lines.empty()) {
+                std::fprintf(stderr, "sandbox self-test: gyro preset lost its spin\n");
+                return false;
+            }
+            continue;
+        }
         if (!sawContact || lines.empty()) {
             std::fprintf(stderr, "sandbox self-test: %s did not produce expected contacts/debug lines\n", presetName(preset));
             return false;
@@ -838,7 +878,9 @@ std::vector<std::string> overlay(const SandboxScene& scene, int substeps, bool p
     result.emplace_back(line);
     result.emplace_back("WASD MOVE  QE TURN  RMB LOOK  LMB DRAG  WHEEL DEPTH");
     result.emplace_back("1-7 SHAPE  SPACE SPAWN  R RESET  P PAUSE  +/- SUBSTEPS  L LINES");
-    result.emplace_back("F1 STACK  F2 RAIN  F3 RAGDOLL  F4 CONTRAPTION");
+    result.emplace_back("F1 STACK  F2 RAIN  F3 RAGDOLL  F4 CONTRAPTION  F5 GYRO");
+    if (scene.preset() == Preset::Gyro)
+        result.emplace_back("ZERO-G: LEFT STABLE SPIN  MIDDLE DZHANIBEKOV FLIPS  RIGHT STABLE");
     return result;
 }
 
@@ -887,6 +929,7 @@ int runInteractive(const SceneParameters& parameters) {
         if (input.pressed(sandbox::Action::Rain)) { scene.reset(Preset::Rain); drag.active = false; }
         if (input.pressed(sandbox::Action::Ragdoll)) { scene.reset(Preset::Ragdoll); drag.active = false; }
         if (input.pressed(sandbox::Action::Contraption)) { scene.reset(Preset::Contraption); drag.active = false; }
+        if (input.pressed(sandbox::Action::Gyro)) { scene.reset(Preset::Gyro); drag.active = false; }
         if (input.pressed(sandbox::Action::Shape1)) spawnShape = SpawnShape::Sphere;
         if (input.pressed(sandbox::Action::Shape2)) spawnShape = SpawnShape::Box;
         if (input.pressed(sandbox::Action::Shape3)) spawnShape = SpawnShape::Capsule;

@@ -22,6 +22,7 @@ enum class Action : unsigned char {
     Rain,
     Ragdoll,
     Contraption,
+    Gyro,
     ToggleLines,
     Shape1,
     Shape2,
