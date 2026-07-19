@@ -181,6 +181,12 @@ enum class IslandSolvingMode : uint8_t { Sequential = 0, Parallel = 1 };
 // backend, making replay comparison meaningful across supported CPU platforms.
 enum class DeterminismMode : uint8_t { Relaxed = 0, Strict = 1 };
 
+// Controls the response to a recoverable CUDA allocation or device failure.
+// CPU fallback reruns the failed frame from its pre-step snapshot; because the
+// CPU and CUDA solvers use different execution orders, the switch is not a
+// lockstep-deterministic transition.
+enum class DeviceLossPolicy : uint8_t { FallbackToCPU = 0, ThrowException = 1 };
+
 // Controls which threads may enter World methods. Strict is the default and
 // confines all access to the creating thread. Relaxed permits cross-thread
 // query calls, but mutations and step() remain creator-thread only. Concurrent
@@ -210,6 +216,15 @@ public:
     // Strict mode requires a build configured with VELOX_STRICT_FLOATING_POINT.
     // It uses the CPU reference backend; CUDA strict parity is not yet supported.
     void setDeterminismMode(DeterminismMode mode);
+
+    DeviceLossPolicy deviceLossPolicy() const;
+    void setDeviceLossPolicy(DeviceLossPolicy policy);
+    // True whenever the active backend is the portable CPU implementation,
+    // including an Auto/CUDA world that fell back after a recoverable failure.
+    bool isOnCPUBackend() const;
+    // Recreate the CUDA backend after CPU fallback. Returns false when no
+    // usable CUDA device is available; call during a non-critical frame.
+    bool resetCUDABackend();
 
     WorldCcdDefaults ccdDefaults() const;
     void setCcdDefaults(WorldCcdDefaults defaults);
@@ -412,7 +427,12 @@ private:
     void solveJoints(float dt);
     void finishBrokenJoints(float dt);
     void updateSleeping(float dt);
+    struct StepRollback;
+    StepRollback saveStepRollback() const;
+    void restoreStepRollback(StepRollback&& rollback);
+    void stepImpl(float dt);
     void resetBackend(BackendType type);
+    void activateCpuFallback(const BackendFailure& failure);
     enum class AccessKind : uint8_t { Query, Mutation, Step };
     class AccessGuard {
     public:
@@ -444,6 +464,8 @@ private:
     ContactModifier contactModifier_;
     IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;
     DeterminismMode determinismMode_ = DeterminismMode::Relaxed;
+    DeviceLossPolicy deviceLossPolicy_ = DeviceLossPolicy::FallbackToCPU;
+    bool fallbackToCPU_ = false;
     WorldCcdDefaults ccdDefaults_;
     WorldMultiToiSettings multiToiSettings_;
     BackendType requestedBackend_ = BackendType::Auto;

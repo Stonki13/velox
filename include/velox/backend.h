@@ -1,6 +1,8 @@
 #pragma once
 #include "joint.h"
 #include <functional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace velox {
@@ -81,6 +83,21 @@ struct Contact {
 // Cpu is portable across supported Intel and AMD processor hosts. Cuda is an
 // NVIDIA-only accelerator backend; Auto falls back to Cpu when CUDA is absent.
 enum class BackendType { Auto, Cpu, Cuda };
+
+// Recoverable accelerator failures are reported separately from invalid scene
+// data and programming errors so World can retry the same frame on CPU.
+enum class BackendFailureKind : uint8_t { MemoryAllocation, DeviceLost };
+
+class BackendFailure : public std::runtime_error {
+public:
+    BackendFailure(BackendFailureKind kind, const std::string& message)
+        : std::runtime_error(message), kind_(kind) {}
+
+    BackendFailureKind kind() const noexcept { return kind_; }
+
+private:
+    BackendFailureKind kind_;
+};
 
 // Compute backend interface. The CPU reference backend lives in solver.cpp;
 // the CUDA backend (backend_cuda.cu) runs the same integration and narrow

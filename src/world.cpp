@@ -5,6 +5,7 @@
 #include "narrowphase.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -180,7 +181,55 @@ void validateRuntimeBody(const Body& body) {
 
 } // namespace
 
+struct World::StepRollback {
+    std::vector<Body> bodies;
+    std::vector<Contact> contacts, previousContacts;
+    std::vector<Joint> joints;
+    std::vector<PrevState> previous;
+    std::vector<uint64_t> pairKeys, previousPairKeys;
+    std::vector<uint32_t> unionParent;
+    std::vector<float> islandTimer;
+    std::vector<ContactEvent> events;
+    std::vector<JointBreakEvent> jointBreakEvents;
+    StepStats lastStepStats;
+};
+
 World::~World() = default;
+
+World::StepRollback World::saveStepRollback() const {
+    StepRollback rollback;
+    rollback.bodies = bodies_;
+    rollback.contacts = contacts_;
+    rollback.previousContacts = prevContacts_;
+    rollback.joints = joints_;
+    rollback.previous = prev_;
+    rollback.pairKeys = pairKeys_;
+    rollback.previousPairKeys = prevPairKeys_;
+    rollback.unionParent = unionParent_;
+    rollback.islandTimer = islandTimer_;
+    rollback.events = events_;
+    rollback.jointBreakEvents = jointBreakEvents_;
+    rollback.lastStepStats = lastStepStats_;
+    return rollback;
+}
+
+void World::restoreStepRollback(StepRollback&& rollback) {
+    bodies_ = std::move(rollback.bodies);
+    contacts_ = std::move(rollback.contacts);
+    prevContacts_ = std::move(rollback.previousContacts);
+    joints_ = std::move(rollback.joints);
+    prev_ = std::move(rollback.previous);
+    pairKeys_ = std::move(rollback.pairKeys);
+    prevPairKeys_ = std::move(rollback.previousPairKeys);
+    unionParent_ = std::move(rollback.unionParent);
+    islandTimer_ = std::move(rollback.islandTimer);
+    events_ = std::move(rollback.events);
+    jointBreakEvents_ = std::move(rollback.jointBreakEvents);
+    lastStepStats_ = rollback.lastStepStats;
+    broadPhase_->structureDirty = true;
+    broadPhase_->touched = true;
+    backend_->invalidateCaches();
+}
 
 World::AccessGuard::AccessGuard(const World& world, AccessKind kind,
                                 const char* method)
@@ -206,16 +255,24 @@ World::AccessGuard::AccessGuard(const World& world, AccessKind kind,
 }
 
 void World::resetBackend(BackendType type) {
-    backend_.reset();
-    if (type != BackendType::Cpu) backend_.reset(createCudaBackend());
-    if (!backend_) {
+    std::unique_ptr<Backend> next;
+    if (type != BackendType::Cpu) next.reset(createCudaBackend());
+    if (!next) {
         if (type == BackendType::Cuda)
             throw std::runtime_error("velox: CUDA backend unavailable "
                                      "(not built with VELOX_ENABLE_CUDA or no device)");
-        backend_.reset(createCpuBackend());
+        next.reset(createCpuBackend());
     }
-    backend_->setParallelIslands(determinismMode_ == DeterminismMode::Relaxed &&
-                                 islandSolvingMode_ == IslandSolvingMode::Parallel);
+    next->setParallelIslands(determinismMode_ == DeterminismMode::Relaxed &&
+                             islandSolvingMode_ == IslandSolvingMode::Parallel);
+    backend_ = std::move(next);
+}
+
+void World::activateCpuFallback(const BackendFailure& failure) {
+    std::fprintf(stderr, "velox: CUDA backend failure (%s); retrying frame on CPU\n",
+                 failure.what());
+    resetBackend(BackendType::Cpu);
+    fallbackToCPU_ = true;
 }
 
 World::World(BackendType type)
@@ -251,6 +308,36 @@ const char* World::backendName() const {
 DeterminismMode World::determinismMode() const {
     AccessGuard guard(*this, AccessKind::Query, "determinismMode");
     return determinismMode_;
+}
+
+DeviceLossPolicy World::deviceLossPolicy() const {
+    AccessGuard guard(*this, AccessKind::Query, "deviceLossPolicy");
+    return deviceLossPolicy_;
+}
+
+void World::setDeviceLossPolicy(DeviceLossPolicy policy) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setDeviceLossPolicy");
+    if (policy != DeviceLossPolicy::FallbackToCPU &&
+        policy != DeviceLossPolicy::ThrowException)
+        throw std::invalid_argument("velox: invalid device loss policy");
+    deviceLossPolicy_ = policy;
+}
+
+bool World::isOnCPUBackend() const {
+    AccessGuard guard(*this, AccessKind::Query, "isOnCPUBackend");
+    return fallbackToCPU_ || std::string(backend_->name()) == "cpu";
+}
+
+bool World::resetCUDABackend() {
+    AccessGuard guard(*this, AccessKind::Mutation, "resetCUDABackend");
+    if (determinismMode_ == DeterminismMode::Strict) return false;
+    try {
+        resetBackend(BackendType::Cuda);
+        fallbackToCPU_ = false;
+        return true;
+    } catch (const std::runtime_error&) {
+        return false;
+    }
 }
 
 IslandSolvingMode World::islandSolvingMode() const {
@@ -2718,6 +2805,28 @@ void World::updateSleeping(float dt) {
 //    impossible regardless of linear or angular speed.
 void World::step(float dt) {
     AccessGuard guard(*this, AccessKind::Step, "step");
+    const bool canFallback = deviceLossPolicy_ == DeviceLossPolicy::FallbackToCPU &&
+                             std::string(backend_->name()) == "cuda";
+    if (!canFallback) {
+        stepImpl(dt);
+        return;
+    }
+
+    // CUDA functions may have copied a partially advanced host body array
+    // before reporting a recoverable error. Save the complete observable World
+    // state first, then restart the same frame on CPU instead of continuing
+    // from an inconsistent half-step.
+    StepRollback rollback = saveStepRollback();
+    try {
+        stepImpl(dt);
+    } catch (const BackendFailure& failure) {
+        activateCpuFallback(failure);
+        restoreStepRollback(std::move(rollback));
+        stepImpl(dt);
+    }
+}
+
+void World::stepImpl(float dt) {
     using Clock = std::chrono::steady_clock;
     const auto stepStart = Clock::now();
     lastStepStats_ = {};
