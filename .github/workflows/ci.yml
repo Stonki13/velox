@@ -50,6 +50,23 @@ jobs:
       - name: Soak (sanitized, reduced)
         run: build/examples/fuzz_demo soak 3000
 
+  thread-sanitizer:
+    name: Linux / Clang + ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++ -DVELOX_ENABLE_CUDA=OFF
+          -DVELOX_BUILD_EXAMPLES=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build thread-safety regression
+        run: cmake --build build --target thread_safety_demo --parallel
+      - name: Run eight-worker access test
+        run: ctest --test-dir build -R "^velox.thread_safety$" --output-on-failure
+
   strict-cpu:
     name: Strict CPU / ${{ matrix.os }}
     strategy:

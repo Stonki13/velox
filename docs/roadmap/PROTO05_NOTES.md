@@ -34,8 +34,9 @@ new guarded setters/getters cover shared worlds.
   workload, character controller, sandbox self-test, and Jolt differential
   testing (35.45 seconds).
 
-ThreadSanitizer validation remains a Linux CI task. MSVC does not provide a
-supported ThreadSanitizer configuration for this build.
+The CI workflow now configures a CPU-only Clang ThreadSanitizer build and runs
+the eight-worker regression. It remains pending hosted-CI evidence; MSVC does
+not provide a supported ThreadSanitizer configuration for this build.
 
 ## Merge Recommendation
 

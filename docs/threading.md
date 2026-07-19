@@ -44,5 +44,9 @@ must be configured before the world is shared. Use `setGravity()`,
 foreign step calls, and all cross-thread query calls. It is useful for
 asserting the intended access pattern in tests; it is not a profiler.
 
+The eight-worker contract regression runs under Clang ThreadSanitizer in CI.
+CUDA is disabled for that job because NVIDIA's CUDA toolchain is not supported
+by ThreadSanitizer.
+
 World destruction and direct access through any borrowed reference always
 require external synchronization.
