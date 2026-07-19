@@ -18,8 +18,8 @@ by itself. `speculativeDistance` adds to the contact-generation reach, and
 
 `World::queryMultiToi()` uses conservative advancement followed by bisection to
 return a deterministic list of candidate impacts sorted by time, then body
-handle. High-quality `step()` processing replays static-geometry impacts in
-chronological order, with per-body and per-step caps reported as
-`StepStats::multiToiEvents`. Dynamic-dynamic chronological rescheduling is
-still under development; do not use High mode as a lockstep guarantee for
-multiple moving bodies yet.
+handle. High-quality `step()` processing replays static geometry and pairs
+where both moving bodies select `High` in chronological order, with per-body
+and per-step caps reported as `StepStats::multiToiEvents`. A moving pair with
+only one High body intentionally remains on the established PCS path: rewinding
+only one participant would violate its shared momentum timeline.

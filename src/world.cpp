@@ -2068,93 +2068,127 @@ bool findToi(const Body& a0, const Body& b0, float dt, float bias,
     return true;
 }
 
-uint32_t processHighStaticToi(std::vector<Body>& bodies,
-                              const std::vector<Body>& starts,
-                              float dt, const MeshSoupView& soup,
-                              const WorldMultiToiSettings& settings) {
+uint32_t processHighToi(std::vector<Body>& bodies, const std::vector<Body>& starts,
+                        const std::vector<Contact>& contacts, float dt,
+                        const MeshSoupView& soup,
+                        const WorldMultiToiSettings& settings,
+                        std::vector<uint8_t>& processedBodies) {
+    processedBodies.assign(bodies.size(), 0);
     if (!settings.defaultConfig.enabled || !settings.enableSubstepSplitting)
         return 0;
-    uint32_t totalEvents = 0;
-    for (BodyIndex index = 0; index < bodies.size() &&
-                              totalEvents < settings.maxTotalEventsPerStep;
-         ++index) {
-        Body& body = bodies[index];
-        const Body& start = starts[index];
+    std::vector<uint8_t> eligible(bodies.size(), 0);
+    for (BodyIndex i = 0; i < bodies.size(); ++i) {
+        const Body& start = starts[i];
         const BodyCcdTuning& tuning = start.ccdTuning;
-        if (!body.isDynamic() || body.asleep || tuning.quality != MotionQuality::High ||
-            !tuning.enableContinuous ||
-            start.maxPointSpeed() < std::max(tuning.minVelocityForCCD,
-                                              settings.defaultConfig.toiVelocityFloor))
-            continue;
-
-        // The ordinary speculative solver has already advanced this body.
-        // Reconstruct its post-gravity starting state, then replay the high
-        // quality trajectory against immutable level geometry chronologically.
+        eligible[i] = start.isDynamic() && !bodies[i].asleep &&
+                      tuning.quality == MotionQuality::High &&
+                      tuning.enableContinuous &&
+                      start.maxPointSpeed() >= std::max(
+                          tuning.minVelocityForCCD,
+                          settings.defaultConfig.toiVelocityFloor);
+    }
+    // A medium-quality moving counterpart was already advanced by the normal
+    // solver. Do not rewind just one side of that interaction; it retains the
+    // regular PCS path until both bodies opt into the event scheduler.
+    for (const Contact& contact : contacts) {
+        const BodyIndex a = contact.a, b = contact.b;
+        if (eligible[a] && bodies[b].isDynamic() && !eligible[b]) eligible[a] = 0;
+        if (eligible[b] && bodies[a].isDynamic() && !eligible[a]) eligible[b] = 0;
+    }
+    bool anyEligible = false;
+    for (BodyIndex i = 0; i < bodies.size(); ++i) {
+        if (!eligible[i]) continue;
+        Body& body = bodies[i];
+        const Body& start = starts[i];
         body.position = start.position;
         body.orientation = start.orientation;
         body.velocity = start.velocity;
         body.angularVelocity = start.angularVelocity;
-        float remaining = dt;
-        uint32_t bodyEvents = 0;
-        BodyIndex previousHit = UINT32_MAX;
-        while (remaining > 1e-6f && bodyEvents < settings.defaultConfig.maxToiEventsPerBody &&
-               totalEvents < settings.maxTotalEventsPerStep) {
-            float bestToi = remaining + 1.0f;
-            BodyIndex bestIndex = UINT32_MAX;
-            Vec3 bestNormal{}, bestPoint{};
-            for (BodyIndex otherIndex = 0; otherIndex < bodies.size(); ++otherIndex) {
-                if (otherIndex == index || otherIndex == previousHit) continue;
-                const Body& other = bodies[otherIndex];
-                if (!other.isStatic() || other.isSensor() || !body.canCollideWith(other))
+        anyEligible = true;
+    }
+    if (!anyEligible) return 0;
+    processedBodies = eligible;
+
+    uint32_t totalEvents = 0;
+    std::vector<uint32_t> bodyEvents(bodies.size(), 0);
+    float remaining = dt;
+    BodyIndex previousA = UINT32_MAX, previousB = UINT32_MAX;
+    while (remaining > 1e-6f && totalEvents < settings.maxTotalEventsPerStep) {
+        float bestToi = remaining + 1.0f;
+        BodyIndex bestA = UINT32_MAX, bestB = UINT32_MAX;
+        Vec3 bestNormal{}, bestPoint{};
+        for (BodyIndex a = 0; a < bodies.size(); ++a) {
+            if (!eligible[a] || bodyEvents[a] >= settings.defaultConfig.maxToiEventsPerBody)
+                continue;
+            for (BodyIndex b = 0; b < bodies.size(); ++b) {
+                if (a == b) continue;
+                const bool dynamicPair = eligible[b];
+                if (dynamicPair && b < a) continue;
+                if (!dynamicPair && !bodies[b].isStatic()) continue;
+                if (bodies[b].isSensor() || !bodies[a].canCollideWith(bodies[b])) continue;
+                if (dynamicPair && bodyEvents[b] >= settings.defaultConfig.maxToiEventsPerBody)
                     continue;
                 float toi = 0.0f;
                 Vec3 normal{}, point{};
-                if (!findToi(body, other, remaining,
+                if (!findToi(bodies[a], bodies[b], remaining,
                              settings.defaultConfig.toiPenetrationBias,
                              soup, toi, normal, point))
                     continue;
-                if (toi < bestToi || (toi == bestToi && otherIndex < bestIndex)) {
+                if (a == previousA && b == previousB && toi <= 1e-6f)
+                    continue;
+                if (toi < bestToi ||
+                    (toi == bestToi && (a < bestA || (a == bestA && b < bestB)))) {
                     bestToi = toi;
-                    bestIndex = otherIndex;
+                    bestA = a;
+                    bestB = b;
                     bestNormal = normal;
                     bestPoint = point;
                 }
             }
-            if (bestIndex == UINT32_MAX) {
-                body.advanceTransform(remaining);
-                break;
-            }
-
-            body.advanceTransform(bestToi);
-            const Vec3 arm = bestPoint - body.position;
-            const float vn = dot(body.velocity + cross(body.angularVelocity, arm),
-                                 bestNormal);
-            const float angularMass = dot(cross(body.invInertiaMul(
-                cross(arm, bestNormal)), arm), bestNormal);
-            const float mass = body.solverInvMass() + angularMass;
-            if (vn < 0.0f && mass > 1e-8f) {
-                constexpr float kRestitutionThreshold = 1.0f;
-                const Body& other = bodies[bestIndex];
-                const float restitution = vn < -kRestitutionThreshold
-                    ? combineMaterial(body.restitution, other.restitution,
-                                      body.restitutionCombine, other.restitutionCombine)
-                    : 0.0f;
-                const float impulse = -(1.0f + restitution) * vn / mass;
-                const Vec3 impulseVector = bestNormal * impulse;
-                body.velocity += impulseVector * body.solverInvMass();
-                body.angularVelocity += body.invInertiaMul(cross(arm, impulseVector));
-            }
-            // Keep the just-resolved shape outside the bias band so the next
-            // conservative sweep cannot rediscover the same zero-time hit.
-            body.position += bestNormal *
-                             std::max(2.0f * settings.defaultConfig.toiPenetrationBias,
-                                      1e-4f);
-            remaining -= bestToi;
-            previousHit = bestIndex;
-            ++bodyEvents;
-            ++totalEvents;
         }
+        if (bestA == UINT32_MAX) break;
+
+        for (BodyIndex i = 0; i < bodies.size(); ++i)
+            if (eligible[i]) bodies[i].advanceTransform(bestToi);
+        Body& a = bodies[bestA];
+        Body& b = bodies[bestB];
+        const Vec3 ra = bestPoint - a.position;
+        const Vec3 rb = bestPoint - b.position;
+        const float vn = dot(a.velocity + cross(a.angularVelocity, ra) -
+                             b.velocity - cross(b.angularVelocity, rb), bestNormal);
+        const float angularMassA = dot(cross(a.invInertiaMul(cross(ra, bestNormal)), ra),
+                                       bestNormal);
+        const float angularMassB = dot(cross(b.invInertiaMul(cross(rb, bestNormal)), rb),
+                                       bestNormal);
+        const float mass = a.solverInvMass() + b.solverInvMass() + angularMassA + angularMassB;
+        if (vn < 0.0f && mass > 1e-8f) {
+            constexpr float kRestitutionThreshold = 1.0f;
+            const float restitution = vn < -kRestitutionThreshold
+                ? combineMaterial(a.restitution, b.restitution,
+                                  a.restitutionCombine, b.restitutionCombine)
+                : 0.0f;
+            const Vec3 impulse = bestNormal * (-(1.0f + restitution) * vn / mass);
+            a.velocity += impulse * a.solverInvMass();
+            a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
+            b.velocity -= impulse * b.solverInvMass();
+            b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
+        }
+        const float correction = std::max(2.0f * settings.defaultConfig.toiPenetrationBias,
+                                          1e-4f);
+        const float inverseMass = a.solverInvMass() + b.solverInvMass();
+        if (inverseMass > 0.0f) {
+            a.position += bestNormal * (correction * a.solverInvMass() / inverseMass);
+            b.position -= bestNormal * (correction * b.solverInvMass() / inverseMass);
+        }
+        remaining -= bestToi;
+        previousA = bestA;
+        previousB = bestB;
+        ++bodyEvents[bestA];
+        if (eligible[bestB]) ++bodyEvents[bestB];
+        ++totalEvents;
     }
+    for (BodyIndex i = 0; i < bodies.size(); ++i)
+        if (eligible[i]) bodies[i].advanceTransform(remaining);
     return totalEvents;
 }
 
@@ -3049,14 +3083,18 @@ void World::step(float dt) {
     std::sort(pairKeys_.begin(), pairKeys_.end());
     pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
 
-    // High quality bodies replay their post-gravity path against static level
-    // geometry in chronological TOI order. The generic pair recovery below
-    // remains responsible for Medium quality and dynamic-dynamic pairs.
-    const bool highToiProcessed = !highToiStarts.empty();
-    if (highToiProcessed) {
-        lastStepStats_.multiToiEvents = processHighStaticToi(
-            bodies_, highToiStarts, dt, view(meshes_), multiToiSettings_);
+    // High-quality bodies that only interact with static or other High bodies
+    // replay on one shared timeline. Mixed-quality dynamic pairs remain on the
+    // regular PCS path so no one-sided rewind can violate momentum.
+    std::vector<uint8_t> highToiProcessedBodies;
+    if (!highToiStarts.empty()) {
+        lastStepStats_.multiToiEvents = processHighToi(
+            bodies_, highToiStarts, contacts_, dt, view(meshes_), multiToiSettings_,
+            highToiProcessedBodies);
     }
+    const bool highToiProcessed = std::any_of(highToiProcessedBodies.begin(),
+                                               highToiProcessedBodies.end(),
+                                               [](uint8_t value) { return value != 0; });
 
     for (uint64_t key : pairKeys_) {
         BodyIndex i = (BodyIndex)(key >> 32), j = (BodyIndex)key;
@@ -3069,7 +3107,11 @@ void World::step(float dt) {
         Body& b = bodies_[j];
         if (a.isSensor() || b.isSensor()) continue;
         if (!a.isDynamic()) continue;
-        if (a.ccdTuning.quality == MotionQuality::High) continue;
+        // Only skip bodies that the shared high-quality replay actually
+        // rewound. A High body paired with Medium/Low motion intentionally
+        // remains on this established PCS recovery path.
+        if (highToiProcessed &&
+            (highToiProcessedBodies[i] || highToiProcessedBodies[j])) continue;
         if (!a.ccdTuning.enableContinuous ||
             a.ccdTuning.quality == MotionQuality::Low || a.isLocked() ||
             a.maxPointSpeed() < a.ccdTuning.minVelocityForCCD)

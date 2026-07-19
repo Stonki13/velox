@@ -2134,10 +2134,50 @@ static void testCcdConfigurationAndMultiToiQuery() {
     multi.body(positiveZ).restitution = 1.0f;
     multi.step(0.01f);
     const velox::Body ricochetAfter = multi.bodyState(ricochet);
+    const float ricochetSpeedBefore = velox::length(velox::Vec3{1000, 0, 500});
     const bool sequentialImpacts = multi.lastStepStats().multiToiEvents == 4 &&
-                                   ricochetAfter.position.x > 1.8f &&
+                                   ricochetAfter.position.x > 1.6f &&
                                    ricochetAfter.velocity.x < -100.0f &&
-                                   ricochetAfter.velocity.z < -100.0f;
+                                   ricochetAfter.velocity.z < -100.0f &&
+                                   std::fabs(velox::length(ricochetAfter.velocity) -
+                                             ricochetSpeedBefore) < 1e-3f;
+
+    velox::World cappedReplay(velox::BackendType::Cpu);
+    cappedReplay.gravity = {0, 0, 0};
+    cappedReplay.setCcdDefaults(defaults);
+    velox::WorldMultiToiSettings cappedSettings = multiSettings;
+    cappedSettings.defaultConfig.maxToiEventsPerBody = 2;
+    cappedSettings.maxTotalEventsPerStep = 2;
+    cappedReplay.setMultiToiSettings(cappedSettings);
+    const auto cappedBullet = cappedReplay.addSphere({0, 0, 0}, 0.05f, 1.0f);
+    cappedReplay.body(cappedBullet).restitution = 1.0f;
+    cappedReplay.setLinearVelocity(cappedBullet, {1000, 0, 500});
+    const auto cappedPositiveX = cappedReplay.addStaticPlane({-1, 0, 0}, -2.0f);
+    const auto cappedNegativeX = cappedReplay.addStaticPlane({1, 0, 0}, -2.0f);
+    const auto cappedPositiveZ = cappedReplay.addStaticPlane({0, 0, -1}, -4.0f);
+    cappedReplay.body(cappedPositiveX).restitution = 1.0f;
+    cappedReplay.body(cappedNegativeX).restitution = 1.0f;
+    cappedReplay.body(cappedPositiveZ).restitution = 1.0f;
+    cappedReplay.step(0.01f);
+    const bool eventCap = cappedReplay.lastStepStats().multiToiEvents == 2;
+
+    velox::World dynamicPair(velox::BackendType::Cpu);
+    dynamicPair.gravity = {0, 0, 0};
+    dynamicPair.setCcdDefaults(defaults);
+    dynamicPair.setMultiToiSettings(multiSettings);
+    const auto left = dynamicPair.addSphere({-5, 0, 0}, 0.1f, 1.0f);
+    const auto right = dynamicPair.addSphere({5, 0, 0}, 0.1f, 1.0f);
+    dynamicPair.body(left).restitution = 1.0f;
+    dynamicPair.body(right).restitution = 1.0f;
+    dynamicPair.setLinearVelocity(left, {1000, 0, 0});
+    dynamicPair.setLinearVelocity(right, {-1000, 0, 0});
+    dynamicPair.step(0.01f);
+    const velox::Body leftAfter = dynamicPair.bodyState(left);
+    const velox::Body rightAfter = dynamicPair.bodyState(right);
+    const bool dynamicImpact = dynamicPair.lastStepStats().multiToiEvents == 1 &&
+                               leftAfter.velocity.x < -900.0f &&
+                               rightAfter.velocity.x > 900.0f &&
+                               std::fabs(leftAfter.position.x + rightAfter.position.x) < 1e-3f;
 
     const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
     velox::BodyCcdTuning locked = w.ccdTuning(frozen);
@@ -2159,7 +2199,8 @@ static void testCcdConfigurationAndMultiToiQuery() {
                                   w.multiToiSettings().defaultConfig.maxToiEventsPerBody == 2;
     const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
                            std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
-    check(ordered && capped && steppedImpact && sequentialImpacts && immobile && inherited && restoredSettings,
+    check(ordered && capped && steppedImpact && sequentialImpacts && eventCap && dynamicImpact &&
+              immobile && inherited && restoredSettings,
           "CCD tuning, locked body, and ordered multi-TOI query");
 }
 
