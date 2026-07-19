@@ -90,7 +90,7 @@ const char* presetName(Preset preset) {
     case Preset::Stack: return "STACK";
     case Preset::Rain: return "RAIN";
     case Preset::Ragdoll: return "RAGDOLL";
-    case Preset::Contraption: return "CONTRAPTION";
+    case Preset::Contraption: return "VEHICLE";
     case Preset::Gyro: return "GYRO";
     }
     return "UNKNOWN";
@@ -139,6 +139,7 @@ public:
 
     void reset(Preset preset) {
         preset_ = preset;
+        vehicle_.reset(); // references the old world; must die first
         world_ = std::make_unique<World>();
         dynamicBodies_.clear();
         renderBodies_.clear();
@@ -148,7 +149,7 @@ public:
         case Preset::Stack: buildStack(); break;
         case Preset::Rain: buildRain(); break;
         case Preset::Ragdoll: buildRagdoll(); break;
-        case Preset::Contraption: buildContraption(); break;
+        case Preset::Contraption: buildVehicle(); break;
         case Preset::Gyro: buildGyro(); break;
         }
     }
@@ -158,6 +159,8 @@ public:
     Preset preset() const { return preset_; }
     const std::vector<BodyId>& dynamicBodies() const { return dynamicBodies_; }
     const std::vector<RenderBody>& renderBodies() const { return renderBodies_; }
+    velox::Vehicle* vehicle() { return vehicle_.get(); }
+    const velox::Vehicle* vehicle() const { return vehicle_.get(); }
 
     void spawnAt(SpawnShape shape, Vec3 position) {
         switch (shape) {
@@ -457,25 +460,32 @@ private:
                                  {-2.0f, 5.5f + 0.58f * static_cast<float>(i) - 0.29f, 0.0f});
     }
 
-    void buildContraption() {
+    // F4: the real raycast Vehicle (roadmap 12), driven with the arrow keys.
+    // A ramp and a wall of light boxes give it something to jump and smash.
+    void buildVehicle() {
         ground();
-        const BodyId ramp = box({0.5f, 0.35f, 0.0f}, {7.0f, 0.25f, 3.5f}, 0.0f);
-        world_->setTransform(ramp, {0.5f, 0.35f, 0.0f},
-                             velox::fromAxisAngle({0.0f, 0.0f, 1.0f},
-                                                  -parameters_.contraptionRampDegrees * Pi / 180.0f));
-        pieceBox(ramp, {7.0f, 0.25f, 3.5f}, true);
-        const BodyId chassis = box({-4.0f, 2.5f, 0.0f}, {1.1f, 0.28f, 0.65f}, 4.0f);
-        pieceBox(chassis, {1.1f, 0.28f, 0.65f});
-        const std::array<Vec3, 4> offsets{{
-            {-0.75f, -0.48f, -0.72f}, {-0.75f, -0.48f, 0.72f},
-            {0.75f, -0.48f, -0.72f}, {0.75f, -0.48f, 0.72f}}};
-        for (int i = 0; i < parameters_.contraptionWheels; ++i) {
-            const Vec3 offset = offsets[static_cast<size_t>(i) % offsets.size()];
-            const Vec3 wheelPosition{-4.0f + offset.x, 2.5f + offset.y, offset.z};
-            const BodyId wheel = sphere(wheelPosition, 0.38f, 0.8f);
-            pieceSphere(wheel, 0.38f);
-            world_->addHingeJoint(chassis, wheel, wheelPosition, {0.0f, 0.0f, 1.0f});
-        }
+        const BodyId ramp = box({0.0f, 0.4f, 14.0f}, {2.5f, 0.25f, 3.0f}, 0.0f);
+        world_->setTransform(ramp, {0.0f, 0.4f, 14.0f},
+                             velox::fromAxisAngle({1.0f, 0.0f, 0.0f},
+                                                  -10.0f * Pi / 180.0f));
+        pieceBox(ramp, {2.5f, 0.25f, 3.0f}, true);
+        for (int level = 0; level < 4; ++level)
+            for (int column = 0; column < 5; ++column) {
+                const BodyId brick = box({-2.0f + 1.0f * static_cast<float>(column),
+                                          0.4f + 0.81f * static_cast<float>(level),
+                                          26.0f},
+                                         {0.45f, 0.4f, 0.3f}, 0.4f);
+                pieceBox(brick, {0.45f, 0.4f, 0.3f});
+            }
+        velox::VehicleConfig config;
+        config.chassisMass = 900.0f;
+        config.chassisHalfExtents = {0.9f, 0.35f, 1.9f};
+        config.drivetrain = velox::DrivetrainType::RWD;
+        vehicle_ = std::make_unique<velox::Vehicle>(*world_, config,
+                                                    Vec3{0.0f, 1.2f, -6.0f});
+        vehicle_->AddDefaultWheels();
+        dynamicBodies_.push_back(vehicle_->chassis());
+        pieceBox(vehicle_->chassis(), config.chassisHalfExtents);
     }
 
     // Gyroscopic showcase: three long boxes floating in zero gravity, spun
@@ -503,6 +513,7 @@ private:
     }
 
     std::unique_ptr<World> world_;
+    std::unique_ptr<velox::Vehicle> vehicle_;
     std::vector<BodyId> dynamicBodies_;
     std::vector<RenderBody> renderBodies_;
     SceneParameters parameters_;
@@ -745,6 +756,37 @@ void buildBatches(const SandboxScene& scene, RenderCache& cache,
     };
 
     const World& world = scene.world();
+
+    // Vehicle wheels are virtual (no bodies); render them from telemetry:
+    // hub + suspension travel places the cylinder, steer + accumulated roll
+    // orient it about the axle.
+    if (const velox::Vehicle* vehicle = scene.vehicle()) {
+        const velox::Body& chassis = world.body(vehicle->chassis());
+        const Quat alignAxle = velox::fromAxisAngle({0.0f, 0.0f, 1.0f}, Pi * 0.5f);
+        const float darkRubber[3] = {0.16f, 0.16f, 0.18f};
+        for (size_t i = 0; i < vehicle->wheelCount(); ++i) {
+            const velox::WheelConfig& wheel = vehicle->wheelConfig(i);
+            const velox::WheelState& state = vehicle->wheelState(i);
+            const Vec3 hub = chassis.position +
+                             velox::rotate(chassis.orientation, wheel.localPosition);
+            const Vec3 down = velox::normalize(
+                velox::rotate(chassis.orientation, wheel.direction));
+            const float travel = state.grounded
+                ? wheel.suspensionRestLength - state.compression
+                : wheel.suspensionRestLength;
+            const Vec3 center = hub + down * travel;
+            Quat orientation = chassis.orientation;
+            if (wheel.steerable)
+                orientation = velox::mul(orientation,
+                    velox::fromAxisAngle({0.0f, 1.0f, 0.0f}, vehicle->steeringAngle()));
+            orientation = velox::mul(orientation,
+                velox::fromAxisAngle({1.0f, 0.0f, 0.0f}, state.rotation));
+            orientation = velox::mul(orientation, alignAxle);
+            batchFor(cache.cylinder()).instances.push_back(makeInstance(
+                center, orientation, {wheel.radius, 0.12f, wheel.radius},
+                darkRubber, 1.0f));
+        }
+    }
     for (const RenderBody& renderBody : scene.renderBodies()) {
         if (!world.isValid(renderBody.id)) continue;
         const velox::Body& body = world.body(renderBody.id);
@@ -802,8 +844,14 @@ bool selfTest(const SceneParameters& parameters) {
     for (Preset preset : presets) {
         SandboxScene scene(parameters);
         scene.reset(preset);
+        const Vec3 vehicleStart = scene.vehicle()
+            ? scene.world().body(scene.vehicle()->chassis()).position : Vec3{};
         bool sawContact = false;
         for (int step = 0; step < 120; ++step) {
+            if (velox::Vehicle* vehicle = scene.vehicle()) {
+                vehicle->SetThrottle(1.0f);
+                vehicle->Step(FixedDt);
+            }
             scene.world().step(FixedDt);
             sawContact = sawContact || scene.world().lastStepStats().generatedContacts > 0;
             for (BodyId id : scene.dynamicBodies()) {
@@ -811,6 +859,15 @@ bool selfTest(const SceneParameters& parameters) {
                     std::fprintf(stderr, "sandbox self-test: %s produced a non-finite position\n", presetName(preset));
                     return false;
                 }
+            }
+        }
+        if (scene.vehicle()) {
+            const Vec3 travelled =
+                scene.world().body(scene.vehicle()->chassis()).position - vehicleStart;
+            if (travelled.z < 1.0f) {
+                std::fprintf(stderr, "sandbox self-test: vehicle did not drive (dz=%.2f)\n",
+                             travelled.z);
+                return false;
             }
         }
         std::vector<DebugLine> lines;
@@ -885,9 +942,16 @@ std::vector<std::string> overlay(const SandboxScene& scene, int substeps, bool p
     result.emplace_back(line);
     result.emplace_back("WASD MOVE  QE TURN  RMB LOOK  LMB DRAG  WHEEL DEPTH");
     result.emplace_back("1-7 SHAPE  SPACE SPAWN  R RESET  P PAUSE  +/- SUBSTEPS  L LINES");
-    result.emplace_back("F1 STACK  F2 RAIN  F3 RAGDOLL  F4 CONTRAPTION  F5 GYRO");
+    result.emplace_back("F1 STACK  F2 RAIN  F3 RAGDOLL  F4 VEHICLE  F5 GYRO");
     if (scene.preset() == Preset::Gyro)
         result.emplace_back("ZERO-G: LEFT STABLE SPIN  MIDDLE DZHANIBEKOV FLIPS  RIGHT STABLE");
+    if (const velox::Vehicle* vehicle = scene.vehicle()) {
+        std::snprintf(line, sizeof(line),
+                      "ARROWS DRIVE   SPEED: %.0F KM/H  GEAR: %d  RPM: %.0F",
+                      vehicle->forwardSpeed() * 3.6f, vehicle->currentGear(),
+                      vehicle->engineRPM());
+        result.emplace_back(line);
+    }
     return result;
 }
 
@@ -908,6 +972,7 @@ int runInteractive(const SceneParameters& parameters) {
     // stacks solid under real-time (non-uniform) frame pacing. Cheap here: the
     // step budget is well under 1 ms even for the CUDA backend.
     int substeps = 8;
+    float steering = 0.0f;
     float accumulator = 0.0f;
     float spawnCooldown = 0.0f;
     float fps = 0.0f;
@@ -935,7 +1000,13 @@ int runInteractive(const SceneParameters& parameters) {
         if (input.pressed(sandbox::Action::Stack)) { scene.reset(Preset::Stack); drag.active = false; }
         if (input.pressed(sandbox::Action::Rain)) { scene.reset(Preset::Rain); drag.active = false; }
         if (input.pressed(sandbox::Action::Ragdoll)) { scene.reset(Preset::Ragdoll); drag.active = false; }
-        if (input.pressed(sandbox::Action::Contraption)) { scene.reset(Preset::Contraption); drag.active = false; }
+        if (input.pressed(sandbox::Action::Contraption)) {
+            scene.reset(Preset::Contraption);
+            drag.active = false;
+            camera.position = {5.5f, 3.0f, -11.0f};
+            camera.yaw = 1.95f; // over-the-shoulder view toward the course
+            camera.pitch = -0.15f;
+        }
         if (input.pressed(sandbox::Action::Gyro)) {
             scene.reset(Preset::Gyro);
             drag.active = false;
@@ -977,10 +1048,22 @@ int runInteractive(const SceneParameters& parameters) {
 
         if (drawable) updateDrag(drag, scene, camera, input, window.width(), window.height());
 
+        // Vehicle controls: smoothed steering, throttle/brake on the arrows.
+        if (velox::Vehicle* vehicle = scene.vehicle()) {
+            const float steerTarget =
+                (input.down(sandbox::Action::DriveLeft) ? 0.45f : 0.0f) +
+                (input.down(sandbox::Action::DriveRight) ? -0.45f : 0.0f);
+            steering += (steerTarget - steering) * std::min(1.0f, 10.0f * frameSeconds);
+            vehicle->SetSteering(steering);
+            vehicle->SetThrottle(input.down(sandbox::Action::DriveForward) ? 1.0f : 0.0f);
+            vehicle->SetBrake(input.down(sandbox::Action::DriveBrake) ? 1.0f : 0.0f);
+        }
+
         scene.world().substeps = substeps;
         if (!paused) {
             while (accumulator >= FixedDt) {
                 applyDragForce(drag, scene.world());
+                if (velox::Vehicle* vehicle = scene.vehicle()) vehicle->Step(FixedDt);
                 scene.world().step(FixedDt);
                 accumulator -= FixedDt;
             }

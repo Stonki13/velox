@@ -75,6 +75,7 @@ public:
     void SetThrottle(float value) { throttle_ = value; }   // 0..1
     void SetBrake(float value) { brake_ = value; }         // 0..1
     void SetSteering(float radians) { steering_ = radians; } // + = left
+    float steeringAngle() const { return steering_; }
     int currentGear() const { return gear_; }
     float engineRPM() const { return rpm_; }
     float forwardSpeed() const;
