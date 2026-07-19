@@ -167,6 +167,9 @@ operand symmetry, common-translation invariance, and witness consistency.
   `Joint::collideConnected` opts back in.
   Per-joint force/torque thresholds support deferred breaking with observable
   break events and generation-safe stale handles.
+- **Ragdoll authoring**: `RagdollBuilder` validates connected bone trees over
+  existing bodies, applies per-bone mass tuning, creates limited cone-twist
+  links or motorized hinge links, and can wake/query the resulting rig.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
   and torques, point impulses, per-body damping and gravity scaling, and custom
   mass properties with independently oriented principal-inertia axes

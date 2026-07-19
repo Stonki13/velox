@@ -19,6 +19,9 @@ target_link_libraries(joints_demo PRIVATE velox)
 add_executable(solver_options_demo solver_options_demo.cpp)
 target_link_libraries(solver_options_demo PRIVATE velox)
 
+add_executable(ragdoll_demo ragdoll_demo.cpp)
+target_link_libraries(ragdoll_demo PRIVATE velox)
+
 add_executable(stress_demo stress_demo.cpp)
 target_link_libraries(stress_demo PRIVATE velox)
 
@@ -29,6 +32,7 @@ if(BUILD_TESTING)
     add_test(NAME velox.multi_threaded COMMAND multi_threaded)
     add_test(NAME velox.joints_example COMMAND joints_demo)
     add_test(NAME velox.solver_options COMMAND solver_options_demo)
+    add_test(NAME velox.ragdoll COMMAND ragdoll_demo)
     # Run the bounded real-workload health check before the longer stress
     # process so a failure reports its own scene rather than a late-suite
     # timeout on heavily loaded Windows runners.

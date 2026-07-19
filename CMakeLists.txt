@@ -26,6 +26,7 @@ add_library(velox
     src/queries.cpp
     src/debug.cpp
     src/character.cpp
+    src/ragdoll.cpp
     src/vehicle.cpp
     src/serialization.cpp
 )

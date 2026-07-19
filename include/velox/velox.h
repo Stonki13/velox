@@ -11,5 +11,6 @@
 #include "queries.h"
 #include "world.h"
 #include "character.h"
+#include "ragdoll.h"
 #include "vehicle.h"
 #include "serialization.h"
