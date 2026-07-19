@@ -34,7 +34,8 @@ reports exactly four High-quality static TOI events, and conserves speed within
 both bodies, and preserves the center of mass. A three-body High chain reports
 two events: the first transfers momentum to the middle body and the scheduler
 then finds and resolves its newly possible collision with the third body. The
-CUDA-enabled stress suite remained green.
+same chain also passes through the CUDA Auto backend, exercising the required
+host fallback after GPU substeps. The CUDA-enabled stress suite remained green.
 
 After the shared timeline pass, the full CUDA-enabled CTest suite passed all 13
 tests, `fuzz_demo 80` passed twice, and `proto_manifold` passed all eight

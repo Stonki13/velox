@@ -2182,24 +2182,37 @@ static void testCcdConfigurationAndMultiToiQuery() {
     // The second collision is not present at frame start. It becomes the next
     // chronological event only after the first body transfers its momentum to
     // the middle body, exercising the dynamic rescheduling loop.
-    velox::World dynamicChain(velox::BackendType::Cpu);
-    dynamicChain.gravity = {0, 0, 0};
-    dynamicChain.setCcdDefaults(defaults);
-    dynamicChain.setMultiToiSettings(multiSettings);
-    const auto chainLeft = dynamicChain.addSphere({-5, 0, 0}, 0.1f, 1.0f);
-    const auto chainMiddle = dynamicChain.addSphere({0, 0, 0}, 0.1f, 1.0f);
-    const auto chainRight = dynamicChain.addSphere({5, 0, 0}, 0.1f, 1.0f);
-    for (const velox::BodyId id : {chainLeft, chainMiddle, chainRight})
-        dynamicChain.body(id).restitution = 1.0f;
-    dynamicChain.setLinearVelocity(chainLeft, {2000, 0, 0});
-    dynamicChain.step(0.01f);
-    const velox::Body chainLeftAfter = dynamicChain.bodyState(chainLeft);
-    const velox::Body chainMiddleAfter = dynamicChain.bodyState(chainMiddle);
-    const velox::Body chainRightAfter = dynamicChain.bodyState(chainRight);
-    const bool dynamicChainImpact = dynamicChain.lastStepStats().multiToiEvents == 2 &&
-                                    std::fabs(chainLeftAfter.velocity.x) < 1e-2f &&
-                                    std::fabs(chainMiddleAfter.velocity.x) < 1e-2f &&
-                                    chainRightAfter.velocity.x > 1900.0f;
+    struct HighChainResult {
+        size_t eventCount = 0;
+        velox::Vec3 leftVelocity{};
+        velox::Vec3 middleVelocity{};
+        velox::Vec3 rightVelocity{};
+    };
+    const auto runHighChain = [&](velox::BackendType backend) {
+        velox::World dynamicChain(backend);
+        dynamicChain.gravity = {0, 0, 0};
+        dynamicChain.setCcdDefaults(defaults);
+        dynamicChain.setMultiToiSettings(multiSettings);
+        const auto chainLeft = dynamicChain.addSphere({-5, 0, 0}, 0.1f, 1.0f);
+        const auto chainMiddle = dynamicChain.addSphere({0, 0, 0}, 0.1f, 1.0f);
+        const auto chainRight = dynamicChain.addSphere({5, 0, 0}, 0.1f, 1.0f);
+        for (const velox::BodyId id : {chainLeft, chainMiddle, chainRight})
+            dynamicChain.body(id).restitution = 1.0f;
+        dynamicChain.setLinearVelocity(chainLeft, {2000, 0, 0});
+        dynamicChain.step(0.01f);
+        return HighChainResult{dynamicChain.lastStepStats().multiToiEvents,
+                               dynamicChain.bodyState(chainLeft).velocity,
+                               dynamicChain.bodyState(chainMiddle).velocity,
+                               dynamicChain.bodyState(chainRight).velocity};
+    };
+    const auto chainMatchesExpected = [](const HighChainResult& result) {
+        return result.eventCount == 2 && std::fabs(result.leftVelocity.x) < 1e-2f &&
+               std::fabs(result.middleVelocity.x) < 1e-2f && result.rightVelocity.x > 1900.0f;
+    };
+    const bool dynamicChainImpact = chainMatchesExpected(runHighChain(velox::BackendType::Cpu));
+    velox::World autoProbe(velox::BackendType::Auto);
+    const bool cudaHighChainImpact = std::string(autoProbe.backendName()) != "cuda" ||
+                                     chainMatchesExpected(runHighChain(velox::BackendType::Auto));
 
     const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
     velox::BodyCcdTuning locked = w.ccdTuning(frozen);
@@ -2222,7 +2235,7 @@ static void testCcdConfigurationAndMultiToiQuery() {
     const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
                            std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
     check(ordered && capped && steppedImpact && sequentialImpacts && eventCap && dynamicImpact &&
-              dynamicChainImpact &&
+              dynamicChainImpact && cudaHighChainImpact &&
               immobile && inherited && restoredSettings,
           "CCD tuning, locked body, and ordered multi-TOI query");
 }
