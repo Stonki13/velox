@@ -87,6 +87,8 @@ struct SerializationAccess {
         Writer writer{bytes};
         writer.pod(snapshot.gravity_);
         writer.pod(snapshot.substeps_);
+        writer.pod(snapshot.ccdDefaults_);
+        writer.pod(snapshot.multiToiSettings_);
         writer.vec(snapshot.bodies_);
         writer.vec(snapshot.bodySlots_);
         writer.vec(snapshot.bodyDenseToSlot_);
@@ -121,6 +123,8 @@ struct SerializationAccess {
         Reader reader{bytes.data(), bytes.data() + bytes.size()};
         reader.pod(snapshot.gravity_);
         reader.pod(snapshot.substeps_);
+        reader.pod(snapshot.ccdDefaults_);
+        reader.pod(snapshot.multiToiSettings_);
         reader.vec(snapshot.bodies_);
         reader.vec(snapshot.bodySlots_);
         reader.vec(snapshot.bodyDenseToSlot_);

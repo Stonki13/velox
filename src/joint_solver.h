@@ -59,7 +59,7 @@ VELOX_HD inline Vec3 anchorVelocity(const Body& body, const Vec3& r) {
 
 VELOX_HD inline void applyImpulse(Body& body, const Vec3& r,
                                   const Vec3& impulse, float sign) {
-    if (!body.isDynamic()) return;
+    if (!body.isDynamic() || body.isLocked()) return;
     body.velocity += impulse * (sign * body.solverInvMass());
     body.angularVelocity += body.invInertiaMul(cross(r, impulse)) * sign;
 }
@@ -74,8 +74,8 @@ VELOX_HD inline void applyLinear(Joint& joint, Body& a, Body& b,
 
 VELOX_HD inline void applyAngular(Joint& joint, Body& a, Body& b,
                                   const Vec3& impulse, float signA = 1.0f) {
-    if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(impulse) * signA;
-    if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(impulse) * signA;
+    if (a.isDynamic() && !a.isLocked()) a.angularVelocity += a.invInertiaMul(impulse) * signA;
+    if (b.isDynamic() && !b.isLocked()) b.angularVelocity -= b.invInertiaMul(impulse) * signA;
     joint.reactionAngularImpulse += impulse * signA;
 }
 

@@ -40,7 +40,7 @@ __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (!b.isDynamic() || b.asleep) return;
+    if (!b.isDynamic() || b.isLocked() || b.asleep) return;
     b.velocity += (gravity * b.gravityScale + b.force * b.solverInvMass()) * dt;
     b.angularVelocity += b.invInertiaMul(b.torque) * dt;
     b.velocity *= 1.0f / (1.0f + b.linearDamping * dt);
@@ -51,7 +51,7 @@ __global__ void integrateTransformsKernel(Body* bodies, int n, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (b.isStatic() || b.asleep) return;
+    if (b.isStatic() || b.isLocked() || b.asleep) return;
     b.advanceTransform(dt);
 }
 

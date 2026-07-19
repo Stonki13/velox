@@ -240,6 +240,8 @@ ctest --test-dir build -C Release --output-on-failure
   manifolds, islands, and backend tradeoffs.
 - [Threading contract](docs/threading.md) specifies safe cross-thread world
   access and the legacy borrowed-reference limits.
+- [CCD quality controls](docs/ccd-controls.md) explains per-body continuous
+  collision tuning, locked bodies, and the current multi-TOI query boundary.
 - [Packaging and releases](docs/packaging.md) covers `find_package(Velox)`,
   Conan source packages, and tagged release artifacts.
 - [Real-workload release gate](docs/release-gate.md) defines the game-like

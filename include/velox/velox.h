@@ -4,6 +4,7 @@
 #include "version.h"
 #include "platform.h"
 #include "math.h"
+#include "ccd.h"
 #include "body.h"
 #include "joint.h"
 #include "world.h"

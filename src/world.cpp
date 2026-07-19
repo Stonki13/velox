@@ -33,6 +33,37 @@ bool validCombineMode(MaterialCombineMode mode) {
     return (uint8_t)mode <= (uint8_t)MaterialCombineMode::Maximum;
 }
 
+bool validMotionQuality(MotionQuality quality) {
+    return (uint8_t)quality <= (uint8_t)MotionQuality::Locked;
+}
+
+void validateCcdTuning(const BodyCcdTuning& tuning) {
+    if (!validMotionQuality(tuning.quality) ||
+        !finiteFloat(tuning.collisionMargin) || tuning.collisionMargin < 0.0f ||
+        !finiteFloat(tuning.speculativeDistance) || tuning.speculativeDistance < 0.0f ||
+        !finiteFloat(tuning.minVelocityForCCD) || tuning.minVelocityForCCD < 0.0f)
+        throw std::invalid_argument("velox: body CCD tuning is invalid");
+}
+
+void validateCcdDefaults(const WorldCcdDefaults& defaults) {
+    BodyCcdTuning tuning;
+    tuning.quality = defaults.defaultQuality;
+    tuning.collisionMargin = defaults.defaultCollisionMargin;
+    tuning.speculativeDistance = defaults.defaultSpeculativeDistance;
+    tuning.enableContinuous = defaults.defaultEnableContinuous;
+    tuning.minVelocityForCCD = defaults.defaultMinVelocityForCCD;
+    validateCcdTuning(tuning);
+}
+
+void validateMultiToiSettings(const WorldMultiToiSettings& settings) {
+    const CcdConfig& config = settings.defaultConfig;
+    if (config.maxToiEventsPerBody == 0 ||
+        !finiteFloat(config.toiVelocityFloor) || config.toiVelocityFloor < 0.0f ||
+        !finiteFloat(config.toiPenetrationBias) || config.toiPenetrationBias < 0.0f ||
+        settings.maxTotalEventsPerStep == 0)
+        throw std::invalid_argument("velox: multi-TOI settings are invalid");
+}
+
 bool validJointType(JointType type) {
     return (uint8_t)type <= (uint8_t)JointType::SixDof;
 }
@@ -131,6 +162,7 @@ void validateRuntimeBody(const Body& body) {
         !finiteFloat(body.angularDamping) || body.angularDamping < 0.0f ||
         !finiteFloat(body.gravityScale))
         throw std::invalid_argument("velox: body contains invalid or non-finite state");
+    validateCcdTuning(body.ccdTuning);
     float q2 = body.orientation.x * body.orientation.x +
                body.orientation.y * body.orientation.y +
                body.orientation.z * body.orientation.z +
@@ -261,6 +293,47 @@ void World::setDeterminismMode(DeterminismMode mode) {
     resetBackend(requestedBackend_);
 }
 
+WorldCcdDefaults World::ccdDefaults() const {
+    AccessGuard guard(*this, AccessKind::Query, "ccdDefaults");
+    return ccdDefaults_;
+}
+
+void World::setCcdDefaults(WorldCcdDefaults defaults) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setCcdDefaults");
+    validateCcdDefaults(defaults);
+    ccdDefaults_ = defaults;
+}
+
+WorldMultiToiSettings World::multiToiSettings() const {
+    AccessGuard guard(*this, AccessKind::Query, "multiToiSettings");
+    return multiToiSettings_;
+}
+
+void World::setMultiToiSettings(WorldMultiToiSettings settings) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setMultiToiSettings");
+    validateMultiToiSettings(settings);
+    multiToiSettings_ = settings;
+}
+
+void World::setCcdTuning(BodyId id, BodyCcdTuning tuning) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setCcdTuning");
+    validateCcdTuning(tuning);
+    Body& value = bodies_[resolve(id)];
+    value.ccdTuning = tuning;
+    if (value.isLocked()) {
+        value.velocity = {};
+        value.angularVelocity = {};
+        value.force = {};
+        value.torque = {};
+    }
+    broadPhase_->touched = true;
+}
+
+BodyCcdTuning World::ccdTuning(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "ccdTuning");
+    return bodies_[resolve(id)].ccdTuning;
+}
+
 void World::setIslandSolvingMode(IslandSolvingMode mode) {
     AccessGuard guard(*this, AccessKind::Mutation, "setIslandSolvingMode");
     if (mode != IslandSolvingMode::Sequential && mode != IslandSolvingMode::Parallel)
@@ -305,6 +378,11 @@ BodyId World::bodyHandle(BodyIndex dense) const {
 BodyId World::addBody(Body bodyValue) {
     if (bodies_.size() >= UINT32_MAX)
         throw std::length_error("velox: body capacity exceeded");
+    bodyValue.ccdTuning.quality = ccdDefaults_.defaultQuality;
+    bodyValue.ccdTuning.collisionMargin = ccdDefaults_.defaultCollisionMargin;
+    bodyValue.ccdTuning.speculativeDistance = ccdDefaults_.defaultSpeculativeDistance;
+    bodyValue.ccdTuning.enableContinuous = ccdDefaults_.defaultEnableContinuous;
+    bodyValue.ccdTuning.minVelocityForCCD = ccdDefaults_.defaultMinVelocityForCCD;
     uint32_t slot;
     if (freeBodySlots_.empty()) {
         slot = static_cast<uint32_t>(bodySlots_.size());
@@ -1144,6 +1222,10 @@ void World::setLinearVelocity(BodyId id, Vec3 velocity) {
     requireFiniteVec(velocity, "velox: linear velocity must be finite");
     Body& b = body(id);
     if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
+    if (b.isLocked()) {
+        b.velocity = {};
+        return;
+    }
     b.velocity = velocity;
     wake(id);
 }
@@ -1153,6 +1235,10 @@ void World::setAngularVelocity(BodyId id, Vec3 velocity) {
     requireFiniteVec(velocity, "velox: angular velocity must be finite");
     Body& b = body(id);
     if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
+    if (b.isLocked()) {
+        b.angularVelocity = {};
+        return;
+    }
     b.angularVelocity = velocity;
     wake(id);
 }
@@ -1162,6 +1248,7 @@ void World::addForce(BodyId id, Vec3 force) {
     requireFiniteVec(force, "velox: force must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: forces require a dynamic body");
+    if (b.isLocked()) return;
     b.force += force;
     wake(id);
 }
@@ -1172,6 +1259,7 @@ void World::addForceAtPoint(BodyId id, Vec3 force, Vec3 worldPoint) {
     requireFiniteVec(worldPoint, "velox: force point must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: forces require a dynamic body");
+    if (b.isLocked()) return;
     b.force += force;
     b.torque += cross(worldPoint - b.position, force);
     wake(id);
@@ -1182,6 +1270,7 @@ void World::addTorque(BodyId id, Vec3 torque) {
     requireFiniteVec(torque, "velox: torque must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: torque requires a dynamic body");
+    if (b.isLocked()) return;
     b.torque += torque;
     wake(id);
 }
@@ -1191,6 +1280,7 @@ void World::addLinearImpulse(BodyId id, Vec3 impulse) {
     requireFiniteVec(impulse, "velox: impulse must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: impulses require a dynamic body");
+    if (b.isLocked()) return;
     b.velocity += impulse * b.solverInvMass();
     wake(id);
 }
@@ -1201,6 +1291,7 @@ void World::addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint) {
     requireFiniteVec(worldPoint, "velox: impulse point must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: impulses require a dynamic body");
+    if (b.isLocked()) return;
     b.velocity += impulse * b.solverInvMass();
     b.angularVelocity += b.invInertiaMul(cross(worldPoint - b.position, impulse));
     wake(id);
@@ -1279,6 +1370,8 @@ WorldSnapshot World::saveSnapshot() const {
     snapshot.owner_ = this;
     snapshot.gravity_ = gravity;
     snapshot.substeps_ = substeps;
+    snapshot.ccdDefaults_ = ccdDefaults_;
+    snapshot.multiToiSettings_ = multiToiSettings_;
     snapshot.bodies_ = bodies_;
     snapshot.bodySlots_.reserve(bodySlots_.size());
     for (const HandleSlot& slot : bodySlots_)
@@ -1332,6 +1425,8 @@ void World::restoreSnapshot(const WorldSnapshot& snapshot) {
 
     gravity = staged.gravity_;
     substeps = staged.substeps_;
+    ccdDefaults_ = staged.ccdDefaults_;
+    multiToiSettings_ = staged.multiToiSettings_;
     bodies_.swap(staged.bodies_);
     bodySlots_.swap(bodySlots);
     bodyDenseToSlot_.swap(staged.bodyDenseToSlot_);
@@ -1914,7 +2009,107 @@ GapProbe gapAt(const Body& a, const Vec3& pa, const Quat& qa,
     return {r.distance, r.normal};
 }
 
+Body sweepStateAt(const Body& source, float elapsed) {
+    Body result = source;
+    result.advanceTransform(elapsed);
+    return result;
+}
+
+bool findToi(const Body& a0, const Body& b0, float dt, float bias,
+             const MeshSoupView& soup, float& toi, Vec3& normal, Vec3& point) {
+    const float speedBound = a0.maxPointSpeed() + b0.maxPointSpeed();
+    if (speedBound <= 1e-8f) return false;
+    const float search = speedBound * dt + a0.radius + length(a0.halfExtents) +
+                         a0.capsuleHalfHeight + 0.1f;
+    float lower = 0.0f;
+    float upper = 0.0f;
+    GapProbe sample = gapAt(a0, a0.position, a0.orientation,
+                            b0, b0.position, b0.orientation, soup, search);
+    if (sample.gap <= bias) {
+        toi = 0.0f;
+        normal = sample.normal;
+    } else {
+        bool hit = false;
+        for (int iteration = 0; iteration < 24 && lower < dt; ++iteration) {
+            const float increment = std::max(1e-6f, (sample.gap - bias) / speedBound);
+            upper = std::min(dt, lower + increment);
+            Body a = sweepStateAt(a0, upper);
+            Body b = sweepStateAt(b0, upper);
+            sample = gapAt(a, a.position, a.orientation,
+                           b, b.position, b.orientation, soup, search);
+            if (sample.gap <= bias) {
+                hit = true;
+                break;
+            }
+            lower = upper;
+            if (upper >= dt) break;
+        }
+        if (!hit) return false;
+        for (int iteration = 0; iteration < 16; ++iteration) {
+            const float middle = (lower + upper) * 0.5f;
+            Body a = sweepStateAt(a0, middle);
+            Body b = sweepStateAt(b0, middle);
+            const GapProbe middleGap = gapAt(a, a.position, a.orientation,
+                                              b, b.position, b.orientation,
+                                              soup, search);
+            if (middleGap.gap <= bias) {
+                upper = middle;
+                sample = middleGap;
+            } else {
+                lower = middle;
+            }
+        }
+        toi = upper;
+        normal = sample.normal;
+    }
+    Body a = sweepStateAt(a0, toi);
+    Convex convex = makeConvex(a, soup);
+    point = convex.support(-normal) - normal * convex.radius;
+    return true;
+}
+
 } // namespace
+
+std::vector<MultiToiHit> World::queryMultiToi(BodyId id, float dt) const {
+    AccessGuard guard(*this, AccessKind::Query, "queryMultiToi");
+    if (!finiteFloat(dt) || dt <= 0.0f)
+        throw std::invalid_argument("velox: multi-TOI timestep must be finite and positive");
+    const BodyIndex sourceIndex = resolve(id);
+    const Body& source = bodies_[sourceIndex];
+    const BodyCcdTuning& tuning = source.ccdTuning;
+    if (!source.isDynamic() || source.isLocked() || !tuning.enableContinuous ||
+        tuning.quality == MotionQuality::Low ||
+        source.maxPointSpeed() < std::max(tuning.minVelocityForCCD,
+                                          multiToiSettings_.defaultConfig.toiVelocityFloor))
+        return {};
+
+    const MeshSoupView soup = view(meshes_);
+    std::vector<MultiToiHit> hits;
+    hits.reserve(std::min<size_t>(bodies_.size(),
+                                  multiToiSettings_.defaultConfig.maxToiEventsPerBody));
+    for (BodyIndex otherIndex = 0; otherIndex < bodies_.size(); ++otherIndex) {
+        if (otherIndex == sourceIndex) continue;
+        const Body& other = bodies_[otherIndex];
+        if (!source.canCollideWith(other) || (other.isStatic() && source.isStatic()))
+            continue;
+        float toi = 0.0f;
+        Vec3 normal{}, point{};
+        if (!findToi(source, other, dt,
+                     multiToiSettings_.defaultConfig.toiPenetrationBias,
+                     soup, toi, normal, point))
+            continue;
+        hits.push_back({toi, bodyHandle(otherIndex), point, normal, toi / dt});
+    }
+    std::sort(hits.begin(), hits.end(), [](const MultiToiHit& lhs,
+                                           const MultiToiHit& rhs) {
+        if (lhs.toi != rhs.toi) return lhs.toi < rhs.toi;
+        return lhs.body.value < rhs.body.value;
+    });
+    const size_t cap = std::min<size_t>(multiToiSettings_.defaultConfig.maxToiEventsPerBody,
+                                        multiToiSettings_.maxTotalEventsPerStep);
+    if (hits.size() > cap) hits.resize(cap);
+    return hits;
+}
 
 // Iterative impulse solve for all joints, with Baumgarte positional bias.
 // Joints are few compared to contacts, so this runs on the CPU.
@@ -2764,6 +2959,10 @@ void World::step(float dt) {
         Body& b = bodies_[j];
         if (a.isSensor() || b.isSensor()) continue;
         if (!a.isDynamic()) continue;
+        if (!a.ccdTuning.enableContinuous ||
+            a.ccdTuning.quality == MotionQuality::Low || a.isLocked() ||
+            a.maxPointSpeed() < a.ccdTuning.minVelocityForCCD)
+            continue;
         float search = a.maxPointSpeed() * dt + a.radius +
                        length(a.halfExtents) + a.capsuleHalfHeight + 0.1f;
         {

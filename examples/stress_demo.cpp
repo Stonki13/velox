@@ -2072,6 +2072,67 @@ static void testClosestPoints() {
     check(ok, "closestPoints (witnesses, plane, overlap sign)");
 }
 
+// Multi-TOI query ordering and the CCD configuration data are tested before
+// the event-processing pass consumes these candidates during stepping.
+static void testCcdConfigurationAndMultiToiQuery() {
+    velox::World w(velox::BackendType::Cpu);
+    w.gravity = {0, 0, 0};
+    velox::WorldCcdDefaults defaults;
+    defaults.defaultQuality = velox::MotionQuality::High;
+    defaults.defaultCollisionMargin = 0.02f;
+    defaults.defaultSpeculativeDistance = 0.03f;
+    defaults.defaultMinVelocityForCCD = 0.0f;
+    w.setCcdDefaults(defaults);
+    const auto bullet = w.addSphere({0, 0, 0}, 0.05f, 1.0f);
+    w.setLinearVelocity(bullet, {1000, 0, 0});
+    w.addStaticPlane({-1, 0, 0}, -2.0f);
+    w.addStaticPlane({-1, 0, 0}, -4.0f);
+    w.addStaticPlane({-1, 0, 0}, -6.0f);
+
+    velox::WorldMultiToiSettings settings = w.multiToiSettings();
+    settings.defaultConfig.maxToiEventsPerBody = 3;
+    settings.defaultConfig.toiVelocityFloor = 0.0f;
+    settings.defaultConfig.toiPenetrationBias = 1e-4f;
+    settings.maxTotalEventsPerStep = 3;
+    w.setMultiToiSettings(settings);
+    const std::vector<velox::MultiToiHit> hits = w.queryMultiToi(bullet, 0.01f);
+
+    bool ordered = hits.size() == 3;
+    for (size_t i = 1; i < hits.size(); ++i)
+        ordered &= hits[i - 1].toi < hits[i].toi &&
+                   hits[i - 1].body.value < UINT64_MAX &&
+                   hits[i].normal.x < -0.99f;
+    ordered &= hits.empty() || (std::fabs(hits[0].toi - 0.00195f) < 2e-4f &&
+                                std::fabs(hits[2].toi - 0.00595f) < 2e-4f);
+
+    settings.defaultConfig.maxToiEventsPerBody = 2;
+    w.setMultiToiSettings(settings);
+    const bool capped = w.queryMultiToi(bullet, 0.01f).size() == 2;
+
+    const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
+    velox::BodyCcdTuning locked = w.ccdTuning(frozen);
+    locked.quality = velox::MotionQuality::Locked;
+    w.setCcdTuning(frozen, locked);
+    w.setLinearVelocity(frozen, {20, 0, 0});
+    w.addForce(frozen, {100, 0, 0});
+    const velox::Vec3 before = w.bodyState(frozen).position;
+    w.step(0.25f);
+    const bool immobile = velox::length(w.bodyState(frozen).position - before) < 1e-6f;
+
+    const velox::WorldSnapshot snapshot = w.saveSnapshot();
+    velox::WorldCcdDefaults changed = w.ccdDefaults();
+    changed.defaultQuality = velox::MotionQuality::Low;
+    w.setCcdDefaults(changed);
+    w.restoreSnapshot(snapshot);
+    const bool restoredSettings = w.ccdDefaults().defaultQuality ==
+                                      velox::MotionQuality::High &&
+                                  w.multiToiSettings().defaultConfig.maxToiEventsPerBody == 2;
+    const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
+                           std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
+    check(ordered && capped && immobile && inherited && restoredSettings,
+          "CCD tuning, locked body, and ordered multi-TOI query");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -2121,6 +2182,7 @@ int main() {
     testBroadPhaseTree();
     testRayCastAll();
     testClosestPoints();
+    testCcdConfigurationAndMultiToiQuery();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

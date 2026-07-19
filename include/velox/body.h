@@ -1,4 +1,5 @@
 #pragma once
+#include "ccd.h"
 #include "math.h"
 #include <cstdint>
 #include <vector>
@@ -86,6 +87,7 @@ struct Body {
     float angularDamping = 0.0f;
     float gravityScale = 1.0f;
     MotionType motionType = MotionType::Dynamic;
+    BodyCcdTuning ccdTuning;
     GeometryQuality geometryQuality = GeometryQuality::Normal;
     uint32_t categoryBits = 1u;
     uint32_t maskBits = UINT32_MAX;
@@ -109,11 +111,16 @@ struct Body {
     VELOX_HD bool isKinematic() const { return motionType == MotionType::Kinematic; }
     VELOX_HD bool isDynamic() const { return motionType == MotionType::Dynamic; }
     VELOX_HD bool isSensor() const { return sensor != 0; }
+    VELOX_HD bool isLocked() const {
+        return ccdTuning.quality == MotionQuality::Locked;
+    }
     VELOX_HD bool canCollideWith(const Body& other) const {
         return (maskBits & other.categoryBits) != 0 &&
                (other.maskBits & categoryBits) != 0;
     }
-    VELOX_HD float solverInvMass() const { return isDynamic() ? invMass : 0.0f; }
+    VELOX_HD float solverInvMass() const {
+        return isDynamic() && !isLocked() ? invMass : 0.0f;
+    }
 
     VELOX_HD Quat inertiaFrameAt(const Quat& at) const {
         if (inertiaOrientation.x == 0.0f && inertiaOrientation.y == 0.0f &&
@@ -124,7 +131,7 @@ struct Body {
 
     // World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v))
     VELOX_HD Vec3 invInertiaMulAt(const Vec3& v, const Quat& at) const {
-        if (!isDynamic()) return {};
+        if (!isDynamic() || isLocked()) return {};
         Quat frame = inertiaFrameAt(at);
         Vec3 local = rotateInv(frame, v);
         return rotate(frame, {local.x * invInertia.x,
@@ -137,6 +144,7 @@ struct Body {
     }
 
     VELOX_HD Vec3 inertiaMul(const Vec3& v) const {
+        if (isLocked()) return {};
         Quat frame = inertiaFrameAt(orientation);
         Vec3 local = rotateInv(frame, v);
         Vec3 weighted{
@@ -158,6 +166,7 @@ struct Body {
     // anisotropic inertia tensor rotates. Kinematic angular velocity is a
     // prescribed trajectory and is therefore not reprojected.
     VELOX_HD void advanceOrientation(float dt) {
+        if (isLocked()) return;
         bool anisotropic = invInertia.x != invInertia.y ||
                            invInertia.y != invInertia.z;
         if (isDynamic() && anisotropic) {
@@ -180,6 +189,7 @@ struct Body {
     }
 
     VELOX_HD void advanceTransform(float dt) {
+        if (isLocked()) return;
         position += velocity * dt;
         advanceOrientation(dt);
     }

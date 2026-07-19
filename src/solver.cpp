@@ -179,7 +179,7 @@ public:
         dispatchChunks(bodies.size(), 512, [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; ++i) {
                 Body& b = bodies[i];
-                if (!b.isDynamic() || b.asleep) continue;
+                if (!b.isDynamic() || b.isLocked() || b.asleep) continue;
                 b.velocity += (gravity * b.gravityScale +
                                b.force * b.solverInvMass()) * dt;
                 b.angularVelocity += b.invInertiaMul(b.torque) * dt;

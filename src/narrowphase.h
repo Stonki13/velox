@@ -258,7 +258,11 @@ VELOX_HD inline void bodyAabb(const Body& b, float dt, Vec3& lo, Vec3& hi) {
     }
     default:                 ext = 0.0f; break; // plane/mesh handled separately
     }
-    float reach = ext + b.maxPointSpeed() * dt + 1e-2f;
+    const bool continuous = b.ccdTuning.enableContinuous &&
+                            b.ccdTuning.quality != MotionQuality::Low &&
+                            b.ccdTuning.quality != MotionQuality::Locked;
+    const float sweep = continuous ? b.maxPointSpeed() * dt : 0.0f;
+    float reach = ext + sweep + b.ccdTuning.collisionMargin + 1e-2f;
     lo = b.position - Vec3{reach, reach, reach};
     hi = b.position + Vec3{reach, reach, reach};
 }
@@ -294,7 +298,16 @@ VELOX_HD inline void emit(const Body& a, const Body& b, BodyIndex ia, BodyIndex 
                           uint64_t featureKey = 0) {
     if (n >= cap) return;
     constexpr float slop = 1e-3f;
-    float reach = (a.maxPointSpeed() + b.maxPointSpeed()) * dt + slop;
+    const bool sweepA = a.ccdTuning.enableContinuous &&
+                        a.ccdTuning.quality != MotionQuality::Low &&
+                        a.ccdTuning.quality != MotionQuality::Locked;
+    const bool sweepB = b.ccdTuning.enableContinuous &&
+                        b.ccdTuning.quality != MotionQuality::Low &&
+                        b.ccdTuning.quality != MotionQuality::Locked;
+    float reach = (sweepA ? a.maxPointSpeed() : 0.0f) * dt +
+                  (sweepB ? b.maxPointSpeed() : 0.0f) * dt +
+                  a.ccdTuning.speculativeDistance +
+                  b.ccdTuning.speculativeDistance + slop;
     if (gap > reach) return; // cannot touch this step
     float vn = dot(npPointVelocity(a, point) - npPointVelocity(b, point), normal);
     Vec3 localA = contactAnchorLocal(a, point);

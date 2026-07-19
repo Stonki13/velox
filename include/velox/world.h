@@ -81,6 +81,14 @@ struct ShapeCastHit {
     Vec3 point, normal; // normal points from the hit body toward the cast shape
 };
 
+struct MultiToiHit {
+    float toi = 0.0f;
+    BodyId body;
+    Vec3 point;
+    Vec3 normal; // from the hit body toward the queried body
+    float fraction = 0.0f;
+};
+
 struct DebugLine {
     Vec3 a, b;
     uint32_t color = 0xffffffffu; // 0xRRGGBBAA
@@ -154,6 +162,8 @@ private:
     std::vector<JointBreakEvent> jointBreakEvents_;
     MeshSoup meshes_;
     StepStats lastStepStats_;
+    WorldCcdDefaults ccdDefaults_;
+    WorldMultiToiSettings multiToiSettings_;
 };
 
 struct BroadPhaseData;
@@ -199,6 +209,14 @@ public:
     // Strict mode requires a build configured with VELOX_STRICT_FLOATING_POINT.
     // It uses the CPU reference backend; CUDA strict parity is not yet supported.
     void setDeterminismMode(DeterminismMode mode);
+
+    WorldCcdDefaults ccdDefaults() const;
+    void setCcdDefaults(WorldCcdDefaults defaults);
+    WorldMultiToiSettings multiToiSettings() const;
+    void setMultiToiSettings(WorldMultiToiSettings settings);
+    void setCcdTuning(BodyId id, BodyCcdTuning tuning);
+    BodyCcdTuning ccdTuning(BodyId id) const;
+    std::vector<MultiToiHit> queryMultiToi(BodyId id, float dt) const;
 
     IslandSolvingMode islandSolvingMode() const;
     void setIslandSolvingMode(IslandSolvingMode mode);
@@ -425,6 +443,8 @@ private:
     ContactModifier contactModifier_;
     IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;
     DeterminismMode determinismMode_ = DeterminismMode::Relaxed;
+    WorldCcdDefaults ccdDefaults_;
+    WorldMultiToiSettings multiToiSettings_;
     BackendType requestedBackend_ = BackendType::Auto;
     StepStats lastStepStats_;
     MeshSoup meshes_;
