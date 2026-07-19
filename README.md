@@ -248,6 +248,8 @@ ctest --test-dir build -C Release --output-on-failure
   explicit throw policy, and controlled CUDA backend restoration.
 - [Packaging and releases](docs/packaging.md) covers `find_package(Velox)`,
   Conan source packages, and tagged release artifacts.
+- [Contributing](docs/CONTRIBUTING.md) describes development gates, CUDA
+  compatibility requirements, and how to report a reproducible physics issue.
 - [Real-workload release gate](docs/release-gate.md) defines the game-like
   CTest workload used to catch cross-subsystem regressions.
 - `doxygen docs/Doxyfile` generates API reference HTML in `docs/api-reference`.
