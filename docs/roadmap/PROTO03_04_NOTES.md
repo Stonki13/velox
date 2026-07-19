@@ -31,8 +31,10 @@ restore. An elastic ricochet reaches three X walls and one Z wall within 10 ms,
 reports exactly four High-quality static TOI events, and conserves speed within
 1e-3 m/s. A two-event cap stops that same replay after exactly two events. A
 2,000 m/s, equal-mass High/High sphere collision reports one event, reverses
-both bodies, and preserves the center of mass. The CUDA-enabled stress suite
-remained green.
+both bodies, and preserves the center of mass. A three-body High chain reports
+two events: the first transfers momentum to the middle body and the scheduler
+then finds and resolves its newly possible collision with the third body. The
+CUDA-enabled stress suite remained green.
 
 After the shared timeline pass, the full CUDA-enabled CTest suite passed all 13
 tests, `fuzz_demo 80` passed twice, and `proto_manifold` passed all eight

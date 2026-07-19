@@ -2179,6 +2179,28 @@ static void testCcdConfigurationAndMultiToiQuery() {
                                rightAfter.velocity.x > 900.0f &&
                                std::fabs(leftAfter.position.x + rightAfter.position.x) < 1e-3f;
 
+    // The second collision is not present at frame start. It becomes the next
+    // chronological event only after the first body transfers its momentum to
+    // the middle body, exercising the dynamic rescheduling loop.
+    velox::World dynamicChain(velox::BackendType::Cpu);
+    dynamicChain.gravity = {0, 0, 0};
+    dynamicChain.setCcdDefaults(defaults);
+    dynamicChain.setMultiToiSettings(multiSettings);
+    const auto chainLeft = dynamicChain.addSphere({-5, 0, 0}, 0.1f, 1.0f);
+    const auto chainMiddle = dynamicChain.addSphere({0, 0, 0}, 0.1f, 1.0f);
+    const auto chainRight = dynamicChain.addSphere({5, 0, 0}, 0.1f, 1.0f);
+    for (const velox::BodyId id : {chainLeft, chainMiddle, chainRight})
+        dynamicChain.body(id).restitution = 1.0f;
+    dynamicChain.setLinearVelocity(chainLeft, {2000, 0, 0});
+    dynamicChain.step(0.01f);
+    const velox::Body chainLeftAfter = dynamicChain.bodyState(chainLeft);
+    const velox::Body chainMiddleAfter = dynamicChain.bodyState(chainMiddle);
+    const velox::Body chainRightAfter = dynamicChain.bodyState(chainRight);
+    const bool dynamicChainImpact = dynamicChain.lastStepStats().multiToiEvents == 2 &&
+                                    std::fabs(chainLeftAfter.velocity.x) < 1e-2f &&
+                                    std::fabs(chainMiddleAfter.velocity.x) < 1e-2f &&
+                                    chainRightAfter.velocity.x > 1900.0f;
+
     const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
     velox::BodyCcdTuning locked = w.ccdTuning(frozen);
     locked.quality = velox::MotionQuality::Locked;
@@ -2200,6 +2222,7 @@ static void testCcdConfigurationAndMultiToiQuery() {
     const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
                            std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
     check(ordered && capped && steppedImpact && sequentialImpacts && eventCap && dynamicImpact &&
+              dynamicChainImpact &&
               immobile && inherited && restoredSettings,
           "CCD tuning, locked body, and ordered multi-TOI query");
 }
