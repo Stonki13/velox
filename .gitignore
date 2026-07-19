@@ -1,4 +1,9 @@
 ﻿build*/
+package-install/
+package-consumer/
+__pycache__/
+velox-*.zip
+velox-*.sha256
 out/
 docs/api-reference/
 .vs/

@@ -23,6 +23,11 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Install package
         run: cmake --install build --config Release --prefix install
+      - name: Verify installed package
+        run: |
+          cmake -S tests/package_consumer -B package-consumer -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake --build package-consumer --config Release --parallel
+          ctest --test-dir package-consumer -C Release --output-on-failure
 
   sanitizers:
     name: Linux / Clang + ASan + UBSan
