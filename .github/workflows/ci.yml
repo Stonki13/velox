@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -42,3 +42,52 @@ jobs:
         run: build/examples/fuzz_demo 15
       - name: Soak (sanitized, reduced)
         run: build/examples/fuzz_demo soak 3000
+
+  strict-cpu:
+    name: Strict CPU / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure strict reference build
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=ON
+          -DVELOX_STRICT_FLOATING_POINT=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Strict replay test
+        run: ctest --test-dir build -C Release -R "^velox.determinism$" --output-on-failure
+      - name: Produce strict trace
+        shell: bash
+        run: |
+          executable=build/examples/determinism_demo
+          if [ "$RUNNER_OS" = Windows ]; then
+            executable=build/examples/Release/determinism_demo.exe
+          fi
+          "$executable" --trace | grep '^VELOX_STRICT_TRACE' > strict-trace-${{ matrix.os }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strict-trace-${{ matrix.os }}
+          path: strict-trace-${{ matrix.os }}.txt
+          if-no-files-found: error
+
+  strict-parity:
+    name: Strict CPU cross-platform parity
+    needs: strict-cpu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: strict-trace-*
+          path: traces
+          merge-multiple: true
+      - name: Require identical 1000-frame traces
+        shell: bash
+        run: |
+          tr -d '\r' < <(cat traces/strict-trace-*.txt) | sort -u > distinct-traces.txt
+          test "$(wc -l < distinct-traces.txt)" -eq 1
+          cat distinct-traces.txt

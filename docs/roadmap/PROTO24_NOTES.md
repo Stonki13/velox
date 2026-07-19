@@ -35,6 +35,11 @@ The regression scene contains a resting 12-box stack with angular motion, so
 it covers deterministic broad-phase ordering, contact generation, warm
 starting, solving, and sleeping rather than a contact-free trajectory.
 
+`determinism_demo --trace` also records all tracked float fields after every
+frame into an explicitly serialized 1000-frame FNV trace. The local MSVC
+strict trace is `b7a7ef9fb436ad19`. CI uploads and compares this trace across
+Windows, Linux, macOS Intel, and macOS ARM once the workflow runs.
+
 ## Remaining Acceptance Work
 
 - Run and compare strict trace artifacts on Windows/MSVC, Linux/GCC,
