@@ -43,6 +43,7 @@ void Input::update(const Window& window) {
     down_[static_cast<size_t>(Action::Rain)] = keyDown(native, GLFW_KEY_F2);
     down_[static_cast<size_t>(Action::Ragdoll)] = keyDown(native, GLFW_KEY_F3);
     down_[static_cast<size_t>(Action::Contraption)] = keyDown(native, GLFW_KEY_F4);
+    down_[static_cast<size_t>(Action::Gyro)] = keyDown(native, GLFW_KEY_F5);
     down_[static_cast<size_t>(Action::ToggleLines)] = keyDown(native, GLFW_KEY_L);
     down_[static_cast<size_t>(Action::Shape1)] = keyDown(native, GLFW_KEY_1);
     down_[static_cast<size_t>(Action::Shape2)] = keyDown(native, GLFW_KEY_2);
