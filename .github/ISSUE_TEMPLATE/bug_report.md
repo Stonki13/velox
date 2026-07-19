@@ -14,9 +14,9 @@ labels: bug
 
 ## Reproduction
 
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 Attach a minimal serialized scene (`serializeWorld()`), a short source repro,
 or both whenever possible. Include the timestep, substeps, and any nondefault

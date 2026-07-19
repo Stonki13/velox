@@ -21,4 +21,3 @@ Paste `benchmark.exe` output and relevant `StepStats` phase timings. Include
 the prior baseline, current result, sample count, and profiler evidence.
 
 ## Expected And Actual Performance
-
