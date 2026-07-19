@@ -187,6 +187,25 @@ struct ThreadSafetyReport {
     uint64_t stepInvocationsOnNonMainThread = 0;
 };
 
+// Runtime replacement for convex primitive collider geometry. Hull and
+// compound payloads are value-owned so callers can safely retain their input
+// after mutation returns.
+struct ShapeMutation {
+    enum class Type : uint8_t { Sphere, Box, Capsule, Cylinder, Cone, Hull, Compound };
+    Type type = Type::Sphere;
+    float radius = 0.0f;
+    Vec3 halfExtents{0.5f, 0.5f, 0.5f};
+    float capsuleHalfHeight = 0.0f;
+    std::vector<Vec3> hullPoints;
+    std::vector<CompoundShape> compoundShapes;
+    bool preserveMassProperties = false;
+};
+
+struct ShapeScale {
+    Vec3 factor{1.0f, 1.0f, 1.0f};
+    bool updateMassProperties = true;
+};
+
 class World {
 public:
     // Auto picks the NVIDIA CUDA backend when built with VELOX_ENABLE_CUDA and
@@ -276,6 +295,12 @@ public:
     void removeBody(BodyId id); // also removes joints attached to the body
     MotionType motionType(BodyId id) const;
     void setMotionType(BodyId id, MotionType type);
+    // Replace collider geometry without changing the body's handle or joints.
+    // Primitive forms are immediate; hull and compound payloads use the same
+    // descriptor and are completed by the transactional soup path.
+    void mutateShape(BodyId id, const ShapeMutation& mutation);
+    void scaleShape(BodyId id, const ShapeScale& scale);
+    void setCollisionMargin(BodyId id, float margin);
     // Overrides mass and principal moments/axes without changing motion type.
     // principalOrientation rotates the principal frame into body-local space.
     void setMassProperties(BodyId id, float mass, Vec3 principalInertia,

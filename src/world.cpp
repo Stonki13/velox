@@ -143,6 +143,51 @@ void requireNonNegative(float value, const char* message) {
     if (!finiteFloat(value) || value < 0.0f) throw std::invalid_argument(message);
 }
 
+void refreshPrimitiveInertia(Body& body) {
+    if (body.invMass <= 0.0f) return;
+    const float mass = 1.0f / body.invMass;
+    float ix = 0.0f, iy = 0.0f, iz = 0.0f;
+    switch (body.shape) {
+    case ShapeType::Sphere:
+        ix = iy = iz = 0.4f * mass * body.radius * body.radius;
+        break;
+    case ShapeType::Box: {
+        Vec3 e = body.halfExtents * 2.0f;
+        float k = mass / 12.0f;
+        ix = k * (e.y * e.y + e.z * e.z);
+        iy = k * (e.x * e.x + e.z * e.z);
+        iz = k * (e.x * e.x + e.y * e.y);
+        break;
+    }
+    case ShapeType::Cylinder: {
+        float height = 2.0f * body.capsuleHalfHeight;
+        iy = 0.5f * mass * body.radius * body.radius;
+        ix = iz = mass * (3.0f * body.radius * body.radius + height * height) / 12.0f;
+        break;
+    }
+    case ShapeType::Cone: {
+        float height = 2.0f * body.capsuleHalfHeight;
+        iy = 0.3f * mass * body.radius * body.radius;
+        ix = iz = 0.15f * mass * body.radius * body.radius + 0.0375f * mass * height * height;
+        break;
+    }
+    case ShapeType::Capsule: {
+        float r = body.radius, h = body.capsuleHalfHeight;
+        float cylinderWeight = 2.0f * h, sphereWeight = (4.0f / 3.0f) * r;
+        float cylinderMass = mass * cylinderWeight / (cylinderWeight + sphereWeight);
+        float sphereMass = mass - cylinderMass;
+        iy = 0.5f * cylinderMass * r * r + 0.4f * sphereMass * r * r;
+        ix = iz = cylinderMass * (3.0f * r * r + 4.0f * h * h) / 12.0f +
+                  sphereMass * (0.4f * r * r + 0.75f * h * r + h * h);
+        break;
+    }
+    default:
+        return;
+    }
+    body.invInertia = {1.0f / ix, 1.0f / iy, 1.0f / iz};
+    body.inertiaOrientation = {};
+}
+
 void validateRuntimeBody(const Body& body) {
     if (!finiteVec(body.position) || !finiteQuat(body.orientation) ||
         !finiteQuat(body.inertiaOrientation) ||
@@ -1244,6 +1289,106 @@ void World::setMotionType(BodyId id, MotionType type) {
         b.velocity = {};
         b.angularVelocity = {};
     }
+}
+
+void World::mutateShape(BodyId id, const ShapeMutation& mutation) {
+    AccessGuard guard(*this, AccessKind::Mutation, "mutateShape");
+    BodyIndex dense = resolve(id);
+    Body candidate = bodies_[dense];
+    switch (mutation.type) {
+    case ShapeMutation::Type::Sphere:
+        requirePositive(mutation.radius, "velox: mutated sphere radius must be positive");
+        candidate.shape = ShapeType::Sphere;
+        candidate.radius = mutation.radius;
+        break;
+    case ShapeMutation::Type::Box:
+        requireFiniteVec(mutation.halfExtents,
+                         "velox: mutated box extents must be finite");
+        if (mutation.halfExtents.x <= 0.0f || mutation.halfExtents.y <= 0.0f ||
+            mutation.halfExtents.z <= 0.0f)
+            throw std::invalid_argument("velox: mutated box extents must be positive");
+        candidate.shape = ShapeType::Box;
+        candidate.halfExtents = mutation.halfExtents;
+        break;
+    case ShapeMutation::Type::Capsule:
+    case ShapeMutation::Type::Cylinder:
+    case ShapeMutation::Type::Cone:
+        requirePositive(mutation.radius, "velox: mutated primitive radius must be positive");
+        if (mutation.type == ShapeMutation::Type::Capsule)
+            requireNonNegative(mutation.capsuleHalfHeight,
+                               "velox: mutated capsule half height must be non-negative");
+        else
+            requirePositive(mutation.capsuleHalfHeight,
+                            "velox: mutated primitive half height must be positive");
+        candidate.shape = mutation.type == ShapeMutation::Type::Capsule ? ShapeType::Capsule :
+                          mutation.type == ShapeMutation::Type::Cylinder ? ShapeType::Cylinder :
+                                                                           ShapeType::Cone;
+        candidate.radius = mutation.radius;
+        candidate.capsuleHalfHeight = mutation.capsuleHalfHeight;
+        break;
+    case ShapeMutation::Type::Hull:
+    case ShapeMutation::Type::Compound:
+        throw std::invalid_argument(
+            "velox: hull and compound mutation require the transactional geometry pass");
+    default:
+        throw std::invalid_argument("velox: invalid shape mutation type");
+    }
+    if (!mutation.preserveMassProperties) refreshPrimitiveInertia(candidate);
+    bodies_[dense] = candidate;
+    bodies_[dense].asleep = 0;
+    bodies_[dense].sleepTimer = 0.0f;
+    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+        [&](const Contact& c) { return c.a == dense || c.b == dense; }), contacts_.end());
+    prevContacts_.erase(std::remove_if(prevContacts_.begin(), prevContacts_.end(),
+        [&](const Contact& c) { return c.a == dense || c.b == dense; }), prevContacts_.end());
+    broadPhase_->touched = true;
+    backend_->invalidateCaches();
+}
+
+void World::scaleShape(BodyId id, const ShapeScale& scale) {
+    AccessGuard guard(*this, AccessKind::Mutation, "scaleShape");
+    requireFiniteVec(scale.factor, "velox: shape scale must be finite");
+    if (scale.factor.x <= 0.0f || scale.factor.y <= 0.0f || scale.factor.z <= 0.0f)
+        throw std::invalid_argument("velox: shape scale must be positive");
+    BodyIndex dense = resolve(id);
+    const Body& body = bodies_[dense];
+    ShapeMutation mutation;
+    mutation.preserveMassProperties = !scale.updateMassProperties;
+    switch (body.shape) {
+    case ShapeType::Box:
+        mutation.type = ShapeMutation::Type::Box;
+        mutation.halfExtents = {body.halfExtents.x * scale.factor.x,
+                                body.halfExtents.y * scale.factor.y,
+                                body.halfExtents.z * scale.factor.z};
+        break;
+    case ShapeType::Sphere:
+    case ShapeType::Capsule:
+    case ShapeType::Cylinder:
+    case ShapeType::Cone:
+        if (scale.factor.x != scale.factor.y || scale.factor.y != scale.factor.z)
+            throw std::invalid_argument("velox: round primitive scaling must be uniform");
+        mutation.type = body.shape == ShapeType::Sphere ? ShapeMutation::Type::Sphere :
+                        body.shape == ShapeType::Capsule ? ShapeMutation::Type::Capsule :
+                        body.shape == ShapeType::Cylinder ? ShapeMutation::Type::Cylinder :
+                                                            ShapeMutation::Type::Cone;
+        mutation.radius = body.radius * scale.factor.x;
+        mutation.capsuleHalfHeight = body.capsuleHalfHeight * scale.factor.x;
+        break;
+    default:
+        throw std::invalid_argument("velox: this collider cannot yet be scaled at runtime");
+    }
+    mutateShape(id, mutation);
+}
+
+void World::setCollisionMargin(BodyId id, float margin) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setCollisionMargin");
+    requireNonNegative(margin, "velox: collision margin must be non-negative");
+    Body& body = bodies_[resolve(id)];
+    body.ccdTuning.collisionMargin = margin;
+    body.asleep = 0;
+    body.sleepTimer = 0.0f;
+    broadPhase_->touched = true;
+    backend_->invalidateCaches();
 }
 
 void World::setMassProperties(BodyId id, float mass, Vec3 principalInertia,
