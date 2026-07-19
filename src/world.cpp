@@ -1452,27 +1452,45 @@ void World::buildCandidatePairs(float dt) {
     auto inert = [&](BodyIndex k) {
         return bodies_[k].isStatic() || bodies_[k].asleep;
     };
-    for (BodyIndex i = 0; i < bodies_.size(); ++i) {
-        if (bp.proxies[i] < 0 || inert(i)) continue;
-        const Body& a = bodies_[i];
-        Vec3 lo, hi;
-        proxyBounds(a, meshes_, dt, lo, hi);
-        bp.tree.query(lo, hi, [&](uint32_t j) {
-            if (j == i) return;
-            // Active-active pairs are discovered from both endpoints: keep the
-            // lower index's discovery. Inert bodies never run a query, so
-            // their pairs survive unconditionally.
-            if (!inert(j) && j < i) return;
-            if (!a.canCollideWith(bodies_[j])) return;
-            BodyIndex lo32 = i < j ? i : (BodyIndex)j;
-            BodyIndex hi32 = i < j ? (BodyIndex)j : i;
-            candidatePairs_.push_back((uint64_t)lo32 << 32 | hi32);
-        });
-        for (BodyIndex p : bp.planes)
-            if (a.canCollideWith(bodies_[p]))
-                candidatePairs_.push_back(i < p ? ((uint64_t)i << 32 | p)
-                                                : ((uint64_t)p << 32 | i));
-    }
+    // Tree queries are read-only after the refit above, so awake bodies fan
+    // out across the backend's worker pool (this was the dominant serial
+    // cost of a large-scene CPU step: one tree walk per awake body). Chunk
+    // results merge in chunk order; the final sort restores the canonical
+    // deterministic ordering regardless of how the work was split.
+    std::vector<std::vector<uint64_t>> chunkPairs;
+    const size_t bodyCount = bodies_.size();
+    size_t chunksUsed = 0;
+    chunkPairs.resize(64);
+    backend_->parallelChunks(bodyCount, 512,
+        [&](size_t chunk, size_t begin, size_t end) {
+            std::vector<uint64_t>& out = chunkPairs[chunk];
+            out.clear();
+            for (BodyIndex i = (BodyIndex)begin; i < end; ++i) {
+                if (bp.proxies[i] < 0 || inert(i)) continue;
+                const Body& a = bodies_[i];
+                Vec3 lo, hi;
+                proxyBounds(a, meshes_, dt, lo, hi);
+                bp.tree.query(lo, hi, [&](uint32_t j) {
+                    if (j == i) return;
+                    // Active-active pairs are discovered from both endpoints:
+                    // keep the lower index's discovery. Inert bodies never
+                    // run a query, so their pairs survive unconditionally.
+                    if (!inert(j) && j < i) return;
+                    if (!a.canCollideWith(bodies_[j])) return;
+                    BodyIndex lo32 = i < j ? i : (BodyIndex)j;
+                    BodyIndex hi32 = i < j ? (BodyIndex)j : i;
+                    out.push_back((uint64_t)lo32 << 32 | hi32);
+                });
+                for (BodyIndex p : bp.planes)
+                    if (a.canCollideWith(bodies_[p]))
+                        out.push_back(i < p ? ((uint64_t)i << 32 | p)
+                                            : ((uint64_t)p << 32 | i));
+            }
+        },
+        &chunksUsed);
+    for (size_t chunk = 0; chunk < chunksUsed && chunk < chunkPairs.size(); ++chunk)
+        candidatePairs_.insert(candidatePairs_.end(), chunkPairs[chunk].begin(),
+                               chunkPairs[chunk].end());
     // Deterministic order for the narrow phase and solver regardless of tree
     // shape history; unique guards against duplicate discoveries.
     std::sort(candidatePairs_.begin(), candidatePairs_.end());

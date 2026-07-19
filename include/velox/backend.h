@@ -1,5 +1,6 @@
 #pragma once
 #include "joint.h"
+#include <functional>
 #include <vector>
 
 namespace velox {
@@ -127,6 +128,15 @@ public:
     // Bitwise identical to sequential solving because islands share no
     // dynamic bodies. GPU backends ignore it (graph coloring instead).
     virtual void setParallelIslands(bool) {}
+    // Runs chunk callbacks on the backend's host worker pool (read-only
+    // fan-out work like broad-phase queries). Default: serial.
+    virtual void parallelChunks(size_t items, size_t /*minPerChunk*/,
+                                const std::function<void(size_t chunk, size_t begin,
+                                                         size_t end)>& fn,
+                                size_t* chunkCountOut = nullptr) {
+        if (chunkCountOut) *chunkCountOut = items ? 1 : 0;
+        if (items) fn(0, 0, items);
+    }
 };
 
 Backend* createCpuBackend();
