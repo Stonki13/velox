@@ -485,15 +485,15 @@ private:
     void buildGyro() {
         world_->gravity = {0.0f, 0.0f, 0.0f};
         ground(); // visual reference; nothing falls onto it
-        const Vec3 half{0.2f, 0.8f, 0.1f};
-        struct Spin { Vec3 axis; const char* label; };
+        // Big flat slabs read much better in motion than thin sticks.
+        const Vec3 half{0.35f, 1.1f, 0.12f};
         const Vec3 spins[3] = {
-            {0.0f, 9.0f, 0.05f},  // minor axis: fast stable spin + precession
-            {6.0f, 0.06f, 0.0f},  // intermediate axis: Dzhanibekov flips
-            {0.05f, 0.0f, 5.0f},  // major axis: stable
+            {0.0f, 8.0f, 0.05f},  // minor axis: fast stable spin + precession
+            {5.0f, 0.05f, 0.0f},  // intermediate axis: Dzhanibekov flips
+            {0.05f, 0.0f, 4.5f},  // major axis: stable
         };
         for (int i = 0; i < 3; ++i) {
-            const Vec3 position{-3.0f + 3.0f * static_cast<float>(i), 3.0f, 0.0f};
+            const Vec3 position{-3.5f + 3.5f * static_cast<float>(i), 3.5f, 0.0f};
             const BodyId id = world_->addBox(position, half, 1.0f);
             world_->body(id).friction = 0.6f;
             world_->setAngularVelocity(id, spins[i]);
@@ -612,6 +612,7 @@ struct DragState {
     BodyId body;
     Vec3 localAnchor{};
     float distance = 0.0f;
+    Vec3 target{}; // cursor-plane target, refreshed once per render frame
 };
 
 void updateDrag(DragState& drag, SandboxScene& scene, const Camera& camera,
@@ -635,9 +636,15 @@ void updateDrag(DragState& drag, SandboxScene& scene, const Camera& camera,
     // Scroll pulls the grabbed body nearer or pushes it farther.
     drag.distance *= 1.0f + input.scrollDelta() * 0.09f;
     drag.distance = std::clamp(drag.distance, 0.6f, 120.0f);
+    drag.target = camera.position + cursorRay(camera, input, width, height) * drag.distance;
+}
 
-    const Vec3 direction = cursorRay(camera, input, width, height);
-    const Vec3 target = camera.position + direction * drag.distance;
+// The spring force is applied exactly once per PHYSICS step (inside the
+// fixed-step loop), never per render frame: forces accumulate until a step
+// consumes them, so per-frame application at high FPS stacked several spring
+// impulses into one step (or none into the next) and made dragging jitter.
+void applyDragForce(const DragState& drag, World& world) {
+    if (!drag.active || !world.isValid(drag.body)) return;
     const velox::Body& body = world.body(drag.body);
     const Vec3 anchorWorld = body.position + velox::rotate(body.orientation, drag.localAnchor);
     const Vec3 armVector = anchorWorld - body.position;
@@ -646,11 +653,11 @@ void updateDrag(DragState& drag, SandboxScene& scene, const Camera& camera,
     // Critically damped spring at the grabbed point, applied as a force so
     // the solver can still push back (no teleporting, no stack explosions).
     const float mass = body.invMass > 0.0f ? 1.0f / body.invMass : 0.0f;
-    if (mass <= 0.0f) { drag.active = false; return; }
-    const float stiffness = 90.0f;
+    if (mass <= 0.0f) return;
+    const float stiffness = 140.0f;
     const float damping = 2.0f * std::sqrt(stiffness); // critical
-    Vec3 spring = (target - anchorWorld) * stiffness - pointVelocity * damping;
-    const float maxAcceleration = 220.0f;
+    Vec3 spring = (drag.target - anchorWorld) * stiffness - pointVelocity * damping;
+    const float maxAcceleration = 300.0f;
     const float springLength = velox::length(spring);
     if (springLength > maxAcceleration) spring *= maxAcceleration / springLength;
     world.wake(drag.body);
@@ -929,7 +936,14 @@ int runInteractive(const SceneParameters& parameters) {
         if (input.pressed(sandbox::Action::Rain)) { scene.reset(Preset::Rain); drag.active = false; }
         if (input.pressed(sandbox::Action::Ragdoll)) { scene.reset(Preset::Ragdoll); drag.active = false; }
         if (input.pressed(sandbox::Action::Contraption)) { scene.reset(Preset::Contraption); drag.active = false; }
-        if (input.pressed(sandbox::Action::Gyro)) { scene.reset(Preset::Gyro); drag.active = false; }
+        if (input.pressed(sandbox::Action::Gyro)) {
+            scene.reset(Preset::Gyro);
+            drag.active = false;
+            // Front-row seat for the Dzhanibekov showcase.
+            camera.position = {0.0f, 3.6f, 9.0f};
+            camera.yaw = -1.5708f; // look toward -z (the boxes)
+            camera.pitch = -0.05f;
+        }
         if (input.pressed(sandbox::Action::Shape1)) spawnShape = SpawnShape::Sphere;
         if (input.pressed(sandbox::Action::Shape2)) spawnShape = SpawnShape::Box;
         if (input.pressed(sandbox::Action::Shape3)) spawnShape = SpawnShape::Capsule;
@@ -966,6 +980,7 @@ int runInteractive(const SceneParameters& parameters) {
         scene.world().substeps = substeps;
         if (!paused) {
             while (accumulator >= FixedDt) {
+                applyDragForce(drag, scene.world());
                 scene.world().step(FixedDt);
                 accumulator -= FixedDt;
             }
