@@ -68,21 +68,26 @@ pipeline, 4 solver substeps):
 
 | Scene | CPU 1 thread | CPU 16 threads | CUDA |
 |---|---|---|---|
-| 512-sphere rain | 0.83 ms | **0.64 ms** | 1.48 ms |
-| 2048-sphere rain | 4.00 ms | **1.74 ms** | 2.00 ms |
-| 8192-sphere rain | 18.09 ms | **6.92 ms** | 15.20 ms |
-| 2048 spheres on 20k-triangle terrain | 1.04 ms | **0.78 ms** | 3.17 ms |
+| 512-sphere rain | 0.84 ms | **0.62 ms** | 2.15 ms |
+| 2048-sphere rain | 4.53 ms | **1.92 ms** | 4.11 ms |
+| 8192-sphere rain | 17.99 ms | **7.01 ms** | 8.83 ms |
+| 2048 spheres on 20k-triangle terrain | 0.84 ms | **0.66 ms** | 3.27 ms |
 
-Two profile-driven passes shaped these numbers. First, contact-event pairing
-rescanned the entire contact array once per active pair (O(pairs x contacts),
-~60 ms at ~11k contacts); one sorted pass fixed both backends. Second, the
-broad phase ran one serial AABB-tree query per awake body; the queries are
-read-only after the refit and now fan out across the worker pool with a
-deterministic sort merge, and solver conflict batches are built once per step
-instead of once per substep. The 8192-body pile stepped at 124 ms (CPU) /
-83 ms (CUDA) this morning and 6.9 ms (CPU, 16 threads) now. Small active
-sets over large static worlds remain effectively free on the CPU thanks to
-the incremental AABB-tree broad phase.
+Three profile-driven passes shaped these numbers. First, contact-event
+pairing rescanned the entire contact array once per active pair (O(pairs x
+contacts), ~60 ms at ~11k contacts); one sorted pass fixed both backends.
+Second, the host broad phase ran one serial AABB-tree query per awake body;
+the read-only queries now fan out across the worker pool with a
+deterministic sort merge, and solver conflict batches are built once per
+step instead of once per substep. Third, the CUDA sorted-axis sweep scanned
+windows of hundreds of bodies per thread in dense piles (16 ms of a 23 ms
+collision phase); a uniform-grid broad phase (exact packed cell keys,
+cached-scratch thrust sort, 27-neighborhood binary-search lookups, and a
+brute-force lane for planes/meshes/oversized bodies) runs the same stage in
+~0.4 ms. The 8192-body pile stepped at 124 ms (CPU) / 83 ms (CUDA) at the
+start of this effort and 7.0 / 8.8 ms now. Small active sets over large
+static worlds remain effectively free on the CPU thanks to the incremental
+AABB-tree broad phase.
 
 The independent-distance-joint scene measures the resident constraint path:
 

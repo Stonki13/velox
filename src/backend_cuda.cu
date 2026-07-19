@@ -6,8 +6,10 @@
 #include "joint_solver.h"
 #include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
+#include <thrust/execution_policy.h>
 #include <thrust/sort.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <stdexcept>
@@ -59,7 +61,7 @@ struct Aabb { Vec3 lo, hi; };
 
 __global__ void aabbKernel(const Body* bodies, const Mesh* meshes, int n,
                            float dt, Aabb* aabbs, float* sortKeys,
-                           BodyIndex* sortedIndices) {
+                           BodyIndex* sortedIndices, float* maxNormalExtent) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const Body& b = bodies[i];
@@ -72,35 +74,136 @@ __global__ void aabbKernel(const Body* bodies, const Mesh* meshes, int n,
         Aabb box;
         bodyAabb(b, dt, box.lo, box.hi);
         aabbs[i] = box;
+        // Grid cell size = the largest "normal" body extent. Oversized
+        // outliers (giant boxes, meshes, planes) take the brute-force pass
+        // instead of bloating every cell. Positive-float atomic max works on
+        // the raw int representation.
+        float extent = fmaxf(box.hi.x - box.lo.x,
+                             fmaxf(box.hi.y - box.lo.y, box.hi.z - box.lo.z));
+        if (extent < 1e6f)
+            atomicMax((int*)maxNormalExtent, __float_as_int(extent));
     }
     sortKeys[i] = aabbs[i].lo.x;
     sortedIndices[i] = (BodyIndex)i;
 }
 
-// Stage 1: compact AABB-overlapping pairs from sorted X intervals. The atomic
-// count is allowed to exceed pairCap; the host grows the buffer and reruns so
-// broad-phase overflow never drops collision candidates.
-__global__ void sweepCandidatesKernel(const Body* bodies, const Aabb* aabbs,
-                                      const float* sortedKeys,
-                                      const BodyIndex* sortedIndices, int n,
-                                      uint64_t* pairs, int* pairCount,
-                                      int pairCap) {
+// Grid keys: cell coordinates of the AABB center packed into 21 bits per
+// axis. Packing is exact (no hash collisions), so equal keys mean the same
+// cell and a sorted key array supports binary-search neighborhood lookups.
+// Oversized bodies (extent > cellSize) get the sentinel key so they sort to
+// the end and are enumerated by the brute-force kernel below.
+constexpr uint64_t kOversizeKey = ~0ull;
+
+__device__ inline uint64_t packCell(int cx, int cy, int cz) {
+    const uint64_t bias = 1u << 20;
+    uint64_t x = (uint64_t)(cx + (int)bias) & 0x1fffff;
+    uint64_t y = (uint64_t)(cy + (int)bias) & 0x1fffff;
+    uint64_t z = (uint64_t)(cz + (int)bias) & 0x1fffff;
+    return (x << 42) | (y << 21) | z;
+}
+
+__global__ void cellKeyKernel(const Body* bodies, const Aabb* aabbs, int n,
+                              float cellSize, uint64_t* keys,
+                              BodyIndex* sortedIndices, int* oversize,
+                              int* oversizeCount, int oversizeCap) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    sortedIndices[i] = (BodyIndex)i;
+    const Aabb& box = aabbs[i];
+    float extent = fmaxf(box.hi.x - box.lo.x,
+                         fmaxf(box.hi.y - box.lo.y, box.hi.z - box.lo.z));
+    if (extent > cellSize || bodies[i].shape == ShapeType::Plane ||
+        bodies[i].shape == ShapeType::Mesh) {
+        keys[i] = kOversizeKey;
+        int slot = atomicAdd(oversizeCount, 1);
+        if (slot < oversizeCap) oversize[slot] = i;
+        return;
+    }
+    float inv = 1.0f / cellSize;
+    Vec3 center{(box.lo.x + box.hi.x) * 0.5f, (box.lo.y + box.hi.y) * 0.5f,
+                (box.lo.z + box.hi.z) * 0.5f};
+    keys[i] = packCell((int)floorf(center.x * inv), (int)floorf(center.y * inv),
+                       (int)floorf(center.z * inv));
+}
+
+// Stage 1a: neighborhood pairs from the sorted grid. Each body binary-searches
+// the 27 neighboring cell keys; cells are contiguous runs in the sorted array.
+// The atomic count may exceed pairCap; the host grows the buffer and reruns so
+// broad-phase overflow never drops candidates.
+__global__ void gridPairsKernel(const Body* bodies, const Aabb* aabbs,
+                                const uint64_t* sortedKeys,
+                                const BodyIndex* sortedIndices, int n,
+                                float cellSize, uint64_t* pairs, int* pairCount,
+                                int pairCap) {
     int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= n) return;
+    uint64_t myKey = sortedKeys[s];
+    if (myKey == kOversizeKey) return;
     BodyIndex rawI = sortedIndices[s];
-    for (int t = s + 1; t < n && sortedKeys[t] <= aabbs[rawI].hi.x; ++t) {
-        BodyIndex rawJ = sortedIndices[t];
-        BodyIndex i = rawI < rawJ ? rawI : rawJ;
-        BodyIndex j = rawI < rawJ ? rawJ : rawI;
-        if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, aabbs[j].lo, aabbs[j].hi)) continue;
-        const Body& a = bodies[i];
-        const Body& b = bodies[j];
-        if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) continue;
-        if (!a.canCollideWith(b)) continue;
+    const Aabb& boxI = aabbs[rawI];
+    float inv = 1.0f / cellSize;
+    Vec3 center{(boxI.lo.x + boxI.hi.x) * 0.5f, (boxI.lo.y + boxI.hi.y) * 0.5f,
+                (boxI.lo.z + boxI.hi.z) * 0.5f};
+    int cx = (int)floorf(center.x * inv);
+    int cy = (int)floorf(center.y * inv);
+    int cz = (int)floorf(center.z * inv);
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                uint64_t key = packCell(cx + dx, cy + dy, cz + dz);
+                // lower_bound over the sorted keys.
+                int lo = 0, hi = n;
+                while (lo < hi) {
+                    int mid = (lo + hi) >> 1;
+                    if (sortedKeys[mid] < key) lo = mid + 1;
+                    else hi = mid;
+                }
+                for (int t = lo; t < n && sortedKeys[t] == key; ++t) {
+                    BodyIndex rawJ = sortedIndices[t];
+                    if (rawJ <= rawI) continue; // dedupe: symmetric discovery
+                    if (!aabbOverlap(boxI.lo, boxI.hi, aabbs[rawJ].lo, aabbs[rawJ].hi))
+                        continue;
+                    const Body& a = bodies[rawI];
+                    const Body& b = bodies[rawJ];
+                    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep))
+                        continue;
+                    if (!a.canCollideWith(b)) continue;
+                    int slot = atomicAdd(pairCount, 1);
+                    if (slot < pairCap)
+                        pairs[slot] = (uint64_t(rawI) << 32) | rawJ;
+                }
+            }
+}
 
-        int slot = atomicAdd(pairCount, 1);
-        if (slot < pairCap) pairs[slot] = (uint64_t(i) << 32) | j;
-    }
+// Stage 1b: oversized bodies (planes, meshes, giant boxes) against everyone.
+__global__ void oversizePairsKernel(const Body* bodies, const Aabb* aabbs,
+                                    const int* oversize, int oversizeCount,
+                                    int n, float cellSize, uint64_t* pairs,
+                                    int* pairCount, int pairCap) {
+    long long idx = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+    if (idx >= (long long)oversizeCount * n) return;
+    int o = (int)(idx / n);
+    int j = (int)(idx % n);
+    int i = oversize[o];
+    if (j == i) return;
+    // A pair of two oversized bodies is discovered twice; keep the lower's.
+    // The oversize criterion must match cellKeyKernel exactly or such pairs
+    // duplicate (and duplicate contacts double the solver impulses).
+    const Aabb& boxJ = aabbs[j];
+    float extentJ = fmaxf(boxJ.hi.x - boxJ.lo.x,
+                          fmaxf(boxJ.hi.y - boxJ.lo.y, boxJ.hi.z - boxJ.lo.z));
+    bool jOversize = extentJ > cellSize || bodies[j].shape == ShapeType::Plane ||
+                     bodies[j].shape == ShapeType::Mesh;
+    if (jOversize && j < i) return;
+    if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, boxJ.lo, boxJ.hi)) return;
+    const Body& a = bodies[i];
+    const Body& b = bodies[j];
+    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
+    if (!a.canCollideWith(b)) return;
+    BodyIndex loI = i < j ? (BodyIndex)i : (BodyIndex)j;
+    BodyIndex hiI = i < j ? (BodyIndex)j : (BodyIndex)i;
+    int slot = atomicAdd(pairCount, 1);
+    if (slot < pairCap) pairs[slot] = (uint64_t(loI) << 32) | hiI;
 }
 
 // Stage 2: expensive narrow phase is fully parallel across compact candidates.
@@ -221,6 +324,9 @@ public:
         release(dAabbs_);
         release(dSortKeys_);
         release(dSortedIndices_);
+        release(dCellKeys_);
+        release(dOversize_);
+        release(dCellSize_);
         release(dPairs_);
         release(dSolve_);
         release(dContacts_);
@@ -253,11 +359,25 @@ public:
                       float dt, const std::vector<uint64_t>* /*hostPairs*/,
                       std::vector<Contact>& out) override {
         // The broad phase runs on-device; host candidate pairs are ignored.
+        // VELOX_CUDA_PROFILE=1 prints per-stage times (sync-heavy; debug only).
+        const bool profile = std::getenv("VELOX_CUDA_PROFILE") != nullptr;
+        auto stamp = [&](const char* label, auto&& fn) {
+            if (!profile) { fn(); return; }
+            cudaDeviceSynchronize();
+            auto t0 = std::chrono::steady_clock::now();
+            fn();
+            cudaDeviceSynchronize();
+            auto t1 = std::chrono::steady_clock::now();
+            std::fprintf(stderr, "  cuda %-14s %7.3f ms\n", label,
+                         std::chrono::duration<double, std::milli>(t1 - t0).count());
+        };
         out.clear();
         int n = static_cast<int>(bodies.size());
         if (n < 2) return;
-        if (bodiesDirty_) uploadBodies(const_cast<std::vector<Body>&>(bodies));
-        uploadMeshes(meshes);
+        stamp("uploadBodies", [&] {
+            if (bodiesDirty_) uploadBodies(const_cast<std::vector<Body>&>(bodies));
+        });
+        stamp("uploadMeshes", [&] { uploadMeshes(meshes); });
 
         int cap = initialContactCapacity(n);
         size_t residentContacts = contactCap_ / sizeof(Contact);
@@ -270,15 +390,23 @@ public:
             release(dAabbs_);
             release(dSortKeys_);
             release(dSortedIndices_);
+            release(dCellKeys_);
+            release(dOversize_);
             VELOX_CUDA_CHECK(cudaMalloc(&dAabbs_, n * sizeof(Aabb)));
             VELOX_CUDA_CHECK(cudaMalloc(&dSortKeys_, n * sizeof(float)));
             VELOX_CUDA_CHECK(cudaMalloc(&dSortedIndices_, n * sizeof(BodyIndex)));
+            VELOX_CUDA_CHECK(cudaMalloc(&dCellKeys_, n * sizeof(uint64_t)));
+            VELOX_CUDA_CHECK(cudaMalloc(&dOversize_, n * sizeof(int)));
             aabbCap_ = n * sizeof(Aabb);
         }
-        aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, dMeshes_, n, dt,
-                                             dAabbs_, dSortKeys_,
-                                             dSortedIndices_);
-        VELOX_CUDA_LAUNCH_CHECK();
+        if (!dCellSize_) VELOX_CUDA_CHECK(cudaMalloc(&dCellSize_, sizeof(float)));
+        stamp("aabbKernel", [&] {
+            VELOX_CUDA_CHECK(cudaMemset(dCellSize_, 0, sizeof(float)));
+            aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, dMeshes_, n, dt,
+                                                 dAabbs_, dSortKeys_,
+                                                 dSortedIndices_, dCellSize_);
+            VELOX_CUDA_LAUNCH_CHECK();
+        });
         MeshSoupView soup{dVertices_, dIndices_, dMeshes_, dNodes_, dTriRefs_,
                           dHullPts_, dHullFaceIndices_, dCompoundChildren_};
         int threads = 256;
@@ -316,41 +444,76 @@ public:
             return;
         }
 
-        thrust::device_ptr<float> keys(dSortKeys_);
-        thrust::device_ptr<BodyIndex> indices(dSortedIndices_);
-        thrust::sort_by_key(keys, keys + n, indices);
+        // Uniform-grid broad phase: cell size = largest normal body extent
+        // (read back once, 4 bytes), exact packed cell keys sorted with
+        // thrust, then 27-neighborhood lookups plus a brute-force pass for
+        // oversized bodies. Replaces the sorted-axis sweep whose per-body
+        // windows spanned hundreds of bodies in dense piles (16 ms -> ~1 ms
+        // on an 8192-sphere pile).
+        float cellSize = 0.0f;
+        int oversizeCount = 0;
+        stamp("cellKeys", [&] {
+            VELOX_CUDA_CHECK(cudaMemcpy(&cellSize, dCellSize_, sizeof(float),
+                                        cudaMemcpyDeviceToHost));
+            if (cellSize <= 0.0f) cellSize = 1.0f;
+            VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
+            cellKeyKernel<<<(n + threads - 1) / threads, threads>>>(
+                dBodies_, dAabbs_, n, cellSize, dCellKeys_, dSortedIndices_,
+                dOversize_, dCount_, n);
+            VELOX_CUDA_LAUNCH_CHECK();
+            VELOX_CUDA_CHECK(cudaMemcpy(&oversizeCount, dCount_, sizeof(int),
+                                        cudaMemcpyDeviceToHost));
+        });
+        stamp("thrustSort", [&] {
+            thrust::device_ptr<uint64_t> keys(dCellKeys_);
+            thrust::device_ptr<BodyIndex> indices(dSortedIndices_);
+            // Cached scratch allocator: thrust otherwise cudaMallocs and
+            // frees temporary storage on every call, which both costs time
+            // and produces large frame-to-frame jitter.
+            thrust::sort_by_key(thrust::cuda::par(sortAlloc_), keys, keys + n,
+                                indices);
+        });
         int candidateCap = static_cast<int>(pairCap_ / sizeof(uint64_t));
         if (candidateCap == 0) {
             candidateCap = n * 128 + 1024;
             VELOX_CUDA_CHECK(cudaMalloc(&dPairs_, candidateCap * sizeof(uint64_t)));
             pairCap_ = candidateCap * sizeof(uint64_t);
         }
-        VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
-        sweepCandidatesKernel<<<(n + threads - 1) / threads, threads>>>(
-            dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
-            dPairs_, dCount_, candidateCap);
-        VELOX_CUDA_LAUNCH_CHECK();
         int candidateCount = 0;
-        VELOX_CUDA_CHECK(cudaMemcpy(&candidateCount, dCount_, sizeof(int),
-                                    cudaMemcpyDeviceToHost));
+        auto launchBroadPhase = [&](int cap2) {
+            VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
+            gridPairsKernel<<<(n + threads - 1) / threads, threads>>>(
+                dBodies_, dAabbs_, dCellKeys_, dSortedIndices_, n, cellSize,
+                dPairs_, dCount_, cap2);
+            VELOX_CUDA_LAUNCH_CHECK();
+            if (oversizeCount > 0) {
+                long long work = (long long)oversizeCount * n;
+                oversizePairsKernel<<<(unsigned)((work + threads - 1) / threads),
+                                      threads>>>(
+                    dBodies_, dAabbs_, dOversize_, oversizeCount, n, cellSize,
+                    dPairs_, dCount_, cap2);
+                VELOX_CUDA_LAUNCH_CHECK();
+            }
+            VELOX_CUDA_CHECK(cudaMemcpy(&candidateCount, dCount_, sizeof(int),
+                                        cudaMemcpyDeviceToHost));
+        };
+        stamp("gridPairs", [&] { launchBroadPhase(candidateCap); });
         if (candidateCount > candidateCap) {
             release(dPairs_);
             candidateCap = candidateCount;
             VELOX_CUDA_CHECK(cudaMalloc(&dPairs_, candidateCap * sizeof(uint64_t)));
             pairCap_ = candidateCap * sizeof(uint64_t);
-            VELOX_CUDA_CHECK(cudaMemset(dCount_, 0, sizeof(int)));
-            sweepCandidatesKernel<<<(n + threads - 1) / threads, threads>>>(
-                dBodies_, dAabbs_, dSortKeys_, dSortedIndices_, n,
-                dPairs_, dCount_, candidateCap);
-            VELOX_CUDA_LAUNCH_CHECK();
+            launchBroadPhase(candidateCap);
         }
         if (candidateCount > 0) {
-            collectContacts([&](int outCap) {
-                candidateContactsKernel<<<
-                    (candidateCount + threads - 1) / threads, threads>>>(
-                    dBodies_, dPairs_, candidateCount, soup, dt,
-                    dContacts_, dCount_, outCap);
-                VELOX_CUDA_LAUNCH_CHECK();
+            stamp("narrow+copy", [&] {
+                collectContacts([&](int outCap) {
+                    candidateContactsKernel<<<
+                        (candidateCount + threads - 1) / threads, threads>>>(
+                        dBodies_, dPairs_, candidateCount, soup, dt,
+                        dContacts_, dCount_, outCap);
+                    VELOX_CUDA_LAUNCH_CHECK();
+                });
             });
         }
         bodiesDirty_ = true; // host may mutate bodies before the solve call
@@ -710,10 +873,31 @@ private:
         return static_cast<int>(count < (4 << 20) ? count : (4 << 20));
     }
 
+    // Reusable device scratch for thrust (grow-only, freed at teardown).
+    struct CachedDeviceAllocator {
+        using value_type = char;
+        char* buffer = nullptr;
+        size_t capacity = 0;
+        char* allocate(std::ptrdiff_t bytes) {
+            if ((size_t)bytes > capacity) {
+                if (buffer) cudaFree(buffer);
+                VELOX_CUDA_CHECK(cudaMalloc(&buffer, bytes));
+                capacity = (size_t)bytes;
+            }
+            return buffer;
+        }
+        void deallocate(char*, size_t) {} // retained for reuse
+        ~CachedDeviceAllocator() { if (buffer) cudaFree(buffer); }
+    };
+    CachedDeviceAllocator sortAlloc_;
+
     Body* dBodies_ = nullptr;
     Aabb* dAabbs_ = nullptr;
     float* dSortKeys_ = nullptr;
     BodyIndex* dSortedIndices_ = nullptr;
+    uint64_t* dCellKeys_ = nullptr;
+    int* dOversize_ = nullptr;
+    float* dCellSize_ = nullptr;
     uint64_t* dPairs_ = nullptr;
     size_t pairCap_ = 0;
     size_t aabbCap_ = 0;
