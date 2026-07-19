@@ -13,6 +13,8 @@ option(VELOX_BUILD_EXAMPLES "Build example programs" ON)
 option(VELOX_BUILD_SANDBOX "Build the optional GLFW/Vulkan interactive sandbox" OFF)
 option(VELOX_BUILD_DIFFTEST "Build differential tests against Jolt Physics" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
+option(VELOX_STRICT_FLOATING_POINT
+       "Build the CPU reference path with reproducible floating-point semantics" OFF)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
 set(VELOX_HAS_CUDA 0)
 
@@ -54,20 +56,8 @@ endif()
 # conceal an accidental CUDA-only dependency.
 target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
 
-if(MSVC)
-    target_compile_options(velox PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang|IntelLLVM")
-    # NOT -ffast-math: it implies -ffinite-math-only, which folds
-    # std::isfinite to a constant and silently deletes every NaN/Inf
-    # validation path (three stress tests fail under Clang with it). Keep this
-    # free of -march/-mtune so one CPU build runs on both Intel and AMD hosts.
-    target_compile_options(velox PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -fno-math-errno -ffp-contract=fast>)
-else()
-    message(STATUS "velox: no compiler-specific floating-point flags for ${CMAKE_CXX_COMPILER_ID}")
-endif()
+include(cmake/determinism.cmake)
+velox_configure_floating_point(velox ${VELOX_STRICT_FLOATING_POINT})
 
 if(VELOX_BUILD_EXAMPLES)
     add_subdirectory(examples)

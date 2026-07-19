@@ -149,7 +149,8 @@ void validateRuntimeBody(const Body& body) {
 
 World::~World() = default;
 
-World::World(BackendType type) : broadPhase_(new BroadPhaseData) {
+void World::resetBackend(BackendType type) {
+    backend_.reset();
     if (type != BackendType::Cpu) backend_.reset(createCudaBackend());
     if (!backend_) {
         if (type == BackendType::Cuda)
@@ -157,9 +158,51 @@ World::World(BackendType type) : broadPhase_(new BroadPhaseData) {
                                      "(not built with VELOX_ENABLE_CUDA or no device)");
         backend_.reset(createCpuBackend());
     }
+    backend_->setParallelIslands(determinismMode_ == DeterminismMode::Relaxed &&
+                                 islandSolvingMode_ == IslandSolvingMode::Parallel);
+}
+
+World::World(BackendType type)
+    : requestedBackend_(type), broadPhase_(new BroadPhaseData) {
+    resetBackend(type);
 }
 
 const char* World::backendName() const { return backend_->name(); }
+
+void World::setDeterminismMode(DeterminismMode mode) {
+    if (mode != DeterminismMode::Relaxed && mode != DeterminismMode::Strict)
+        throw std::invalid_argument("velox: invalid determinism mode");
+    if (mode == determinismMode_) return;
+
+    if (mode == DeterminismMode::Strict) {
+#if !VELOX_STRICT_FLOATING_POINT
+        throw std::logic_error(
+            "velox: Strict determinism requires VELOX_STRICT_FLOATING_POINT=ON at configure time");
+#else
+        // The CUDA graph-colored solver intentionally changes impulse order.
+        // Recreate the portable CPU reference backend instead of advertising
+        // bitwise parity that the current device solver cannot provide.
+        determinismMode_ = DeterminismMode::Strict;
+        islandSolvingMode_ = IslandSolvingMode::Sequential;
+        resetBackend(BackendType::Cpu);
+#endif
+        return;
+    }
+
+    determinismMode_ = DeterminismMode::Relaxed;
+    resetBackend(requestedBackend_);
+}
+
+void World::setIslandSolvingMode(IslandSolvingMode mode) {
+    if (mode != IslandSolvingMode::Sequential && mode != IslandSolvingMode::Parallel)
+        throw std::invalid_argument("velox: invalid island solving mode");
+    if (determinismMode_ == DeterminismMode::Strict &&
+        mode != IslandSolvingMode::Sequential)
+        throw std::logic_error(
+            "velox: Strict determinism requires sequential island solving");
+    islandSolvingMode_ = mode;
+    backend_->setParallelIslands(mode == IslandSolvingMode::Parallel);
+}
 
 bool World::isValid(BodyId id) const noexcept {
     uint32_t slot = id.slot();

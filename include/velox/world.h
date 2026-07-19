@@ -162,6 +162,12 @@ struct BroadPhaseData;
 // graph coloring and ignores this setting.
 enum class IslandSolvingMode : uint8_t { Sequential = 0, Parallel = 1 };
 
+// Relaxed mode favors throughput and may use platform-specific floating-point
+// contraction or the CUDA graph-colored solver. Strict mode is available only
+// in a VELOX_STRICT_FLOATING_POINT build and selects the ordered CPU reference
+// backend, making replay comparison meaningful across supported CPU platforms.
+enum class DeterminismMode : uint8_t { Relaxed = 0, Strict = 1 };
+
 class World {
 public:
     // Auto picks the NVIDIA CUDA backend when built with VELOX_ENABLE_CUDA and
@@ -170,11 +176,13 @@ public:
     explicit World(BackendType type = BackendType::Auto);
     ~World();
 
+    DeterminismMode determinismMode() const noexcept { return determinismMode_; }
+    // Strict mode requires a build configured with VELOX_STRICT_FLOATING_POINT.
+    // It uses the CPU reference backend; CUDA strict parity is not yet supported.
+    void setDeterminismMode(DeterminismMode mode);
+
     IslandSolvingMode islandSolvingMode() const { return islandSolvingMode_; }
-    void setIslandSolvingMode(IslandSolvingMode mode) {
-        islandSolvingMode_ = mode;
-        backend_->setParallelIslands(mode == IslandSolvingMode::Parallel);
-    }
+    void setIslandSolvingMode(IslandSolvingMode mode);
 
     const char* backendName() const;
     void setWorkerCount(uint32_t count) { backend_->setWorkerCount(count); }
@@ -351,6 +359,7 @@ private:
     void solveJoints(float dt);
     void finishBrokenJoints(float dt);
     void updateSleeping(float dt);
+    void resetBackend(BackendType type);
 
     std::vector<Body> bodies_;
     std::vector<HandleSlot> bodySlots_;
@@ -372,6 +381,8 @@ private:
     std::vector<uint64_t> prevPairKeys_;
     ContactModifier contactModifier_;
     IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;
+    DeterminismMode determinismMode_ = DeterminismMode::Relaxed;
+    BackendType requestedBackend_ = BackendType::Auto;
     StepStats lastStepStats_;
     MeshSoup meshes_;
     std::vector<uint64_t> candidatePairs_;

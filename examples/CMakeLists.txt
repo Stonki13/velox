@@ -26,6 +26,9 @@ target_link_libraries(fuzz_demo PRIVATE velox)
 add_executable(islands_demo islands_demo.cpp)
 target_link_libraries(islands_demo PRIVATE velox)
 
+add_executable(determinism_demo determinism_demo.cpp)
+target_link_libraries(determinism_demo PRIVATE velox)
+
 add_executable(vehicle_demo vehicle_demo.cpp)
 target_link_libraries(vehicle_demo PRIVATE velox)
 
@@ -36,6 +39,8 @@ add_executable(geometry_fuzz geometry_fuzz.cpp)
 target_link_libraries(geometry_fuzz PRIVATE velox)
 if(BUILD_TESTING)
     add_test(NAME velox.geometry_fuzz COMMAND geometry_fuzz 1000)
+    add_test(NAME velox.determinism COMMAND determinism_demo)
+    set_tests_properties(velox.determinism PROPERTIES TIMEOUT 180)
 endif()
 
 add_executable(proto_manifold proto_manifold.cpp)
