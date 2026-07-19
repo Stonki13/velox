@@ -2109,6 +2109,36 @@ static void testCcdConfigurationAndMultiToiQuery() {
     w.setMultiToiSettings(settings);
     const bool capped = w.queryMultiToi(bullet, 0.01f).size() == 2;
 
+    w.step(0.01f);
+    const velox::Body bulletAfterImpact = w.bodyState(bullet);
+    const bool steppedImpact = bulletAfterImpact.position.x < 2.0f &&
+                               bulletAfterImpact.velocity.x < 0.0f;
+
+    velox::World multi(velox::BackendType::Cpu);
+    multi.gravity = {0, 0, 0};
+    multi.setCcdDefaults(defaults);
+    velox::WorldMultiToiSettings multiSettings = multi.multiToiSettings();
+    multiSettings.defaultConfig.maxToiEventsPerBody = 4;
+    multiSettings.defaultConfig.toiVelocityFloor = 0.0f;
+    multiSettings.defaultConfig.toiPenetrationBias = 1e-4f;
+    multiSettings.maxTotalEventsPerStep = 4;
+    multi.setMultiToiSettings(multiSettings);
+    const auto ricochet = multi.addSphere({0, 0, 0}, 0.05f, 1.0f);
+    multi.body(ricochet).restitution = 1.0f;
+    multi.setLinearVelocity(ricochet, {1000, 0, 500});
+    const auto positiveX = multi.addStaticPlane({-1, 0, 0}, -2.0f);
+    const auto negativeX = multi.addStaticPlane({1, 0, 0}, -2.0f);
+    const auto positiveZ = multi.addStaticPlane({0, 0, -1}, -4.0f);
+    multi.body(positiveX).restitution = 1.0f;
+    multi.body(negativeX).restitution = 1.0f;
+    multi.body(positiveZ).restitution = 1.0f;
+    multi.step(0.01f);
+    const velox::Body ricochetAfter = multi.bodyState(ricochet);
+    const bool sequentialImpacts = multi.lastStepStats().multiToiEvents == 4 &&
+                                   ricochetAfter.position.x > 1.8f &&
+                                   ricochetAfter.velocity.x < -100.0f &&
+                                   ricochetAfter.velocity.z < -100.0f;
+
     const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
     velox::BodyCcdTuning locked = w.ccdTuning(frozen);
     locked.quality = velox::MotionQuality::Locked;
@@ -2129,7 +2159,7 @@ static void testCcdConfigurationAndMultiToiQuery() {
                                   w.multiToiSettings().defaultConfig.maxToiEventsPerBody == 2;
     const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
                            std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
-    check(ordered && capped && immobile && inherited && restoredSettings,
+    check(ordered && capped && steppedImpact && sequentialImpacts && immobile && inherited && restoredSettings,
           "CCD tuning, locked body, and ordered multi-TOI query");
 }
 

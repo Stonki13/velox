@@ -18,6 +18,8 @@ by itself. `speculativeDistance` adds to the contact-generation reach, and
 
 `World::queryMultiToi()` uses conservative advancement followed by bisection to
 return a deterministic list of candidate impacts sorted by time, then body
-handle. Use it for diagnostics and gameplay prediction today. High-quality
-in-step chronological event processing is still under development; do not use
-this query as a claim of multi-impact response in a shipped lockstep protocol.
+handle. High-quality `step()` processing replays static-geometry impacts in
+chronological order, with per-body and per-step caps reported as
+`StepStats::multiToiEvents`. Dynamic-dynamic chronological rescheduling is
+still under development; do not use High mode as a lockstep guarantee for
+multiple moving bodies yet.

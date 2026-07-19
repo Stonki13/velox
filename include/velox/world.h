@@ -121,6 +121,7 @@ struct StepStats {
     size_t generatedContacts = 0;
     size_t solvedContacts = 0;
     size_t jointCount = 0;
+    size_t multiToiEvents = 0;
     bool deviceSubsteps = false;
     double setupMs = 0.0;
     double collisionDetectionMs = 0.0;

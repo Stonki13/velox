@@ -2068,6 +2068,96 @@ bool findToi(const Body& a0, const Body& b0, float dt, float bias,
     return true;
 }
 
+uint32_t processHighStaticToi(std::vector<Body>& bodies,
+                              const std::vector<Body>& starts,
+                              float dt, const MeshSoupView& soup,
+                              const WorldMultiToiSettings& settings) {
+    if (!settings.defaultConfig.enabled || !settings.enableSubstepSplitting)
+        return 0;
+    uint32_t totalEvents = 0;
+    for (BodyIndex index = 0; index < bodies.size() &&
+                              totalEvents < settings.maxTotalEventsPerStep;
+         ++index) {
+        Body& body = bodies[index];
+        const Body& start = starts[index];
+        const BodyCcdTuning& tuning = start.ccdTuning;
+        if (!body.isDynamic() || body.asleep || tuning.quality != MotionQuality::High ||
+            !tuning.enableContinuous ||
+            start.maxPointSpeed() < std::max(tuning.minVelocityForCCD,
+                                              settings.defaultConfig.toiVelocityFloor))
+            continue;
+
+        // The ordinary speculative solver has already advanced this body.
+        // Reconstruct its post-gravity starting state, then replay the high
+        // quality trajectory against immutable level geometry chronologically.
+        body.position = start.position;
+        body.orientation = start.orientation;
+        body.velocity = start.velocity;
+        body.angularVelocity = start.angularVelocity;
+        float remaining = dt;
+        uint32_t bodyEvents = 0;
+        BodyIndex previousHit = UINT32_MAX;
+        while (remaining > 1e-6f && bodyEvents < settings.defaultConfig.maxToiEventsPerBody &&
+               totalEvents < settings.maxTotalEventsPerStep) {
+            float bestToi = remaining + 1.0f;
+            BodyIndex bestIndex = UINT32_MAX;
+            Vec3 bestNormal{}, bestPoint{};
+            for (BodyIndex otherIndex = 0; otherIndex < bodies.size(); ++otherIndex) {
+                if (otherIndex == index || otherIndex == previousHit) continue;
+                const Body& other = bodies[otherIndex];
+                if (!other.isStatic() || other.isSensor() || !body.canCollideWith(other))
+                    continue;
+                float toi = 0.0f;
+                Vec3 normal{}, point{};
+                if (!findToi(body, other, remaining,
+                             settings.defaultConfig.toiPenetrationBias,
+                             soup, toi, normal, point))
+                    continue;
+                if (toi < bestToi || (toi == bestToi && otherIndex < bestIndex)) {
+                    bestToi = toi;
+                    bestIndex = otherIndex;
+                    bestNormal = normal;
+                    bestPoint = point;
+                }
+            }
+            if (bestIndex == UINT32_MAX) {
+                body.advanceTransform(remaining);
+                break;
+            }
+
+            body.advanceTransform(bestToi);
+            const Vec3 arm = bestPoint - body.position;
+            const float vn = dot(body.velocity + cross(body.angularVelocity, arm),
+                                 bestNormal);
+            const float angularMass = dot(cross(body.invInertiaMul(
+                cross(arm, bestNormal)), arm), bestNormal);
+            const float mass = body.solverInvMass() + angularMass;
+            if (vn < 0.0f && mass > 1e-8f) {
+                constexpr float kRestitutionThreshold = 1.0f;
+                const Body& other = bodies[bestIndex];
+                const float restitution = vn < -kRestitutionThreshold
+                    ? combineMaterial(body.restitution, other.restitution,
+                                      body.restitutionCombine, other.restitutionCombine)
+                    : 0.0f;
+                const float impulse = -(1.0f + restitution) * vn / mass;
+                const Vec3 impulseVector = bestNormal * impulse;
+                body.velocity += impulseVector * body.solverInvMass();
+                body.angularVelocity += body.invInertiaMul(cross(arm, impulseVector));
+            }
+            // Keep the just-resolved shape outside the bias band so the next
+            // conservative sweep cannot rediscover the same zero-time hit.
+            body.position += bestNormal *
+                             std::max(2.0f * settings.defaultConfig.toiPenetrationBias,
+                                      1e-4f);
+            remaining -= bestToi;
+            previousHit = bestIndex;
+            ++bodyEvents;
+            ++totalEvents;
+        }
+    }
+    return totalEvents;
+}
+
 } // namespace
 
 std::vector<MultiToiHit> World::queryMultiToi(BodyId id, float dt) const {
@@ -2757,6 +2847,17 @@ void World::step(float dt) {
     // current body positions (Contact::bias0), Box2D-v3 style.
     const auto detectionStart = Clock::now();
     backend_->integrate(bodies_, gravity, h); // first substep's gravity
+    bool hasHighStaticToi = false;
+    for (const Body& body : bodies_) {
+        if (body.isDynamic() && !body.asleep &&
+            body.ccdTuning.quality == MotionQuality::High &&
+            body.ccdTuning.enableContinuous) {
+            hasHighStaticToi = true;
+            break;
+        }
+    }
+    std::vector<Body> highToiStarts;
+    if (hasHighStaticToi) highToiStarts = bodies_;
     const std::vector<uint64_t>* hostPairs = nullptr;
     if (backend_->wantsHostPairs()) {
         buildCandidatePairs(dt); // incremental AABB-tree broad phase
@@ -2948,6 +3049,15 @@ void World::step(float dt) {
     std::sort(pairKeys_.begin(), pairKeys_.end());
     pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
 
+    // High quality bodies replay their post-gravity path against static level
+    // geometry in chronological TOI order. The generic pair recovery below
+    // remains responsible for Medium quality and dynamic-dynamic pairs.
+    const bool highToiProcessed = !highToiStarts.empty();
+    if (highToiProcessed) {
+        lastStepStats_.multiToiEvents = processHighStaticToi(
+            bodies_, highToiStarts, dt, view(meshes_), multiToiSettings_);
+    }
+
     for (uint64_t key : pairKeys_) {
         BodyIndex i = (BodyIndex)(key >> 32), j = (BodyIndex)key;
         // Keep A dynamic for the static-dynamic case. Dynamic-dynamic pairs
@@ -2959,6 +3069,7 @@ void World::step(float dt) {
         Body& b = bodies_[j];
         if (a.isSensor() || b.isSensor()) continue;
         if (!a.isDynamic()) continue;
+        if (a.ccdTuning.quality == MotionQuality::High) continue;
         if (!a.ccdTuning.enableContinuous ||
             a.ccdTuning.quality == MotionQuality::Low || a.isLocked() ||
             a.maxPointSpeed() < a.ccdTuning.minVelocityForCCD)
@@ -3049,6 +3160,7 @@ void World::step(float dt) {
     }
 
     backend_->fetchImpulses(contacts_); // GPU-resident impulses -> host contacts
+    if (highToiProcessed) backend_->invalidateCaches();
     const auto ccdEnd = Clock::now();
 
     // --- positional correction (split-impulse style) --------------------------
