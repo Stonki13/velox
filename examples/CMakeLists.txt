@@ -13,6 +13,9 @@ target_link_libraries(queries_demo PRIVATE velox)
 add_executable(multi_threaded multi_threaded.cpp)
 target_link_libraries(multi_threaded PRIVATE velox)
 
+add_executable(joints_demo joints_demo.cpp)
+target_link_libraries(joints_demo PRIVATE velox)
+
 add_executable(stress_demo stress_demo.cpp)
 target_link_libraries(stress_demo PRIVATE velox)
 
@@ -21,6 +24,7 @@ if(BUILD_TESTING)
     add_test(NAME velox.contact_events COMMAND contact_events)
     add_test(NAME velox.queries COMMAND queries_demo)
     add_test(NAME velox.multi_threaded COMMAND multi_threaded)
+    add_test(NAME velox.joints_example COMMAND joints_demo)
     # Run the bounded real-workload health check before the longer stress
     # process so a failure reports its own scene rather than a late-suite
     # timeout on heavily loaded Windows runners.
