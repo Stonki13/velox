@@ -11,6 +11,39 @@ namespace velox {
 
 namespace {
 
+// The dynamic tree deliberately uses fat leaves, so separated spheres can be
+// broad-phase candidates. For non-coincident sphere cores, generic GJK takes
+// a single point-simplex iteration and produces this analytic result exactly.
+// Preserve the shared GJK fallback for the near-coincident core case, where
+// its deterministic fallback normal is part of the engine's behavior.
+inline bool collideSpherePair(const Body& a, const Body& b, BodyIndex ia,
+                              BodyIndex ib, float dt, Contact* out, int cap,
+                              int& count) {
+    Vec3 delta = a.position - b.position;
+    float distanceSq = dot(delta, delta);
+    if (distanceSq <= 1e-10f) return false;
+
+    float travel = (a.maxPointSpeed() + b.maxPointSpeed()) * dt + 1e-3f;
+    float maximumDistance = a.radius + b.radius + travel;
+    // Keep a round-off band on the slow path: its generic GJK result is the
+    // authoritative decision for pairs close to speculative-contact reach.
+    float safeDistance = maximumDistance + 1e-5f * vmax(1.0f, maximumDistance);
+    if (distanceSq > safeDistance * safeDistance) {
+        count = 0;
+        return true;
+    }
+
+    float distance = sqrtf(distanceSq);
+    Vec3 normal = delta * (1.0f / distance);
+    float gap = distance - a.radius - b.radius;
+    Vec3 pointA = a.position - normal * a.radius;
+    Vec3 pointB = b.position + normal * b.radius;
+    count = 0;
+    np_detail::emit(a, b, ia, ib, normal, (pointA + pointB) * 0.5f, gap,
+                     dt, out, cap, count);
+    return true;
+}
+
 class WorkerPool {
 public:
     WorkerPool() : desiredWorkers_(resolveCount(0)) {}
@@ -316,7 +349,12 @@ public:
             for (size_t p = begin; p < end; ++p) {
                 BodyIndex i = BodyIndex(pairs_[p] >> 32);
                 BodyIndex j = BodyIndex(pairs_[p]);
-                int count = collidePair(bodies[i], bodies[j], i, j, soup, dt,
+                int count = 0;
+                if (bodies[i].shape != ShapeType::Sphere ||
+                    bodies[j].shape != ShapeType::Sphere ||
+                    !collideSpherePair(bodies[i], bodies[j], i, j, dt, buffer,
+                                       kMaxContactsPerPair, count))
+                    count = collidePair(bodies[i], bodies[j], i, j, soup, dt,
                                         buffer, kMaxContactsPerPair);
                 contacts.insert(contacts.end(), buffer, buffer + count);
             }
