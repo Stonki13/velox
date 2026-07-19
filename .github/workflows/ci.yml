@@ -8,10 +8,19 @@ on:
 
 jobs:
   cpu:
+    name: CPU / ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: windows-latest
+            name: Windows x86_64
+          - os: macos-13
+            name: macOS Intel x86_64
+          - os: macos-14
+            name: macOS Apple Silicon ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -68,11 +77,19 @@ jobs:
         run: ctest --test-dir build -R "^velox.thread_safety$" --output-on-failure
 
   strict-cpu:
-    name: Strict CPU / ${{ matrix.os }}
+    name: Strict CPU / ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: windows-latest
+            name: Windows x86_64
+          - os: macos-13
+            name: macOS Intel x86_64
+          - os: macos-14
+            name: macOS Apple Silicon ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

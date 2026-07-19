@@ -61,6 +61,8 @@ target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
 
 include(cmake/determinism.cmake)
 velox_configure_floating_point(velox ${VELOX_STRICT_FLOATING_POINT})
+include(cmake/platform.cmake)
+velox_configure_platform(velox)
 
 if(VELOX_BUILD_EXAMPLES)
     add_subdirectory(examples)
