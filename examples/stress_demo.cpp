@@ -1500,25 +1500,30 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
-// 39. Torque-free asymmetric bodies conserve world angular momentum while
-// their body-space inertia rotates, including CPU/CUDA trajectory parity.
+// 39. A torque-free T-handle conserves world angular momentum while its
+// body-space inertia rotates, including CPU/CUDA trajectory parity.
 static void testGyroscopicIntegration() {
     velox::World cpu(velox::BackendType::Cpu);
     velox::World accelerated;
     cpu.gravity = accelerated.gravity = {0, 0, 0};
-    auto cpuBox = cpu.addBox({}, {0.25f, 0.75f, 1.25f}, 2.0f);
-    auto acceleratedBox = accelerated.addBox(
-        {}, {0.25f, 0.75f, 1.25f}, 2.0f);
-    cpu.setAngularVelocity(cpuBox, {3, 5, 7});
-    accelerated.setAngularVelocity(acceleratedBox, {3, 5, 7});
-    velox::Vec3 initialMomentum = cpu.body(cpuBox).worldAngularMomentum();
-    float initialEnergy = cpu.body(cpuBox).rotationalKineticEnergy();
+    const std::vector<velox::CompoundShape> tHandle = {
+        {velox::ShapeType::Box, {0.0f, -0.2f, 0.0f}, {}, 0.5f,
+         {0.12f, 0.6f, 0.12f}},
+        {velox::ShapeType::Box, {0.0f, 0.5f, 0.0f}, {}, 0.5f,
+         {0.75f, 0.1f, 0.16f}},
+    };
+    auto cpuHandle = cpu.addCompound({}, tHandle, 2.0f);
+    auto acceleratedHandle = accelerated.addCompound({}, tHandle, 2.0f);
+    cpu.setAngularVelocity(cpuHandle, {3, 5, 7});
+    accelerated.setAngularVelocity(acceleratedHandle, {3, 5, 7});
+    velox::Vec3 initialMomentum = cpu.body(cpuHandle).worldAngularMomentum();
+    float initialEnergy = cpu.body(cpuHandle).rotationalKineticEnergy();
     for (int i = 0; i < 600; ++i) {
         cpu.step(1.0f / 240.0f);
         accelerated.step(1.0f / 240.0f);
     }
-    const velox::Body& expected = cpu.body(cpuBox);
-    const velox::Body& actual = accelerated.body(acceleratedBox);
+    const velox::Body& expected = cpu.body(cpuHandle);
+    const velox::Body& actual = accelerated.body(acceleratedHandle);
     float momentumError = velox::length(
         expected.worldAngularMomentum() - initialMomentum) /
         velox::length(initialMomentum);
