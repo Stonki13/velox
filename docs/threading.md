@@ -15,7 +15,14 @@ lowest-overhead policy for a conventional game loop.
 The implementation uses one reentrant world lock. Calls that overlap a step
 wait for the step to finish, then observe a complete state. It intentionally
 does not expose partially-solved transforms or broad-phase state. This is a
-correctness contract, not a nonblocking-query API.
+correctness contract for direct reads.
+
+`submitAsyncQuery()` is the exception: it copies a value-owned request under
+its own queue mutex and returns immediately from any thread, even under
+`Strict`. The owner resolves it at the start of a later `step()`; use
+`getAsyncResult()` to wait for and consume the value-owned result. This never
+exposes partially solved state. See [batched and async queries](batched-queries.md)
+for the frame-boundary contract.
 
 Use `ThreadSafetyPolicy::Concurrent` before handing a world to worker code:
 

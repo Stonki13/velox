@@ -36,6 +36,9 @@ target_link_libraries(determinism_demo PRIVATE velox)
 add_executable(thread_safety_demo thread_safety_demo.cpp)
 target_link_libraries(thread_safety_demo PRIVATE velox)
 
+add_executable(batched_queries_demo batched_queries_demo.cpp)
+target_link_libraries(batched_queries_demo PRIVATE velox)
+
 add_executable(cuda_recovery_demo cuda_recovery_demo.cpp)
 target_link_libraries(cuda_recovery_demo PRIVATE velox)
 
@@ -54,6 +57,7 @@ if(BUILD_TESTING)
     add_test(NAME velox.geometry_fuzz COMMAND geometry_fuzz 1000)
     add_test(NAME velox.determinism COMMAND determinism_demo)
     add_test(NAME velox.thread_safety COMMAND thread_safety_demo)
+    add_test(NAME velox.batched_queries COMMAND batched_queries_demo)
     add_test(NAME velox.cuda_recovery COMMAND cuda_recovery_demo)
     set_tests_properties(velox.determinism PROPERTIES TIMEOUT 180)
 endif()

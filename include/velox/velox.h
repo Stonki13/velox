@@ -7,6 +7,7 @@
 #include "ccd.h"
 #include "body.h"
 #include "joint.h"
+#include "queries.h"
 #include "world.h"
 #include "character.h"
 #include "vehicle.h"

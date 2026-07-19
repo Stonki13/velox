@@ -708,4 +708,128 @@ ShapeCastHit World::capsuleCast(Vec3 center, float radius, float halfHeight,
     return castShape(shape, direction, maxDist, filter);
 }
 
+QueryResult World::executeQuery(const QueryDesc& query) const {
+    QueryResult result;
+    result.type = query.type;
+    result.userData = query.userData;
+    switch (query.type) {
+    case QueryDesc::Type::Raycast:
+        result.rayHit = rayCast(query.origin, query.direction, query.maxDist,
+                                query.filter);
+        break;
+    case QueryDesc::Type::RaycastAll:
+        rayCastAll(query.origin, query.direction, query.maxDist, result.rayHits,
+                   query.filter);
+        break;
+    case QueryDesc::Type::OverlapSphere:
+        overlapSphere(query.center, query.radius, result.overlaps, query.filter);
+        break;
+    case QueryDesc::Type::OverlapBox:
+        overlapBox(query.center, query.halfExtents, query.orientation,
+                   result.overlaps, query.filter);
+        break;
+    case QueryDesc::Type::OverlapCapsule:
+        overlapCapsule(query.center, query.radius, query.capsuleHalfHeight,
+                       query.orientation, result.overlaps, query.filter);
+        break;
+    case QueryDesc::Type::SphereCast:
+        result.shapeCastHit = sphereCast(query.center, query.radius,
+                                         query.direction, query.maxDist,
+                                         query.filter);
+        break;
+    case QueryDesc::Type::BoxCast:
+        result.shapeCastHit = boxCast(query.center, query.halfExtents,
+                                      query.orientation, query.direction,
+                                      query.maxDist, query.filter);
+        break;
+    case QueryDesc::Type::CapsuleCast:
+        result.shapeCastHit = capsuleCast(query.center, query.radius,
+                                          query.capsuleHalfHeight,
+                                          query.orientation, query.direction,
+                                          query.maxDist, query.filter);
+        break;
+    default:
+        throw std::invalid_argument("velox: invalid batch query type");
+    }
+    result.success = true;
+    return result;
+}
+
+void World::batchQueries(const std::vector<QueryDesc>& queries,
+                         std::vector<QueryResult>& outResults) const {
+    AccessGuard guard(*this, AccessKind::Query, "batchQueries");
+    // Refresh once for the entire batch. Individual primitive calls below use
+    // the already-current tree, avoiding an avoidable refit per request.
+    ensureBroadPhase(broadPhase_->lastDt, /*refit=*/false);
+    outResults.clear();
+    outResults.reserve(queries.size());
+    for (const QueryDesc& query : queries) {
+        try {
+            outResults.push_back(executeQuery(query));
+        } catch (const std::exception& error) {
+            QueryResult result;
+            result.type = query.type;
+            result.userData = query.userData;
+            result.error = error.what();
+            outResults.push_back(std::move(result));
+        }
+    }
+}
+
+AsyncQueryHandle World::submitAsyncQuery(const QueryDesc& query) {
+    std::lock_guard<std::mutex> lock(asyncQueryMutex_);
+    uint64_t id = nextAsyncQueryId_++;
+    if (id == 0) id = nextAsyncQueryId_++;
+    asyncQueryResults_.emplace(id, AsyncQueryResult{});
+    pendingAsyncQueries_.push_back({id, query});
+    hasPendingAsyncQueries_.store(true, std::memory_order_release);
+    return {id};
+}
+
+QueryResult World::getAsyncResult(AsyncQueryHandle handle) {
+    if (handle.id == 0)
+        throw std::invalid_argument("velox: invalid async query handle");
+    std::unique_lock<std::mutex> lock(asyncQueryMutex_);
+    if (asyncQueryResults_.find(handle.id) == asyncQueryResults_.end())
+        throw std::out_of_range("velox: async query handle is unknown or already consumed");
+    asyncQueryReady_.wait(lock, [&] {
+        auto it = asyncQueryResults_.find(handle.id);
+        return it != asyncQueryResults_.end() && it->second.ready;
+    });
+    auto it = asyncQueryResults_.find(handle.id);
+    QueryResult result = std::move(it->second.result);
+    asyncQueryResults_.erase(it);
+    return result;
+}
+
+void World::drainAsyncQueries() {
+    if (!hasPendingAsyncQueries_.load(std::memory_order_acquire)) return;
+    std::deque<PendingAsyncQuery> pending;
+    {
+        std::lock_guard<std::mutex> lock(asyncQueryMutex_);
+        pending.swap(pendingAsyncQueries_);
+        hasPendingAsyncQueries_.store(!pendingAsyncQueries_.empty(),
+                                      std::memory_order_release);
+    }
+    if (pending.empty()) return;
+
+    for (const PendingAsyncQuery& entry : pending) {
+        QueryResult result;
+        try {
+            result = executeQuery(entry.query);
+        } catch (const std::exception& error) {
+            result.type = entry.query.type;
+            result.userData = entry.query.userData;
+            result.error = error.what();
+        }
+        std::lock_guard<std::mutex> lock(asyncQueryMutex_);
+        auto it = asyncQueryResults_.find(entry.id);
+        if (it != asyncQueryResults_.end()) {
+            it->second.result = std::move(result);
+            it->second.ready = true;
+        }
+    }
+    asyncQueryReady_.notify_all();
+}
+
 } // namespace velox

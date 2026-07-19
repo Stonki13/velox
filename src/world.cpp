@@ -2835,6 +2835,7 @@ void World::stepImpl(float dt) {
     lastStepStats_.jointCount = joints_.size();
     if (!finiteFloat(dt) || dt < 0.0f)
         throw std::invalid_argument("velox: timestep must be finite and non-negative");
+    drainAsyncQueries();
     if (dt == 0.0f) {
         for (const Body& body : bodies_)
             if (body.isDynamic() && !body.asleep)

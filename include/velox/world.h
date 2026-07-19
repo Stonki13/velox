@@ -1,10 +1,15 @@
 #pragma once
 #include "backend.h"
 #include "joint.h"
+#include "queries.h"
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -39,20 +44,6 @@ struct JointBreakEvent {
     float torque = 0.0f;
 };
 
-struct RayHit {
-    bool hit = false;
-    BodyId body;
-    float t = 0.0f;   // distance along the ray direction
-    Vec3 point, normal;
-};
-
-struct QueryFilter {
-    uint32_t categoryBits = UINT32_MAX;
-    uint32_t maskBits = UINT32_MAX;
-    bool includeSensors = true;
-    BodyId ignoredBody;
-};
-
 // Closest points between two bodies' surfaces. distance is negative when the
 // bodies overlap. When either body is an unbounded static (plane/mesh) paired
 // with another unbounded static, distance is a large sentinel (1e30f).
@@ -71,14 +62,6 @@ struct GeometryDiagnostics {
     float volume = 0.0f;
     bool isDegenerate = false;
     int nearCoplanarFaceCount = 0;
-};
-
-struct ShapeCastHit {
-    bool hit = false;
-    BodyId body;
-    float distance = 0.0f;
-    float fraction = 0.0f;
-    Vec3 point, normal; // normal points from the hit body toward the cast shape
 };
 
 struct MultiToiHit {
@@ -385,6 +368,19 @@ public:
     ShapeCastHit convexHullCast(Vec3 center, const std::vector<Vec3>& points,
                                 Quat orientation, Vec3 direction, float maxDist,
                                 const QueryFilter& filter = {}) const;
+    // Synchronously resolve value-owned requests against one consistent World
+    // state. Invalid individual requests produce success=false and an error;
+    // they do not abort the rest of the batch.
+    void batchQueries(const std::vector<QueryDesc>& queries,
+                      std::vector<QueryResult>& outResults) const;
+    // Thread-safe, non-blocking submission. Requests are resolved at the
+    // deterministic beginning of the next owner-thread step(), before any
+    // simulation state changes. This is intentionally allowed even in Strict
+    // thread-safety mode because it copies no World state at submission time.
+    AsyncQueryHandle submitAsyncQuery(const QueryDesc& query);
+    // Blocks until the request has been resolved. A handle may be consumed
+    // once; callers must externally synchronize World destruction.
+    QueryResult getAsyncResult(AsyncQueryHandle handle);
     void debugLines(std::vector<DebugLine>& out,
                     uint32_t flags = DebugDrawAll) const;
 
@@ -418,6 +414,8 @@ private:
     ShapeCastHit castShapeWithSoup(Body shape, Vec3 direction, float maxDist,
                                    const QueryFilter& filter,
                                    const MeshSoupView& soup) const;
+    QueryResult executeQuery(const QueryDesc& query) const;
+    void drainAsyncQueries();
     void removeJointDense(uint32_t dense);
     // Incremental broad phase: rebuild/refit the AABB tree as needed.
     // `refit` forces a proxy refresh even without recorded mutations (used by
@@ -475,6 +473,14 @@ private:
     mutable std::unique_ptr<BroadPhaseData> broadPhase_;
     std::unique_ptr<Backend> backend_;
     mutable std::recursive_mutex accessMutex_;
+    struct PendingAsyncQuery { uint64_t id; QueryDesc query; };
+    struct AsyncQueryResult { bool ready = false; QueryResult result; };
+    mutable std::mutex asyncQueryMutex_;
+    std::condition_variable asyncQueryReady_;
+    std::atomic<bool> hasPendingAsyncQueries_{false};
+    uint64_t nextAsyncQueryId_ = 1;
+    std::deque<PendingAsyncQuery> pendingAsyncQueries_;
+    std::unordered_map<uint64_t, AsyncQueryResult> asyncQueryResults_;
     std::thread::id ownerThread_;
     ThreadSafetyPolicy threadSafetyPolicy_ = ThreadSafetyPolicy::Strict;
     mutable ThreadSafetyReport threadSafetyReport_;

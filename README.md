@@ -240,6 +240,8 @@ ctest --test-dir build -C Release --output-on-failure
   manifolds, islands, and backend tradeoffs.
 - [Threading contract](docs/threading.md) specifies safe cross-thread world
   access and the legacy borrowed-reference limits.
+- [Batched and async queries](docs/batched-queries.md) describes ordered
+  batched reads and nonblocking worker submission at frame boundaries.
 - [CCD quality controls](docs/ccd-controls.md) explains per-body continuous
   collision tuning, locked bodies, and the current multi-TOI query boundary.
 - [CUDA recovery](docs/cuda-recovery.md) documents automatic CPU fallback,
