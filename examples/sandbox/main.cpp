@@ -485,7 +485,8 @@ private:
                                                     Vec3{0.0f, 1.2f, -6.0f});
         vehicle_->AddDefaultWheels();
         dynamicBodies_.push_back(vehicle_->chassis());
-        pieceBox(vehicle_->chassis(), config.chassisHalfExtents);
+        // No pieceBox: the car renders as a composite (body, cabin, bumpers,
+        // detailed wheels) in buildBatches instead of one flat box.
     }
 
     // Gyroscopic showcase: three long boxes floating in zero gravity, spun
@@ -757,34 +758,63 @@ void buildBatches(const SandboxScene& scene, RenderCache& cache,
 
     const World& world = scene.world();
 
-    // Vehicle wheels are virtual (no bodies); render them from telemetry:
-    // hub + suspension travel places the cylinder, steer + accumulated roll
-    // orient it about the axle.
+    // The car renders as a composite: body + cabin + bumpers on the chassis
+    // pose, and per-wheel tire/hub/spokes placed from suspension telemetry
+    // (wheels are virtual raycasts, not bodies). Spokes make spin visible.
     if (const velox::Vehicle* vehicle = scene.vehicle()) {
         const velox::Body& chassis = world.body(vehicle->chassis());
+        const Quat pose = chassis.orientation;
+        auto atLocal = [&](const Vec3& local) {
+            return chassis.position + velox::rotate(pose, local);
+        };
+        const float paint[3] = {0.82f, 0.16f, 0.14f};      // sporty red
+        const float glass[3] = {0.16f, 0.22f, 0.30f};      // dark cabin
+        const float trim[3] = {0.20f, 0.20f, 0.22f};       // bumpers/skirt
+        const float silver[3] = {0.78f, 0.78f, 0.82f};     // hubs
+        const float darkRubber[3] = {0.13f, 0.13f, 0.15f}; // tires
+        // Lower body: full footprint, slightly shallower than the collider.
+        batchFor(cache.cube()).instances.push_back(makeInstance(
+            atLocal({0.0f, -0.06f, 0.0f}), pose, {0.90f, 0.24f, 1.90f}, paint, 1.0f));
+        // Hood/trunk shoulder line.
+        batchFor(cache.cube()).instances.push_back(makeInstance(
+            atLocal({0.0f, 0.16f, 0.15f}), pose, {0.84f, 0.10f, 1.55f}, paint, 1.0f));
+        // Cabin, rear-biased with "glass" color.
+        batchFor(cache.cube()).instances.push_back(makeInstance(
+            atLocal({0.0f, 0.38f, -0.30f}), pose, {0.70f, 0.16f, 0.85f}, glass, 1.0f));
+        // Bumpers and side skirts.
+        batchFor(cache.cube()).instances.push_back(makeInstance(
+            atLocal({0.0f, -0.18f, 1.86f}), pose, {0.86f, 0.10f, 0.10f}, trim, 1.0f));
+        batchFor(cache.cube()).instances.push_back(makeInstance(
+            atLocal({0.0f, -0.18f, -1.86f}), pose, {0.86f, 0.10f, 0.10f}, trim, 1.0f));
+
         const Quat alignAxle = velox::fromAxisAngle({0.0f, 0.0f, 1.0f}, Pi * 0.5f);
-        const float darkRubber[3] = {0.16f, 0.16f, 0.18f};
         for (size_t i = 0; i < vehicle->wheelCount(); ++i) {
             const velox::WheelConfig& wheel = vehicle->wheelConfig(i);
             const velox::WheelState& state = vehicle->wheelState(i);
             const Vec3 hub = chassis.position +
-                             velox::rotate(chassis.orientation, wheel.localPosition);
-            const Vec3 down = velox::normalize(
-                velox::rotate(chassis.orientation, wheel.direction));
+                             velox::rotate(pose, wheel.localPosition);
+            const Vec3 down = velox::normalize(velox::rotate(pose, wheel.direction));
             const float travel = state.grounded
                 ? wheel.suspensionRestLength - state.compression
                 : wheel.suspensionRestLength;
             const Vec3 center = hub + down * travel;
-            Quat orientation = chassis.orientation;
+            Quat wheelPose = pose;
             if (wheel.steerable)
-                orientation = velox::mul(orientation,
+                wheelPose = velox::mul(wheelPose,
                     velox::fromAxisAngle({0.0f, 1.0f, 0.0f}, vehicle->steeringAngle()));
-            orientation = velox::mul(orientation,
+            const Quat rolling = velox::mul(wheelPose,
                 velox::fromAxisAngle({1.0f, 0.0f, 0.0f}, state.rotation));
-            orientation = velox::mul(orientation, alignAxle);
+            const Quat tirePose = velox::mul(rolling, alignAxle);
+            // Tire, bright hub, and two crossing spokes (visible rotation).
             batchFor(cache.cylinder()).instances.push_back(makeInstance(
-                center, orientation, {wheel.radius, 0.12f, wheel.radius},
-                darkRubber, 1.0f));
+                center, tirePose, {wheel.radius, 0.14f, wheel.radius}, darkRubber, 1.0f));
+            batchFor(cache.cylinder()).instances.push_back(makeInstance(
+                center, tirePose, {wheel.radius * 0.55f, 0.15f, wheel.radius * 0.55f},
+                silver, 1.0f));
+            batchFor(cache.cube()).instances.push_back(makeInstance(
+                center, rolling, {0.152f, wheel.radius * 0.82f, 0.045f}, silver, 1.0f));
+            batchFor(cache.cube()).instances.push_back(makeInstance(
+                center, rolling, {0.152f, 0.045f, wheel.radius * 0.82f}, silver, 1.0f));
         }
     }
     for (const RenderBody& renderBody : scene.renderBodies()) {
