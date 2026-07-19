@@ -68,19 +68,21 @@ pipeline, 4 solver substeps):
 
 | Scene | CPU 1 thread | CPU 16 threads | CUDA |
 |---|---|---|---|
-| 512-sphere rain | 2.06 ms | **0.70 ms** | 1.24 ms |
-| 2048-sphere rain | 4.37 ms | 3.46 ms | **1.59 ms** |
-| 8192-sphere rain | 18.94 ms | **12.61 ms** | 12.94 ms |
-| 2048 spheres on 20k-triangle terrain | **0.83 ms** | 0.89 ms | 1.41 ms |
-| 4096 disjoint meshes, 64 active bodies | **1.05 ms** | 1.17 ms | 4.12 ms |
+| 512-sphere rain | 0.83 ms | **0.64 ms** | 1.48 ms |
+| 2048-sphere rain | 4.00 ms | **1.74 ms** | 2.00 ms |
+| 8192-sphere rain | 18.09 ms | **6.92 ms** | 15.20 ms |
+| 2048 spheres on 20k-triangle terrain | 1.04 ms | **0.78 ms** | 3.17 ms |
 
-Profiling the 8192-body pile exposed a host-side hot spot that dominated the
-whole step regardless of backend: contact-event pairing rescanned the entire
-contact array once per active pair (O(pairs x contacts), ~60 ms at ~11k
-contacts). Replacing it with one sorted pass cut the CUDA step from 83 ms to
-18 ms and the CPU step from 124 ms to 19 ms on that scene. Small active sets
-over large static worlds remain effectively free on the CPU thanks to the
-incremental AABB-tree broad phase.
+Two profile-driven passes shaped these numbers. First, contact-event pairing
+rescanned the entire contact array once per active pair (O(pairs x contacts),
+~60 ms at ~11k contacts); one sorted pass fixed both backends. Second, the
+broad phase ran one serial AABB-tree query per awake body; the queries are
+read-only after the refit and now fan out across the worker pool with a
+deterministic sort merge, and solver conflict batches are built once per step
+instead of once per substep. The 8192-body pile stepped at 124 ms (CPU) /
+83 ms (CUDA) this morning and 6.9 ms (CPU, 16 threads) now. Small active
+sets over large static worlds remain effectively free on the CPU thanks to
+the incremental AABB-tree broad phase.
 
 The independent-distance-joint scene measures the resident constraint path:
 

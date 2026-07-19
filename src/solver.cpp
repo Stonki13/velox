@@ -158,6 +158,17 @@ public:
 
     void setParallelIslands(bool enabled) override { parallelIslands_ = enabled; }
 
+    void parallelChunks(size_t items, size_t minPerChunk,
+                        const std::function<void(size_t, size_t, size_t)>& fn,
+                        size_t* chunkCountOut) override {
+        size_t chunks = chunkCount(items, minPerChunk);
+        if (chunkCountOut) *chunkCountOut = chunks;
+        if (chunks == 0) return;
+        workers_.parallelFor(chunks, [&](size_t chunk) {
+            fn(chunk, items * chunk / chunks, items * (chunk + 1) / chunks);
+        });
+    }
+
     void solveVelocities(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts, float dt,
                          bool warmStart) override {
@@ -205,7 +216,12 @@ public:
             // fall through to conflict-free batches.
         }
 
-        buildSolverBatches(bodies, contacts);
+        // Contacts are stable across a step's substeps; rebuild the batches
+        // only on the first substep instead of once per substep.
+        if (warmStart || solverBatchContactCount_ != contacts.size()) {
+            buildSolverBatches(bodies, contacts);
+            solverBatchContactCount_ = contacts.size();
+        }
         auto runBatches = [&](auto&& solve) {
             for (const SolverBatch& batch : solverBatches_) {
                 size_t count = batch.end - batch.begin;
@@ -439,6 +455,7 @@ private:
     std::vector<std::vector<Contact>> chunkContacts_;
     std::vector<SolverBatch> solverBatches_;
     std::vector<uint32_t> solverBodyStamp_;
+    size_t solverBatchContactCount_ = SIZE_MAX;
 };
 
 Backend* createCpuBackend() { return new CpuBackend(); }
