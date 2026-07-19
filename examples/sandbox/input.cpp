@@ -44,6 +44,10 @@ void Input::update(const Window& window) {
     down_[static_cast<size_t>(Action::Ragdoll)] = keyDown(native, GLFW_KEY_F3);
     down_[static_cast<size_t>(Action::Contraption)] = keyDown(native, GLFW_KEY_F4);
     down_[static_cast<size_t>(Action::Gyro)] = keyDown(native, GLFW_KEY_F5);
+    down_[static_cast<size_t>(Action::DriveForward)] = keyDown(native, GLFW_KEY_UP);
+    down_[static_cast<size_t>(Action::DriveBrake)] = keyDown(native, GLFW_KEY_DOWN);
+    down_[static_cast<size_t>(Action::DriveLeft)] = keyDown(native, GLFW_KEY_LEFT);
+    down_[static_cast<size_t>(Action::DriveRight)] = keyDown(native, GLFW_KEY_RIGHT);
     down_[static_cast<size_t>(Action::ToggleLines)] = keyDown(native, GLFW_KEY_L);
     down_[static_cast<size_t>(Action::Shape1)] = keyDown(native, GLFW_KEY_1);
     down_[static_cast<size_t>(Action::Shape2)] = keyDown(native, GLFW_KEY_2);
