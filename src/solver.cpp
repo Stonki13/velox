@@ -175,6 +175,7 @@ public:
 
     void setWorkerCount(uint32_t count) override { workers_.configure(count); }
     uint32_t workerCount() const override { return workers_.workerCount(); }
+    uint32_t lastVelocityIterations() const override { return lastVelocityIterations_; }
 
     void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) override {
         dispatchChunks(bodies.size(), 512, [&](size_t begin, size_t end) {
@@ -205,7 +206,9 @@ public:
 
     void solveVelocities(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts, float dt,
-                         bool warmStart) override {
+                          bool warmStart,
+                          const SolverOptions& options) override {
+        lastVelocityIterations_ = 0;
         if (contacts.empty()) return;
         // Elliptical anisotropic limits couple the two tangent rows. The GPU
         // path already runs two sweeps per base iteration for graph coloring;
@@ -215,17 +218,29 @@ public:
             contacts.begin(), contacts.end(), [](const Contact& contact) {
                 return std::fabs(contact.friction1 - contact.friction2) > 1e-6f;
             });
-        const int velocityIterations = hasAnisotropicContact
-            ? 2 * kVelocityIterations : kVelocityIterations;
-        if (workers_.workerCount() == 1) {
+        const int velocityIterations = hasAnisotropicContact &&
+                options.frictionModel == FrictionModel::TwoAxisCoulomb
+            ? 2 * options.velocityIterations : options.velocityIterations;
+        // Adaptive convergence is measured after each complete ordered pass.
+        // Parallel conflict batches deliberately change that order, so use the
+        // reference pass rather than reporting a nondeterministic early-out.
+        if (workers_.workerCount() == 1 ||
+            options.iterationPolicy == IterationPolicy::Adaptive) {
             if (warmStart)
                 for (Contact& c : contacts)
                     if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
                         warmStartContact(bodies[c.a], bodies[c.b], c);
-            for (int iter = 0; iter < velocityIterations; ++iter)
+            for (int iter = 0; iter < velocityIterations; ++iter) {
+                float maxImpulseChange = 0.0f;
                 for (Contact& c : contacts)
                     if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
-                        solveContact(bodies[c.a], bodies[c.b], c, dt);
+                        maxImpulseChange = vmax(maxImpulseChange,
+                            solveContact(bodies[c.a], bodies[c.b], c, dt, options));
+                ++lastVelocityIterations_;
+                if (options.iterationPolicy == IterationPolicy::Adaptive &&
+                    maxImpulseChange < options.impulseThreshold)
+                    break;
+            }
             return;
         }
 
@@ -239,6 +254,7 @@ public:
             if (warmStart || islandOfContact_.size() != contacts.size())
                 buildIslands(bodies, contacts);
             if (islandRanges_.size() >= 2) {
+                lastVelocityIterations_ = static_cast<uint32_t>(velocityIterations);
                 workers_.parallelFor(islandRanges_.size(), [&](size_t island) {
                     const IslandRange range = islandRanges_[island];
                     if (warmStart)
@@ -251,7 +267,7 @@ public:
                         for (size_t k = range.begin; k < range.end; ++k) {
                             Contact& c = contacts[islandContacts_[k]];
                             if (!bodies[c.a].isSensor() && !bodies[c.b].isSensor())
-                                solveContact(bodies[c.a], bodies[c.b], c, dt);
+                                solveContact(bodies[c.a], bodies[c.b], c, dt, options);
                         }
                 });
                 return;
@@ -283,9 +299,10 @@ public:
             runBatches([&](Contact& contact) {
                 warmStartContact(bodies[contact.a], bodies[contact.b], contact);
             });
+        lastVelocityIterations_ = static_cast<uint32_t>(velocityIterations);
         for (int iteration = 0; iteration < velocityIterations; ++iteration)
             runBatches([&](Contact& contact) {
-                solveContact(bodies[contact.a], bodies[contact.b], contact, dt);
+                solveContact(bodies[contact.a], bodies[contact.b], contact, dt, options);
             });
     }
 
@@ -505,6 +522,7 @@ private:
     std::vector<SolverBatch> solverBatches_;
     std::vector<uint32_t> solverBodyStamp_;
     size_t solverBatchContactCount_ = SIZE_MAX;
+    uint32_t lastVelocityIterations_ = 0;
 };
 
 Backend* createCpuBackend() { return new CpuBackend(); }

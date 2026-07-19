@@ -65,6 +65,18 @@ void validateMultiToiSettings(const WorldMultiToiSettings& settings) {
         throw std::invalid_argument("velox: multi-TOI settings are invalid");
 }
 
+void validateSolverOptions(const SolverOptions& options) {
+    if ((options.frictionModel != FrictionModel::TwoAxisCoulomb &&
+         options.frictionModel != FrictionModel::ConeBlockSolver) ||
+        (options.iterationPolicy != IterationPolicy::Fixed &&
+         options.iterationPolicy != IterationPolicy::Adaptive) ||
+        options.velocityIterations <= 0 || options.positionIterations <= 0 ||
+        !finiteFloat(options.impulseThreshold) || options.impulseThreshold <= 0.0f ||
+        !finiteFloat(options.stackStiffness) || options.stackStiffness < 0.0f ||
+        !finiteFloat(options.stackDamping) || options.stackDamping < 0.0f)
+        throw std::invalid_argument("velox: solver options are invalid");
+}
+
 bool validJointType(JointType type) {
     return (uint8_t)type <= (uint8_t)JointType::SixDof;
 }
@@ -375,7 +387,9 @@ bool World::isOnCPUBackend() const {
 
 bool World::resetCUDABackend() {
     AccessGuard guard(*this, AccessKind::Mutation, "resetCUDABackend");
-    if (determinismMode_ == DeterminismMode::Strict) return false;
+    if (determinismMode_ == DeterminismMode::Strict ||
+        solverOptions_.iterationPolicy == IterationPolicy::Adaptive)
+        return false;
     try {
         resetBackend(BackendType::Cuda);
         fallbackToCPU_ = false;
@@ -434,6 +448,27 @@ void World::setCcdDefaults(WorldCcdDefaults defaults) {
     AccessGuard guard(*this, AccessKind::Mutation, "setCcdDefaults");
     validateCcdDefaults(defaults);
     ccdDefaults_ = defaults;
+}
+
+SolverOptions World::solverOptions() const {
+    AccessGuard guard(*this, AccessKind::Query, "solverOptions");
+    return solverOptions_;
+}
+
+void World::setSolverOptions(SolverOptions options) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setSolverOptions");
+    validateSolverOptions(options);
+    solverOptions_ = options;
+    const bool cudaActive = std::string(backend_->name()) == "cuda";
+    if (options.iterationPolicy == IterationPolicy::Adaptive && cudaActive) {
+        // CUDA's colored graph does not have a deterministic global impulse
+        // reduction for early-out. Use the ordered CPU implementation rather
+        // than silently treating Adaptive as a fixed iteration count.
+        resetBackend(BackendType::Cpu);
+    } else if (options.iterationPolicy == IterationPolicy::Fixed &&
+               !fallbackToCPU_ && !cudaActive && requestedBackend_ != BackendType::Cpu) {
+        resetBackend(requestedBackend_);
+    }
 }
 
 WorldMultiToiSettings World::multiToiSettings() const {
@@ -1645,6 +1680,7 @@ WorldSnapshot World::saveSnapshot() const {
     snapshot.substeps_ = substeps;
     snapshot.ccdDefaults_ = ccdDefaults_;
     snapshot.multiToiSettings_ = multiToiSettings_;
+    snapshot.solverOptions_ = solverOptions_;
     snapshot.bodies_ = bodies_;
     snapshot.bodySlots_.reserve(bodySlots_.size());
     for (const HandleSlot& slot : bodySlots_)
@@ -1683,6 +1719,7 @@ void World::restoreSnapshot(const WorldSnapshot& snapshot) {
     // Allocate every converted private representation before changing World,
     // giving restore strong exception safety.
     WorldSnapshot staged = snapshot;
+    validateSolverOptions(staged.solverOptions_);
     std::vector<HandleSlot> bodySlots;
     bodySlots.reserve(staged.bodySlots_.size());
     for (const WorldSnapshot::Slot& slot : staged.bodySlots_)
@@ -1700,6 +1737,10 @@ void World::restoreSnapshot(const WorldSnapshot& snapshot) {
     substeps = staged.substeps_;
     ccdDefaults_ = staged.ccdDefaults_;
     multiToiSettings_ = staged.multiToiSettings_;
+    solverOptions_ = staged.solverOptions_;
+    if (solverOptions_.iterationPolicy == IterationPolicy::Adaptive &&
+        std::string(backend_->name()) == "cuda")
+        resetBackend(BackendType::Cpu);
     bodies_.swap(staged.bodies_);
     bodySlots_.swap(bodySlots);
     bodyDenseToSlot_.swap(staged.bodyDenseToSlot_);
@@ -3349,13 +3390,16 @@ void World::stepImpl(float dt) {
     // position integration. Warm starting applies only on the first substep;
     // afterwards the accumulated impulses already live in the velocities.
     bool advancedOnDevice = backend_->advanceSubsteps(
-        bodies_, contacts_, joints_, gravity, h, nSub);
+        bodies_, contacts_, joints_, gravity, h, nSub, solverOptions_);
     lastStepStats_.deviceSubsteps = advancedOnDevice;
+    if (advancedOnDevice)
+        lastStepStats_.velocityIterations = backend_->lastVelocityIterations();
     if (advancedOnDevice) finishBrokenJoints(h);
     if (!advancedOnDevice) {
         for (int s = 0; s < nSub; ++s) {
             if (s > 0) backend_->integrate(bodies_, gravity, h);
-            backend_->solveVelocities(bodies_, contacts_, h, s == 0);
+            backend_->solveVelocities(bodies_, contacts_, h, s == 0, solverOptions_);
+            lastStepStats_.velocityIterations += backend_->lastVelocityIterations();
             solveJoints(h);
             for (Body& b : bodies_) {
                 if (b.isStatic() || b.asleep) continue;
@@ -3508,9 +3552,8 @@ void World::stepImpl(float dt) {
     // contact is estimated from its detected gap plus the relative motion of
     // its bodies along the normal since detection.
     {
-        constexpr int kPositionIterations = 3;
         constexpr float kPositionSlop = 1e-3f, kResolve = 0.6f;
-        for (int iter = 0; iter < kPositionIterations; ++iter) {
+        for (int iter = 0; iter < solverOptions_.positionIterations; ++iter) {
             for (const Contact& c : contacts_) {
                 Body& a = bodies_[c.a];
                 Body& b = bodies_[c.b];
@@ -3519,7 +3562,16 @@ void World::stepImpl(float dt) {
                 if (invMassSum <= 0.0f) continue;
                 float g = contactLiveGap(a, b, c);
                 if (g >= -kPositionSlop) continue;
-                float push = -kResolve * (g + kPositionSlop) / invMassSum;
+                float resolve = kResolve;
+                if (solverOptions_.enableStackStabilization) {
+                    const Vec3 relativeVelocity = a.velocity - b.velocity;
+                    if (lengthSq(relativeVelocity) < 1e-4f) {
+                        const float stiffness = solverOptions_.stackStiffness / 1000.0f;
+                        const float damping = 1.0f + solverOptions_.stackDamping * h;
+                        resolve += 0.2f * stiffness / damping;
+                    }
+                }
+                float push = -resolve * (g + kPositionSlop) / invMassSum;
                 if (a.isDynamic() && !a.asleep)
                     a.position += c.normal * (push * a.solverInvMass());
                 if (b.isDynamic() && !b.asleep)

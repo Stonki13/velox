@@ -10,7 +10,6 @@
 namespace velox {
 
 constexpr int kMaxContactsPerPair = 12;
-constexpr int kVelocityIterations = 8; // per substep
 
 VELOX_HD inline Vec3 npPointVelocity(const Body& b, const Vec3& p) {
     return b.velocity + cross(b.angularVelocity, p - b.position);
@@ -101,7 +100,14 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
 // accumulated clamping). Shared by the CPU solver (sequential order) and the
 // CUDA solver (graph-colored parallel order). Static bodies are never
 // written, so contacts sharing only a static body may run concurrently.
-VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
+VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
+                                   const SolverOptions& options = SolverOptions{}) {
+    const float oldNormalImpulse = c.normalImpulse;
+    const float oldTangentImpulse1 = c.tangentImpulse1;
+    const float oldTangentImpulse2 = c.tangentImpulse2;
+    const float oldRollingImpulse1 = c.rollingImpulse1;
+    const float oldRollingImpulse2 = c.rollingImpulse2;
+    const float oldSpinningImpulse = c.spinningImpulse;
     Vec3 pa = contactAnchorWorld(a, c.localAnchorA);
     Vec3 pb = contactAnchorWorld(b, c.localAnchorB);
     c.point = (pa + pb) * 0.5f;
@@ -121,7 +127,7 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     float kNormal = a.solverInvMass() + b.solverInvMass() +
                     dot(raxn, a.invInertiaMul(raxn)) +
                     dot(rbxn, b.invInertiaMul(rbxn));
-    if (kNormal <= 0.0f) return;
+    if (kNormal <= 0.0f) return 0.0f;
 
     float vn = dot(npPointVelocity(a, pa) - npPointVelocity(b, pb), c.normal);
 
@@ -144,25 +150,6 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     if (c.vn0 < -kRestitutionThreshold && (liveGap <= 0.0f || vn > 0.0f))
         target = vmax(target, -c.restitution * c.vn0);
 
-    float jn = (target - vn) / kNormal;
-    float newImpulse = vmax(c.normalImpulse + jn, 0.0f);
-    jn = newImpulse - c.normalImpulse;
-    c.normalImpulse = newImpulse;
-
-    Vec3 impulse = c.normal * jn;
-    if (a.isDynamic()) {
-        a.velocity += impulse * a.solverInvMass();
-        a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
-    }
-    if (b.isDynamic()) {
-        b.velocity -= impulse * b.solverInvMass();
-        b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
-    }
-
-    // Two-axis Coulomb friction. A deterministic tangent basis makes the two
-    // accumulated rows stable across frames, and circular clamping avoids the
-    // directional bias of independent box constraints.
-    Vec3 rv = npPointVelocity(a, pa) - npPointVelocity(b, pb);
     Vec3 tangent1, tangent2;
     contactTangents(c.normal, tangent1, tangent2);
     Vec3 raxt1 = cross(ra, tangent1), rbxt1 = cross(rb, tangent1);
@@ -171,30 +158,115 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
                dot(rbxt1, b.invInertiaMul(rbxt1));
     float k2 = a.solverInvMass() + b.solverInvMass() + dot(raxt2, a.invInertiaMul(raxt2)) +
                dot(rbxt2, b.invInertiaMul(rbxt2));
-    if (k1 > 0.0f && k2 > 0.0f) {
-        float old1 = c.tangentImpulse1, old2 = c.tangentImpulse2;
-        float next1 = old1 - dot(rv, tangent1) / k1;
-        float next2 = old2 - dot(rv, tangent2) / k2;
-        float max1 = c.friction1 * c.normalImpulse;
-        float max2 = c.friction2 * c.normalImpulse;
-        if (max1 <= 0.0f) next1 = 0.0f;
-        if (max2 <= 0.0f) next2 = 0.0f;
-        float ellipse = (max1 > 0.0f ? next1 * next1 / (max1 * max1) : 0.0f) +
-                        (max2 > 0.0f ? next2 * next2 / (max2 * max2) : 0.0f);
-        if (ellipse > 1.0f) {
-            float scale = 1.0f / sqrtf(ellipse);
-            next1 *= scale; next2 *= scale;
-        }
-        c.tangentImpulse1 = next1;
-        c.tangentImpulse2 = next2;
-        Vec3 fImpulse = tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
+    const float kN1 = dot(raxn, a.invInertiaMul(raxt1)) +
+                       dot(rbxn, b.invInertiaMul(rbxt1));
+    const float kN2 = dot(raxn, a.invInertiaMul(raxt2)) +
+                       dot(rbxn, b.invInertiaMul(rbxt2));
+    const bool coneBlock = options.frictionModel == FrictionModel::ConeBlockSolver;
+    if (!coneBlock) {
+        // Preserve the established scalar-row path bit-for-bit by applying
+        // the normal row before sampling tangential relative velocity.
+        float jn = (target - vn) / kNormal;
+        float nextNormal = vmax(c.normalImpulse + jn, 0.0f);
+        jn = nextNormal - c.normalImpulse;
+        c.normalImpulse = nextNormal;
+        Vec3 normalImpulse = c.normal * jn;
         if (a.isDynamic()) {
-            a.velocity += fImpulse * a.solverInvMass();
-            a.angularVelocity += a.invInertiaMul(cross(ra, fImpulse));
+            a.velocity += normalImpulse * a.solverInvMass();
+            a.angularVelocity += a.invInertiaMul(cross(ra, normalImpulse));
         }
         if (b.isDynamic()) {
-            b.velocity -= fImpulse * b.solverInvMass();
-            b.angularVelocity -= b.invInertiaMul(cross(rb, fImpulse));
+            b.velocity -= normalImpulse * b.solverInvMass();
+            b.angularVelocity -= b.invInertiaMul(cross(rb, normalImpulse));
+        }
+        if (k1 > 0.0f && k2 > 0.0f) {
+            Vec3 rv = npPointVelocity(a, pa) - npPointVelocity(b, pb);
+            float old1 = c.tangentImpulse1, old2 = c.tangentImpulse2;
+            float next1 = old1 - dot(rv, tangent1) / k1;
+            float next2 = old2 - dot(rv, tangent2) / k2;
+            float max1 = c.friction1 * c.normalImpulse;
+            float max2 = c.friction2 * c.normalImpulse;
+            if (max1 <= 0.0f) next1 = 0.0f;
+            if (max2 <= 0.0f) next2 = 0.0f;
+            float ellipse =
+                (max1 > 0.0f ? next1 * next1 / (max1 * max1) : 0.0f) +
+                (max2 > 0.0f ? next2 * next2 / (max2 * max2) : 0.0f);
+            if (ellipse > 1.0f) {
+                float scale = 1.0f / sqrtf(ellipse);
+                next1 *= scale;
+                next2 *= scale;
+            }
+            c.tangentImpulse1 = next1;
+            c.tangentImpulse2 = next2;
+            Vec3 frictionImpulse = tangent1 * (next1 - old1) +
+                                   tangent2 * (next2 - old2);
+            if (a.isDynamic()) {
+                a.velocity += frictionImpulse * a.solverInvMass();
+                a.angularVelocity += a.invInertiaMul(cross(ra, frictionImpulse));
+            }
+            if (b.isDynamic()) {
+                b.velocity -= frictionImpulse * b.solverInvMass();
+                b.angularVelocity -= b.invInertiaMul(cross(rb, frictionImpulse));
+            }
+        }
+    } else {
+        float oldNormal = c.normalImpulse;
+        float old1 = c.tangentImpulse1, old2 = c.tangentImpulse2;
+        float nextNormal = oldNormal, next1 = old1, next2 = old2;
+        if (k1 > 0.0f && k2 > 0.0f) {
+            // Solve the 3x3 normal/tangent effective-mass block, then project
+            // the accumulated impulse into its anisotropic Coulomb cone.
+            const float k12 = dot(raxt1, a.invInertiaMul(raxt2)) +
+                              dot(rbxt1, b.invInertiaMul(rbxt2));
+            const float determinant = kNormal * (k1 * k2 - k12 * k12) -
+                                      kN1 * (kN1 * k2 - kN2 * k12) +
+                                      kN2 * (kN1 * k12 - kN2 * k1);
+            if (fabsf(determinant) > 1e-12f) {
+                const Vec3 rv = npPointVelocity(a, pa) - npPointVelocity(b, pb);
+                const float bNormal = target - dot(rv, c.normal);
+                const float b1 = -dot(rv, tangent1);
+                const float b2 = -dot(rv, tangent2);
+                const float deltaNormal =
+                    (bNormal * (k1 * k2 - k12 * k12) +
+                     b1 * (kN2 * k12 - kN1 * k2) +
+                     b2 * (kN1 * k12 - kN2 * k1)) / determinant;
+                const float delta1 =
+                    (bNormal * (kN2 * k12 - kN1 * k2) +
+                     b1 * (kNormal * k2 - kN2 * kN2) +
+                     b2 * (kN1 * kN2 - kNormal * k12)) / determinant;
+                const float delta2 =
+                    (bNormal * (kN1 * k12 - kN2 * k1) +
+                     b1 * (kN1 * kN2 - kNormal * k12) +
+                     b2 * (kNormal * k1 - kN1 * kN1)) / determinant;
+                nextNormal = vmax(oldNormal + deltaNormal, 0.0f);
+                next1 = old1 + delta1;
+                next2 = old2 + delta2;
+            }
+        }
+        const float max1 = c.friction1 * nextNormal;
+        const float max2 = c.friction2 * nextNormal;
+        if (max1 <= 0.0f) next1 = 0.0f;
+        if (max2 <= 0.0f) next2 = 0.0f;
+        const float ellipse =
+            (max1 > 0.0f ? next1 * next1 / (max1 * max1) : 0.0f) +
+            (max2 > 0.0f ? next2 * next2 / (max2 * max2) : 0.0f);
+        if (ellipse > 1.0f) {
+            const float scale = 1.0f / sqrtf(ellipse);
+            next1 *= scale;
+            next2 *= scale;
+        }
+        c.normalImpulse = nextNormal;
+        c.tangentImpulse1 = next1;
+        c.tangentImpulse2 = next2;
+        const Vec3 impulse = c.normal * (nextNormal - oldNormal) +
+                             tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
+        if (a.isDynamic()) {
+            a.velocity += impulse * a.solverInvMass();
+            a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
+        }
+        if (b.isDynamic()) {
+            b.velocity -= impulse * b.solverInvMass();
+            b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
         }
     }
 
@@ -207,18 +279,20 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
     float kr2 = dot(tangent2, a.invInertiaMul(tangent2)) +
                 dot(tangent2, b.invInertiaMul(tangent2));
     if (c.rollingFriction > 0.0f && kr1 > 0.0f && kr2 > 0.0f) {
-        float old1 = c.rollingImpulse1, old2 = c.rollingImpulse2;
-        float next1 = old1 - dot(wr, tangent1) / kr1;
-        float next2 = old2 - dot(wr, tangent2) / kr2;
+        float oldRolling1 = c.rollingImpulse1, oldRolling2 = c.rollingImpulse2;
+        float nextRolling1 = oldRolling1 - dot(wr, tangent1) / kr1;
+        float nextRolling2 = oldRolling2 - dot(wr, tangent2) / kr2;
         float limit = c.rollingFriction * c.normalImpulse;
-        float magnitude = sqrtf(next1 * next1 + next2 * next2);
+        float magnitude = sqrtf(nextRolling1 * nextRolling1 + nextRolling2 * nextRolling2);
         if (magnitude > limit && magnitude > 1e-9f) {
             float scale = limit / magnitude;
-            next1 *= scale; next2 *= scale;
+            nextRolling1 *= scale;
+            nextRolling2 *= scale;
         }
-        c.rollingImpulse1 = next1;
-        c.rollingImpulse2 = next2;
-        Vec3 torque = tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
+        c.rollingImpulse1 = nextRolling1;
+        c.rollingImpulse2 = nextRolling2;
+        Vec3 torque = tangent1 * (nextRolling1 - oldRolling1) +
+                      tangent2 * (nextRolling2 - oldRolling2);
         if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(torque);
         if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(torque);
     }
@@ -235,6 +309,12 @@ VELOX_HD inline void solveContact(Body& a, Body& b, Contact& c, float dt) {
         if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(torque);
         if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(torque);
     }
+    float maxChange = fabsf(c.normalImpulse - oldNormalImpulse);
+    maxChange = vmax(maxChange, fabsf(c.tangentImpulse1 - oldTangentImpulse1));
+    maxChange = vmax(maxChange, fabsf(c.tangentImpulse2 - oldTangentImpulse2));
+    maxChange = vmax(maxChange, fabsf(c.rollingImpulse1 - oldRollingImpulse1));
+    maxChange = vmax(maxChange, fabsf(c.rollingImpulse2 - oldRollingImpulse2));
+    return vmax(maxChange, fabsf(c.spinningImpulse - oldSpinningImpulse));
 }
 
 // World-space AABB of a body inflated by its speculative reach over dt.

@@ -296,12 +296,13 @@ __global__ void allPairsContactsKernel(const Body* bodies, const Aabb* aabbs,
 // Solves every contact of one color in parallel: within a color no two
 // contacts share a dynamic body, so the writes cannot conflict.
 __global__ void solveColorKernel(Body* bodies, Contact* contacts,
-                                 int first, int count, float dt) {
+                                 int first, int count, float dt,
+                                 SolverOptions options) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= count) return;
     Contact& c = contacts[first + k];
     if (bodies[c.a].isSensor() || bodies[c.b].isSensor()) return;
-    solveContact(bodies[c.a], bodies[c.b], c, dt);
+    solveContact(bodies[c.a], bodies[c.b], c, dt, options);
 }
 
 __global__ void warmStartColorKernel(Body* bodies, Contact* contacts,
@@ -382,6 +383,7 @@ public:
     }
 
     const char* name() const override { return "cuda"; }
+    uint32_t lastVelocityIterations() const override { return lastVelocityIterations_; }
 
     void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) override {
         injectCudaFailureForTesting();
@@ -561,7 +563,9 @@ public:
 
     void solveVelocities(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts, float dt,
-                         bool warmStart) override {
+                         bool warmStart,
+                         const SolverOptions& options) override {
+        lastVelocityIterations_ = 0;
         int n = static_cast<int>(bodies.size());
         int m = static_cast<int>(contacts.size());
         if (m == 0) return;
@@ -656,14 +660,15 @@ public:
             // Colored order converges slower per sweep than sequential order
             // (color 0 solves one contact of every pair Jacobi-style), so run
             // twice the sweeps — with the graph replay they are nearly free.
-            constexpr int kGpuIterations = 2 * kVelocityIterations;
+            const int gpuIterations = 2 * options.velocityIterations;
+            lastVelocityIterations_ = static_cast<uint32_t>(gpuIterations);
             cudaGraph_t graph;
             VELOX_CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal));
-            for (int iter = 0; iter < kGpuIterations; ++iter)
+            for (int iter = 0; iter < gpuIterations; ++iter)
                 for (int c = 0; c < numColors_; ++c) {
                     int first = colorStart_[c], count = colorStart_[c + 1] - first;
                     solveColorKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
-                        dBodies_, dSolve_, first, count, dt);
+                        dBodies_, dSolve_, first, count, dt, options);
                     VELOX_CUDA_LAUNCH_CHECK();
                 }
             VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
@@ -682,7 +687,7 @@ public:
                          std::vector<Contact>& contacts,
                          std::vector<Joint>& joints,
                          const Vec3& gravity, float dt,
-                         int substeps) override {
+                         int substeps, const SolverOptions& options) override {
         // Graph construction dominates small constraint sets; the CPU path is
         // lower latency until enough independent rows amortize the capture.
         constexpr size_t kDeviceJointThreshold = 64;
@@ -698,7 +703,12 @@ public:
         }
 
         bool hasContacts = !contacts.empty();
-        solveVelocities(bodies, contacts, dt, true);
+        // Adaptive early-out requires an ordered reduction over contact
+        // impulses. Keep its contract exact by routing that policy through
+        // the CPU backend rather than silently running fixed GPU sweeps.
+        if (options.iterationPolicy == IterationPolicy::Adaptive)
+            return false;
+        solveVelocities(bodies, contacts, dt, true, options);
         if (bodies.empty()) return true;
 
         int n = static_cast<int>(bodies.size());
@@ -734,6 +744,7 @@ public:
                 joints[jointOrder_[i]] = jointSorted_[i];
         }
         bodiesDirty_ = true;
+        lastVelocityIterations_ *= static_cast<uint32_t>(substeps);
         return true;
     }
 
@@ -974,6 +985,7 @@ private:
     size_t jointCap_ = 0;
     size_t meshVerts_ = ~size_t(0), meshNodes_ = ~size_t(0);
     bool bodiesDirty_ = true;
+    uint32_t lastVelocityIterations_ = 0;
     int jointNumColors_ = 0;
     std::vector<int> jointNextColor_, jointColorOf_, jointColorStart_,
                      jointFill_, jointOrder_;

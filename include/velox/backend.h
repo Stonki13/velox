@@ -1,5 +1,6 @@
 #pragma once
 #include "joint.h"
+#include "solver.h"
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -124,12 +125,14 @@ public:
     // impulses already live in the velocities on later substeps.
     virtual void solveVelocities(std::vector<Body>& bodies,
                                  std::vector<Contact>& contacts, float dt,
-                                 bool warmStart) = 0;
+                                 bool warmStart,
+                                 const SolverOptions& options) = 0;
     // Optional fast path after the first velocity integration/contact find.
     // Returns true when all solver substeps and transform integration were
     // completed. CPU and backends requiring host-side constraints return false.
     virtual bool advanceSubsteps(std::vector<Body>&, std::vector<Contact>&,
-                                 std::vector<Joint>&, const Vec3&, float, int) {
+                                 std::vector<Joint>&, const Vec3&, float, int,
+                                 const SolverOptions&) {
         return false;
     }
     // Called once after the last substep: backends holding impulses in
@@ -145,6 +148,9 @@ public:
     // Bitwise identical to sequential solving because islands share no
     // dynamic bodies. GPU backends ignore it (graph coloring instead).
     virtual void setParallelIslands(bool) {}
+    // Number of velocity sweeps performed by the latest solve call. This is
+    // reported through StepStats so adaptive policies are observable.
+    virtual uint32_t lastVelocityIterations() const { return 0; }
     // Runs chunk callbacks on the backend's host worker pool (read-only
     // fan-out work like broad-phase queries). Default: serial.
     virtual void parallelChunks(size_t items, size_t /*minPerChunk*/,

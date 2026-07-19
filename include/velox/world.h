@@ -2,6 +2,7 @@
 #include "backend.h"
 #include "joint.h"
 #include "queries.h"
+#include "solver.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -103,6 +104,7 @@ struct StepStats {
     size_t awakeDynamicBodies = 0;
     size_t generatedContacts = 0;
     size_t solvedContacts = 0;
+    uint32_t velocityIterations = 0;
     size_t jointCount = 0;
     size_t multiToiEvents = 0;
     bool deviceSubsteps = false;
@@ -148,6 +150,7 @@ private:
     StepStats lastStepStats_;
     WorldCcdDefaults ccdDefaults_;
     WorldMultiToiSettings multiToiSettings_;
+    SolverOptions solverOptions_;
 };
 
 struct BroadPhaseData;
@@ -230,6 +233,8 @@ public:
 
     WorldCcdDefaults ccdDefaults() const;
     void setCcdDefaults(WorldCcdDefaults defaults);
+    SolverOptions solverOptions() const;
+    void setSolverOptions(SolverOptions options);
     WorldMultiToiSettings multiToiSettings() const;
     void setMultiToiSettings(WorldMultiToiSettings settings);
     void setCcdTuning(BodyId id, BodyCcdTuning tuning);
@@ -490,6 +495,7 @@ private:
     bool fallbackToCPU_ = false;
     WorldCcdDefaults ccdDefaults_;
     WorldMultiToiSettings multiToiSettings_;
+    SolverOptions solverOptions_;
     BackendType requestedBackend_ = BackendType::Auto;
     StepStats lastStepStats_;
     MeshSoup meshes_;
