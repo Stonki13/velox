@@ -1,0 +1,14 @@
+PROJECT_NAME           = Velox
+PROJECT_BRIEF          = "Rigid-body physics for games"
+OUTPUT_DIRECTORY       = docs/api-reference
+INPUT                  = include/velox
+RECURSIVE              = YES
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = YES
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_AS_ERROR          = NO

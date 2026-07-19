@@ -232,6 +232,14 @@ ctest --test-dir build -C Release --output-on-failure
 ./build/examples/bullet_demo   # runs the high-speed CCD example
 ```
 
+## Documentation
+
+- [Getting started](docs/getting-started.md) covers the supported integration
+  flow, queries, events, debugging, and determinism modes.
+- [Concepts](docs/concepts.md) describes Predictive Contact Sweeping, TGS,
+  manifolds, islands, and backend tradeoffs.
+- `doxygen docs/Doxyfile` generates API reference HTML in `docs/api-reference`.
+
 ## Quick taste
 
 ```cpp
