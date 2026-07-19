@@ -12,18 +12,24 @@ broad phase touched, and invalidates backend caches.
 `setCollisionMargin()` updates the existing per-body CCD margin through the
 same mutation boundary.
 
-## Remaining Geometry
+## Hull And Compound Transaction
 
-Hull and compound payloads remain explicitly rejected. Their implementation
-must append and rebase new hull/child ranges in `MeshSoup` as one strong
-exception-safe transaction; it cannot mutate old ranges because serialized
-snapshots and active GPU uploads may still reference them. This roadmap item
-is therefore in progress, not ready to merge as complete.
+Hull and compound payloads are constructed in an isolated CPU World first.
+Once validation and mass generation succeed, Velox copies the generated hull
+points, face indices, and compound children into a copied `MeshSoup`, rebases
+the appended ranges, then commits the soup and body together. Old ranges are
+left intact for snapshots and active GPU uploads. The uncommon mutation path
+therefore favors strong exception safety over avoiding a soup copy.
 
 ## Verification
 
 `runtime_mutation_demo` covers sphere-to-box replacement, anisotropic box
 scale with inertia refresh, hinge preservation, collision-margin update, and
 a next-frame overlap query proving the broad-phase proxy was refreshed.
-CPU-only Release CTest passed 14/14 and the CUDA-enabled Release target built
-and passed the mutation demo.
+CPU-only Release CTest passed 14/14 and the CUDA-enabled Release target built,
+ran the mutation demo, and passed the full stress suite.
+
+## Merge Recommendation
+
+Ready for the full CUDA regression gate. The descriptor retains body mass on
+inertia refresh because Velox does not persist authoring density separately.

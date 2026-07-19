@@ -49,6 +49,24 @@ int main() {
     for (BodyId id : overlaps) found |= id == body;
     ok &= check(found, "broad phase retained stale shape proxy after mutation");
 
+    ShapeMutation hull;
+    hull.type = ShapeMutation::Type::Hull;
+    hull.hullPoints = {{-0.4f, -0.4f, -0.4f}, {0.4f, -0.4f, -0.4f},
+                       {0.0f, 0.4f, -0.4f}, {0.0f, 0.0f, 0.4f}};
+    world.mutateShape(body, hull);
+    ok &= check(world.bodyState(body).shape == ShapeType::Hull,
+                "hull mutation failed");
+
+    ShapeMutation compound;
+    compound.type = ShapeMutation::Type::Compound;
+    CompoundShape child;
+    child.shape = ShapeType::Box;
+    child.halfExtents = {0.3f, 0.2f, 0.2f};
+    compound.compoundShapes = {child};
+    world.mutateShape(body, compound);
+    ok &= check(world.bodyState(body).shape == ShapeType::Compound && world.isValid(hinge),
+                "compound mutation did not preserve shape or joint");
+
     std::printf("runtime_mutation_demo: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

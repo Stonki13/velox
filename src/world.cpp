@@ -1327,9 +1327,50 @@ void World::mutateShape(BodyId id, const ShapeMutation& mutation) {
         candidate.capsuleHalfHeight = mutation.capsuleHalfHeight;
         break;
     case ShapeMutation::Type::Hull:
-    case ShapeMutation::Type::Compound:
-        throw std::invalid_argument(
-            "velox: hull and compound mutation require the transactional geometry pass");
+    case ShapeMutation::Type::Compound: {
+        const float mass = candidate.invMass > 0.0f ? 1.0f / candidate.invMass : 0.0f;
+        World generated(BackendType::Cpu);
+        if (mutation.type == ShapeMutation::Type::Hull)
+            generated.addConvexHull({}, mutation.hullPoints, mass);
+        else
+            generated.addCompound({}, mutation.compoundShapes, mass);
+        const Body& geometry = generated.bodies_.front();
+        MeshSoup updated = meshes_; // Strong guarantee: append before commit.
+        const uint32_t hullBase = static_cast<uint32_t>(updated.hullPoints.size());
+        const uint32_t faceBase = static_cast<uint32_t>(updated.hullFaceIndices.size());
+        const uint32_t childBase = static_cast<uint32_t>(updated.compoundChildren.size());
+        updated.hullPoints.insert(updated.hullPoints.end(),
+                                  generated.meshes_.hullPoints.begin(),
+                                  generated.meshes_.hullPoints.end());
+        updated.hullFaceIndices.insert(updated.hullFaceIndices.end(),
+                                       generated.meshes_.hullFaceIndices.begin(),
+                                       generated.meshes_.hullFaceIndices.end());
+        std::vector<CompoundChild> children = generated.meshes_.compoundChildren;
+        for (CompoundChild& child : children) {
+            child.hullFirst += hullBase;
+            child.hullFaceFirst += faceBase;
+        }
+        updated.compoundChildren.insert(updated.compoundChildren.end(),
+                                        children.begin(), children.end());
+        candidate.shape = geometry.shape;
+        candidate.position += geometry.position;
+        candidate.radius = geometry.radius;
+        candidate.halfExtents = geometry.halfExtents;
+        candidate.capsuleHalfHeight = geometry.capsuleHalfHeight;
+        candidate.hullFirst = geometry.hullFirst + hullBase;
+        candidate.hullCount = geometry.hullCount;
+        candidate.hullFaceFirst = geometry.hullFaceFirst + faceBase;
+        candidate.hullFaceCount = geometry.hullFaceCount;
+        candidate.compoundFirst = geometry.compoundFirst + childBase;
+        candidate.compoundCount = geometry.compoundCount;
+        if (!mutation.preserveMassProperties) {
+            candidate.invMass = geometry.invMass;
+            candidate.invInertia = geometry.invInertia;
+            candidate.inertiaOrientation = geometry.inertiaOrientation;
+        }
+        meshes_ = std::move(updated);
+        break;
+    }
     default:
         throw std::invalid_argument("velox: invalid shape mutation type");
     }

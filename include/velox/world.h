@@ -296,8 +296,7 @@ public:
     MotionType motionType(BodyId id) const;
     void setMotionType(BodyId id, MotionType type);
     // Replace collider geometry without changing the body's handle or joints.
-    // Primitive forms are immediate; hull and compound payloads use the same
-    // descriptor and are completed by the transactional soup path.
+    // Hull and compound payloads are built and appended transactionally.
     void mutateShape(BodyId id, const ShapeMutation& mutation);
     void scaleShape(BodyId id, const ShapeScale& scale);
     void setCollisionMargin(BodyId id, float margin);
