@@ -3,6 +3,8 @@
 #include "joint.h"
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -168,6 +170,23 @@ enum class IslandSolvingMode : uint8_t { Sequential = 0, Parallel = 1 };
 // backend, making replay comparison meaningful across supported CPU platforms.
 enum class DeterminismMode : uint8_t { Relaxed = 0, Strict = 1 };
 
+// Controls which threads may enter World methods. Strict is the default and
+// confines all access to the creating thread. Relaxed permits cross-thread
+// query calls, but mutations and step() remain creator-thread only. Concurrent
+// serializes the supported method API with an internal lock; it is intended
+// for tools and gameplay code that cannot maintain an external world lock.
+enum class ThreadSafetyPolicy : uint8_t {
+    Strict = 0,
+    Relaxed = 1,
+    Concurrent = 2,
+};
+
+struct ThreadSafetyReport {
+    uint64_t queryCallsFromNonMainThread = 0;
+    uint64_t mutationCallsDuringStep = 0;
+    uint64_t stepInvocationsOnNonMainThread = 0;
+};
+
 class World {
 public:
     // Auto picks the NVIDIA CUDA backend when built with VELOX_ENABLE_CUDA and
@@ -176,23 +195,35 @@ public:
     explicit World(BackendType type = BackendType::Auto);
     ~World();
 
-    DeterminismMode determinismMode() const noexcept { return determinismMode_; }
+    DeterminismMode determinismMode() const;
     // Strict mode requires a build configured with VELOX_STRICT_FLOATING_POINT.
     // It uses the CPU reference backend; CUDA strict parity is not yet supported.
     void setDeterminismMode(DeterminismMode mode);
 
-    IslandSolvingMode islandSolvingMode() const { return islandSolvingMode_; }
+    IslandSolvingMode islandSolvingMode() const;
     void setIslandSolvingMode(IslandSolvingMode mode);
 
+    ThreadSafetyPolicy threadSafetyPolicy() const;
+    void setThreadSafetyPolicy(ThreadSafetyPolicy policy);
+    ThreadSafetyReport threadSafetyReport() const;
+
     const char* backendName() const;
-    void setWorkerCount(uint32_t count) { backend_->setWorkerCount(count); }
-    uint32_t workerCount() const { return backend_->workerCount(); }
+    void setWorkerCount(uint32_t count);
+    uint32_t workerCount() const;
 
     Vec3 gravity{0, -9.81f, 0};
 
     // Solver substeps per step() call. More substeps = stiffer stacks and
     // less friction drift for the same iteration budget (Box2D v3 approach).
     int substeps = 4;
+
+    // Safe configuration alternatives for use after publishing a World to
+    // another thread. Direct writes to gravity/substeps must be externally
+    // synchronized for compatibility with the pre-1.0 public fields.
+    void setGravity(Vec3 value);
+    Vec3 gravityValue() const;
+    void setSubsteps(int value);
+    int substepCount() const;
 
     BodyId addSphere(Vec3 position, float radius, float mass);
     BodyId addBox(Vec3 position, Vec3 halfExtents, float mass);
@@ -219,9 +250,12 @@ public:
 
     Body& body(BodyId id);
     const Body& body(BodyId id) const;
+    // Thread-safe copies. body()/joint() return borrowed references and must
+    // not outlive external synchronization with step() or mutation.
+    Body bodyState(BodyId id) const;
     GeometryDiagnostics queryGeometryDiagnostics(BodyId id) const;
-    size_t bodyCount() const { return bodies_.size(); }
-    bool isValid(BodyId id) const noexcept;
+    size_t bodyCount() const;
+    bool isValid(BodyId id) const;
     void removeBody(BodyId id); // also removes joints attached to the body
     MotionType motionType(BodyId id) const;
     void setMotionType(BodyId id, MotionType type);
@@ -245,6 +279,7 @@ public:
     WorldSnapshot saveSnapshot() const;
     void restoreSnapshot(const WorldSnapshot& snapshot);
     const StepStats& lastStepStats() const { return lastStepStats_; }
+    StepStats lastStepStatsCopy() const;
 
     // --- joints -------------------------------------------------------------
     JointId addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor);
@@ -258,7 +293,8 @@ public:
     JointId addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     Joint& joint(JointId id);                              // configure motors/limits
     const Joint& joint(JointId id) const;
-    bool isValid(JointId id) const noexcept;
+    Joint jointState(JointId id) const;
+    bool isValid(JointId id) const;
     void removeJoint(JointId id);
     float hingeAngle(JointId id) const;                     // radians, 0 at creation
     float coneSwingAngle(JointId id) const;
@@ -275,9 +311,7 @@ public:
     // Runs once per generated contact before waking, warm starting, and solving.
     // The callback may change the point, normal, resolved material values, or
     // disable the contact. Throwing aborts step() before body transforms advance.
-    void setContactModifier(ContactModifier modifier) {
-        contactModifier_ = std::move(modifier);
-    }
+    void setContactModifier(ContactModifier modifier);
 
     // --- sleeping -----------------------------------------------------------
     // Bodies whose island stays below the motion threshold for a while are
@@ -360,6 +394,15 @@ private:
     void finishBrokenJoints(float dt);
     void updateSleeping(float dt);
     void resetBackend(BackendType type);
+    enum class AccessKind : uint8_t { Query, Mutation, Step };
+    class AccessGuard {
+    public:
+        AccessGuard(const World& world, AccessKind kind, const char* method);
+
+    private:
+        const World& world_;
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
 
     std::vector<Body> bodies_;
     std::vector<HandleSlot> bodySlots_;
@@ -388,6 +431,10 @@ private:
     std::vector<uint64_t> candidatePairs_;
     mutable std::unique_ptr<BroadPhaseData> broadPhase_;
     std::unique_ptr<Backend> backend_;
+    mutable std::recursive_mutex accessMutex_;
+    std::thread::id ownerThread_;
+    ThreadSafetyPolicy threadSafetyPolicy_ = ThreadSafetyPolicy::Strict;
+    mutable ThreadSafetyReport threadSafetyReport_;
 };
 
 } // namespace velox

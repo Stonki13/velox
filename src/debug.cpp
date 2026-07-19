@@ -138,6 +138,7 @@ void addShape(std::vector<DebugLine>& out, const Body& body,
 } // namespace
 
 void World::debugLines(std::vector<DebugLine>& out, uint32_t flags) const {
+    AccessGuard guard(*this, AccessKind::Query, "debugLines");
     out.clear();
     MeshSoupView soup = view(meshes_);
     if (flags & DebugDrawShapes)

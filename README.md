@@ -238,6 +238,8 @@ ctest --test-dir build -C Release --output-on-failure
   flow, queries, events, debugging, and determinism modes.
 - [Concepts](docs/concepts.md) describes Predictive Contact Sweeping, TGS,
   manifolds, islands, and backend tradeoffs.
+- [Threading contract](docs/threading.md) specifies safe cross-thread world
+  access and the legacy borrowed-reference limits.
 - [Real-workload release gate](docs/release-gate.md) defines the game-like
   CTest workload used to catch cross-subsystem regressions.
 - `doxygen docs/Doxyfile` generates API reference HTML in `docs/api-reference`.

@@ -377,6 +377,7 @@ ClosestPointResult closestPointsBodies(const Body& a, const Body& b,
 } // namespace
 
 ClosestPointResult World::closestPoints(BodyId a, BodyId b) const {
+    AccessGuard guard(*this, AccessKind::Query, "closestPoints");
     const Body& bodyA = bodies_[resolve(a)];
     const Body& bodyB = bodies_[resolve(b)];
     const MeshSoupView soup = view(meshes_);
@@ -397,6 +398,7 @@ bool World::queryAllows(BodyIndex dense, const QueryFilter& filter) const {
 
 RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
                       const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "rayCast");
     if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
         throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
@@ -431,6 +433,7 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
 void World::rayCastAll(Vec3 origin, Vec3 dir, float maxDist,
                        std::vector<RayHit>& out,
                        const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "rayCastAll");
     if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
         throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
@@ -494,6 +497,7 @@ void World::overlapShapeWithSoup(const Body& shape, std::vector<BodyId>& out,
 void World::overlapConvexHull(Vec3 center, const std::vector<Vec3>& points,
                               Quat orientation, std::vector<BodyId>& out,
                               const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "overlapConvexHull");
     if (!finiteQueryVec(center))
         throw std::invalid_argument("velox: convex hull query center must be finite");
     Body probe;
@@ -514,6 +518,7 @@ void World::overlapConvexHull(Vec3 center, const std::vector<Vec3>& points,
 
 void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
                           const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "overlapSphere");
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
         throw std::invalid_argument("velox: overlap sphere requires a finite center and positive radius");
     Body probe;
@@ -525,6 +530,7 @@ void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
 
 void World::overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,
                        std::vector<BodyId>& out, const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "overlapBox");
     if (!finiteQueryVec(center) || !finiteQueryVec(halfExtents) ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f ||
         !finiteQueryQuat(orientation))
@@ -544,6 +550,7 @@ void World::overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,
 void World::overlapCapsule(Vec3 center, float radius, float halfHeight,
                            Quat orientation, std::vector<BodyId>& out,
                            const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "overlapCapsule");
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f ||
         !finiteQueryFloat(halfHeight) || halfHeight < 0.0f ||
         !finiteQueryQuat(orientation))
@@ -629,6 +636,7 @@ ShapeCastHit World::convexHullCast(Vec3 center,
                                    Quat orientation, Vec3 direction,
                                    float maxDist,
                                    const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "convexHullCast");
     if (!finiteQueryVec(center))
         throw std::invalid_argument("velox: convex hull cast center must be finite");
     Body shape;
@@ -649,6 +657,7 @@ ShapeCastHit World::convexHullCast(Vec3 center,
 
 ShapeCastHit World::sphereCast(Vec3 center, float radius, Vec3 direction,
                                float maxDist, const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "sphereCast");
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
         throw std::invalid_argument("velox: sphere cast requires a finite center and radius");
     Body shape;
@@ -661,6 +670,7 @@ ShapeCastHit World::sphereCast(Vec3 center, float radius, Vec3 direction,
 ShapeCastHit World::boxCast(Vec3 center, Vec3 halfExtents, Quat orientation,
                             Vec3 direction, float maxDist,
                             const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "boxCast");
     if (!finiteQueryVec(center) || !finiteQueryVec(halfExtents) ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f ||
         !finiteQueryQuat(orientation))
@@ -680,6 +690,7 @@ ShapeCastHit World::boxCast(Vec3 center, Vec3 halfExtents, Quat orientation,
 ShapeCastHit World::capsuleCast(Vec3 center, float radius, float halfHeight,
                                 Quat orientation, Vec3 direction, float maxDist,
                                 const QueryFilter& filter) const {
+    AccessGuard guard(*this, AccessKind::Query, "capsuleCast");
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f ||
         !finiteQueryFloat(halfHeight) || halfHeight < 0.0f ||
         !finiteQueryQuat(orientation))

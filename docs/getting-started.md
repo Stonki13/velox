@@ -88,8 +88,10 @@ scene data and replay recordings.
 
 ## Threading and Determinism
 
-Until the thread-safety contract is completed, serialize all access to a
-`World` externally: do not query or mutate it concurrently with `step()`.
+`World` defaults to owner-thread-only access. To issue queries from workers
+or serialize supported mutations against simulation, select a policy before
+sharing the world; see the [threading contract](threading.md). Borrowed
+references from `body()` and `joint()` still require external synchronization.
 
 For deterministic CPU replay across supported compilers, configure with
 `-DVELOX_STRICT_FLOATING_POINT=ON`, then select

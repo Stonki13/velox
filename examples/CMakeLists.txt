@@ -5,6 +5,10 @@ add_executable(stress_demo stress_demo.cpp)
 target_link_libraries(stress_demo PRIVATE velox)
 
 if(BUILD_TESTING)
+    # Run the bounded real-workload health check before the longer stress
+    # process so a failure reports its own scene rather than a late-suite
+    # timeout on heavily loaded Windows runners.
+    add_test(NAME velox.release_gate COMMAND release_gate)
     add_test(NAME velox.stress COMMAND stress_demo)
     add_test(NAME velox.fuzz COMMAND fuzz_demo 40)
     add_test(NAME velox.soak COMMAND fuzz_demo soak 6000)
@@ -13,8 +17,8 @@ if(BUILD_TESTING)
     add_test(NAME velox.serialize COMMAND serialize_demo)
     # Every test normally finishes in seconds; a generous cap turns a rare
     # hang into a fast failure instead of a 25-minute default timeout.
-    set_tests_properties(velox.stress velox.fuzz velox.soak velox.islands
-        velox.vehicle velox.serialize PROPERTIES TIMEOUT 180)
+    set_tests_properties(velox.release_gate velox.stress velox.fuzz velox.soak
+        velox.islands velox.vehicle velox.serialize PROPERTIES TIMEOUT 180)
 endif()
 
 add_executable(benchmark benchmark.cpp)
@@ -28,6 +32,9 @@ target_link_libraries(islands_demo PRIVATE velox)
 
 add_executable(determinism_demo determinism_demo.cpp)
 target_link_libraries(determinism_demo PRIVATE velox)
+
+add_executable(thread_safety_demo thread_safety_demo.cpp)
+target_link_libraries(thread_safety_demo PRIVATE velox)
 
 add_executable(release_gate release_gate.cpp)
 target_link_libraries(release_gate PRIVATE velox)
@@ -43,9 +50,8 @@ target_link_libraries(geometry_fuzz PRIVATE velox)
 if(BUILD_TESTING)
     add_test(NAME velox.geometry_fuzz COMMAND geometry_fuzz 1000)
     add_test(NAME velox.determinism COMMAND determinism_demo)
-    add_test(NAME velox.release_gate COMMAND release_gate)
+    add_test(NAME velox.thread_safety COMMAND thread_safety_demo)
     set_tests_properties(velox.determinism PROPERTIES TIMEOUT 180)
-    set_tests_properties(velox.release_gate PROPERTIES TIMEOUT 180)
 endif()
 
 add_executable(proto_manifold proto_manifold.cpp)

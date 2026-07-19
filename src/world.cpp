@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 
 namespace velox {
 
@@ -149,6 +150,29 @@ void validateRuntimeBody(const Body& body) {
 
 World::~World() = default;
 
+World::AccessGuard::AccessGuard(const World& world, AccessKind kind,
+                                const char* method)
+    : world_(world), lock_(world.accessMutex_) {
+    const bool owner = std::this_thread::get_id() == world_.ownerThread_;
+    if (!owner && kind == AccessKind::Query)
+        ++world_.threadSafetyReport_.queryCallsFromNonMainThread;
+    if (!owner && kind == AccessKind::Step) {
+        ++world_.threadSafetyReport_.stepInvocationsOnNonMainThread;
+        throw std::logic_error(std::string("velox: step() must be called by the World owner thread; ") +
+                               method + " was called from another thread");
+    }
+    if (!owner && kind == AccessKind::Mutation &&
+        world_.threadSafetyPolicy_ != ThreadSafetyPolicy::Concurrent) {
+        ++world_.threadSafetyReport_.mutationCallsDuringStep;
+        throw std::logic_error(std::string("velox: mutation from another thread requires ") +
+                               "ThreadSafetyPolicy::Concurrent (" + method + ")");
+    }
+    if (!owner && kind == AccessKind::Query &&
+        world_.threadSafetyPolicy_ == ThreadSafetyPolicy::Strict)
+        throw std::logic_error(std::string("velox: cross-thread query requires ") +
+                               "ThreadSafetyPolicy::Relaxed or Concurrent (" + method + ")");
+}
+
 void World::resetBackend(BackendType type) {
     backend_.reset();
     if (type != BackendType::Cpu) backend_.reset(createCudaBackend());
@@ -163,13 +187,57 @@ void World::resetBackend(BackendType type) {
 }
 
 World::World(BackendType type)
-    : requestedBackend_(type), broadPhase_(new BroadPhaseData) {
+    : requestedBackend_(type), broadPhase_(new BroadPhaseData),
+      ownerThread_(std::this_thread::get_id()) {
     resetBackend(type);
 }
 
-const char* World::backendName() const { return backend_->name(); }
+ThreadSafetyPolicy World::threadSafetyPolicy() const {
+    AccessGuard guard(*this, AccessKind::Query, "threadSafetyPolicy");
+    return threadSafetyPolicy_;
+}
+
+void World::setThreadSafetyPolicy(ThreadSafetyPolicy policy) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setThreadSafetyPolicy");
+    if (policy != ThreadSafetyPolicy::Strict &&
+        policy != ThreadSafetyPolicy::Relaxed &&
+        policy != ThreadSafetyPolicy::Concurrent)
+        throw std::invalid_argument("velox: invalid thread safety policy");
+    threadSafetyPolicy_ = policy;
+}
+
+ThreadSafetyReport World::threadSafetyReport() const {
+    AccessGuard guard(*this, AccessKind::Query, "threadSafetyReport");
+    return threadSafetyReport_;
+}
+
+const char* World::backendName() const {
+    AccessGuard guard(*this, AccessKind::Query, "backendName");
+    return backend_->name();
+}
+
+DeterminismMode World::determinismMode() const {
+    AccessGuard guard(*this, AccessKind::Query, "determinismMode");
+    return determinismMode_;
+}
+
+IslandSolvingMode World::islandSolvingMode() const {
+    AccessGuard guard(*this, AccessKind::Query, "islandSolvingMode");
+    return islandSolvingMode_;
+}
+
+void World::setWorkerCount(uint32_t count) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setWorkerCount");
+    backend_->setWorkerCount(count);
+}
+
+uint32_t World::workerCount() const {
+    AccessGuard guard(*this, AccessKind::Query, "workerCount");
+    return backend_->workerCount();
+}
 
 void World::setDeterminismMode(DeterminismMode mode) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setDeterminismMode");
     if (mode != DeterminismMode::Relaxed && mode != DeterminismMode::Strict)
         throw std::invalid_argument("velox: invalid determinism mode");
     if (mode == determinismMode_) return;
@@ -194,6 +262,7 @@ void World::setDeterminismMode(DeterminismMode mode) {
 }
 
 void World::setIslandSolvingMode(IslandSolvingMode mode) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setIslandSolvingMode");
     if (mode != IslandSolvingMode::Sequential && mode != IslandSolvingMode::Parallel)
         throw std::invalid_argument("velox: invalid island solving mode");
     if (determinismMode_ == DeterminismMode::Strict &&
@@ -204,13 +273,15 @@ void World::setIslandSolvingMode(IslandSolvingMode mode) {
     backend_->setParallelIslands(mode == IslandSolvingMode::Parallel);
 }
 
-bool World::isValid(BodyId id) const noexcept {
+bool World::isValid(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isValid");
     uint32_t slot = id.slot();
     return slot < bodySlots_.size() && bodySlots_[slot].dense != UINT32_MAX &&
            bodySlots_[slot].generation == id.generation();
 }
 
-bool World::isValid(JointId id) const noexcept {
+bool World::isValid(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isValid");
     uint32_t slot = id.slot();
     return slot < jointSlots_.size() && jointSlots_[slot].dense != UINT32_MAX &&
            jointSlots_[slot].generation == id.generation();
@@ -268,6 +339,7 @@ JointId World::addJoint(Joint jointValue) {
 }
 
 Body& World::body(BodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "body");
     // Mutable access can change transforms, velocities, or shape parameters:
     // the broad-phase proxies must re-fit before the tree is trusted again.
     broadPhase_->touched = true;
@@ -275,22 +347,47 @@ Body& World::body(BodyId id) {
 }
 
 const Body& World::body(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "body");
     return bodies_[resolve(id)];
 }
 
 GeometryDiagnostics World::queryGeometryDiagnostics(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "queryGeometryDiagnostics");
     return geometry_detail::diagnostics(bodies_[resolve(id)], meshes_);
 }
 
+Body World::bodyState(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "bodyState");
+    return bodies_[resolve(id)];
+}
+
+size_t World::bodyCount() const {
+    AccessGuard guard(*this, AccessKind::Query, "bodyCount");
+    return bodies_.size();
+}
+
+StepStats World::lastStepStatsCopy() const {
+    AccessGuard guard(*this, AccessKind::Query, "lastStepStatsCopy");
+    return lastStepStats_;
+}
+
 Joint& World::joint(JointId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "joint");
     return joints_[resolve(id)];
 }
 
 const Joint& World::joint(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "joint");
+    return joints_[resolve(id)];
+}
+
+Joint World::jointState(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "jointState");
     return joints_[resolve(id)];
 }
 
 BodyId World::addSphere(Vec3 position, float radius, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addSphere");
     requireFiniteVec(position, "velox: sphere position must be finite");
     requirePositive(radius, "velox: sphere radius must be finite and positive");
     requireMass(mass);
@@ -308,6 +405,7 @@ BodyId World::addSphere(Vec3 position, float radius, float mass) {
 }
 
 BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addBox");
     requireFiniteVec(position, "velox: box position must be finite");
     requireFiniteVec(halfExtents, "velox: box half extents must be finite");
     if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
@@ -330,6 +428,7 @@ BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
 }
 
 BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addCapsule");
     requireFiniteVec(position, "velox: capsule position must be finite");
     requirePositive(radius, "velox: capsule radius must be finite and positive");
     requireNonNegative(halfHeight, "velox: capsule half height must be finite and non-negative");
@@ -364,6 +463,7 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
 }
 
 BodyId World::addCylinder(Vec3 position, float radius, float halfHeight, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addCylinder");
     requireFiniteVec(position, "velox: cylinder position must be finite");
     requirePositive(radius, "velox: cylinder radius must be finite and positive");
     requirePositive(halfHeight,
@@ -386,6 +486,7 @@ BodyId World::addCylinder(Vec3 position, float radius, float halfHeight, float m
 }
 
 BodyId World::addCone(Vec3 position, float radius, float height, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addCone");
     requireFiniteVec(position, "velox: cone position must be finite");
     requirePositive(radius, "velox: cone radius must be finite and positive");
     requirePositive(height, "velox: cone height must be finite and positive");
@@ -407,6 +508,7 @@ BodyId World::addCone(Vec3 position, float radius, float height, float mass) {
 }
 
 BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addConvexHull");
     requireFiniteVec(position, "velox: convex hull position must be finite");
     requireMass(mass);
     if (points.size() < 4)
@@ -484,7 +586,8 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
 }
 
 BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shapes,
-                          float mass) {
+                           float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addCompound");
     requireFiniteVec(position, "velox: compound position must be finite");
     requireMass(mass);
     if (shapes.empty())
@@ -761,6 +864,7 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
 }
 
 BodyId World::addStaticPlane(Vec3 normal, float offset) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addStaticPlane");
     requireFiniteVec(normal, "velox: plane normal must be finite");
     if (lengthSq(normal) < 1e-12f)
         throw std::invalid_argument("velox: plane normal must be non-zero");
@@ -835,6 +939,7 @@ struct BvhBuilder {
 
 BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
                             const std::vector<uint32_t>& indices) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addStaticMesh");
     if (vertices.size() < 3 || indices.empty() || indices.size() % 3 != 0)
         throw std::invalid_argument("velox: mesh requires vertices and complete triangles");
     if (vertices.size() > UINT32_MAX || indices.size() > UINT32_MAX)
@@ -897,6 +1002,7 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
 
 BodyId World::addStaticHeightfield(uint32_t width, uint32_t depth, float cellSize,
                                    const std::vector<float>& heights, Vec3 origin) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addStaticHeightfield");
     if (width < 2 || depth < 2)
         throw std::invalid_argument("velox: heightfield requires at least 2x2 samples");
     requirePositive(cellSize, "velox: heightfield cell size must be positive");
@@ -931,9 +1037,35 @@ BodyId World::addStaticHeightfield(uint32_t width, uint32_t depth, float cellSiz
     return addStaticMesh(vertices, indices);
 }
 
-MotionType World::motionType(BodyId id) const { return body(id).motionType; }
+void World::setGravity(Vec3 value) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setGravity");
+    requireFiniteVec(value, "velox: gravity must be finite");
+    gravity = value;
+}
+
+Vec3 World::gravityValue() const {
+    AccessGuard guard(*this, AccessKind::Query, "gravityValue");
+    return gravity;
+}
+
+void World::setSubsteps(int value) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setSubsteps");
+    if (value <= 0) throw std::invalid_argument("velox: substeps must be positive");
+    substeps = value;
+}
+
+int World::substepCount() const {
+    AccessGuard guard(*this, AccessKind::Query, "substepCount");
+    return substeps;
+}
+
+MotionType World::motionType(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "motionType");
+    return bodies_[resolve(id)].motionType;
+}
 
 void World::setMotionType(BodyId id, MotionType type) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setMotionType");
     Body& b = body(id);
     if ((b.shape == ShapeType::Plane || b.shape == ShapeType::Mesh) &&
         type != MotionType::Static)
@@ -951,6 +1083,7 @@ void World::setMotionType(BodyId id, MotionType type) {
 
 void World::setMassProperties(BodyId id, float mass, Vec3 principalInertia,
                               Quat principalOrientation) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setMassProperties");
     requirePositive(mass, "velox: body mass must be finite and positive");
     requireFiniteVec(principalInertia,
                      "velox: principal inertia must be finite");
@@ -990,6 +1123,7 @@ void World::setMassProperties(BodyId id, float mass, Vec3 principalInertia,
 }
 
 void World::setTransform(BodyId id, Vec3 position, Quat orientation) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setTransform");
     requireFiniteVec(position, "velox: body position must be finite");
     if (!finiteQuat(orientation))
         throw std::invalid_argument("velox: body orientation must be finite");
@@ -1006,6 +1140,7 @@ void World::setTransform(BodyId id, Vec3 position, Quat orientation) {
 }
 
 void World::setLinearVelocity(BodyId id, Vec3 velocity) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setLinearVelocity");
     requireFiniteVec(velocity, "velox: linear velocity must be finite");
     Body& b = body(id);
     if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
@@ -1014,6 +1149,7 @@ void World::setLinearVelocity(BodyId id, Vec3 velocity) {
 }
 
 void World::setAngularVelocity(BodyId id, Vec3 velocity) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setAngularVelocity");
     requireFiniteVec(velocity, "velox: angular velocity must be finite");
     Body& b = body(id);
     if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
@@ -1022,6 +1158,7 @@ void World::setAngularVelocity(BodyId id, Vec3 velocity) {
 }
 
 void World::addForce(BodyId id, Vec3 force) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addForce");
     requireFiniteVec(force, "velox: force must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: forces require a dynamic body");
@@ -1030,6 +1167,7 @@ void World::addForce(BodyId id, Vec3 force) {
 }
 
 void World::addForceAtPoint(BodyId id, Vec3 force, Vec3 worldPoint) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addForceAtPoint");
     requireFiniteVec(force, "velox: force must be finite");
     requireFiniteVec(worldPoint, "velox: force point must be finite");
     Body& b = body(id);
@@ -1040,6 +1178,7 @@ void World::addForceAtPoint(BodyId id, Vec3 force, Vec3 worldPoint) {
 }
 
 void World::addTorque(BodyId id, Vec3 torque) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addTorque");
     requireFiniteVec(torque, "velox: torque must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: torque requires a dynamic body");
@@ -1048,6 +1187,7 @@ void World::addTorque(BodyId id, Vec3 torque) {
 }
 
 void World::addLinearImpulse(BodyId id, Vec3 impulse) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addLinearImpulse");
     requireFiniteVec(impulse, "velox: impulse must be finite");
     Body& b = body(id);
     if (!b.isDynamic()) throw std::invalid_argument("velox: impulses require a dynamic body");
@@ -1056,6 +1196,7 @@ void World::addLinearImpulse(BodyId id, Vec3 impulse) {
 }
 
 void World::addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addImpulseAtPoint");
     requireFiniteVec(impulse, "velox: impulse must be finite");
     requireFiniteVec(worldPoint, "velox: impulse point must be finite");
     Body& b = body(id);
@@ -1066,12 +1207,14 @@ void World::addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint) {
 }
 
 void World::clearForces(BodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "clearForces");
     Body& b = body(id);
     b.force = {};
     b.torque = {};
 }
 
 void World::shiftOrigin(Vec3 offset) {
+    AccessGuard guard(*this, AccessKind::Mutation, "shiftOrigin");
     requireFiniteVec(offset, "velox: origin shift must be finite");
     broadPhase_->structureDirty = true; // all stored bounds move wholesale
 
@@ -1131,6 +1274,7 @@ void World::shiftOrigin(Vec3 offset) {
 }
 
 WorldSnapshot World::saveSnapshot() const {
+    AccessGuard guard(*this, AccessKind::Query, "saveSnapshot");
     WorldSnapshot snapshot;
     snapshot.owner_ = this;
     snapshot.gravity_ = gravity;
@@ -1164,6 +1308,7 @@ WorldSnapshot World::saveSnapshot() const {
 }
 
 void World::restoreSnapshot(const WorldSnapshot& snapshot) {
+    AccessGuard guard(*this, AccessKind::Mutation, "restoreSnapshot");
     if (snapshot.owner_ != this)
         throw std::invalid_argument(
             "velox: a snapshot can only be restored to its originating world");
@@ -1210,6 +1355,7 @@ void World::restoreSnapshot(const WorldSnapshot& snapshot) {
 }
 
 JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addBallJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: ball-joint anchor must be finite");
@@ -1222,6 +1368,7 @@ JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
 }
 
 JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addDistanceJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchorA, "velox: distance-joint anchor must be finite");
@@ -1238,6 +1385,7 @@ JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worl
 JointId World::addSpringJoint(BodyId a, BodyId b, Vec3 worldAnchorA,
                               Vec3 worldAnchorB, float frequencyHz,
                               float dampingRatio) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addSpringJoint");
     requirePositive(frequencyHz,
                     "velox: spring frequency must be finite and positive");
     requireNonNegative(dampingRatio,
@@ -1251,6 +1399,7 @@ JointId World::addSpringJoint(BodyId a, BodyId b, Vec3 worldAnchorA,
 }
 
 JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addHingeJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: hinge anchor must be finite");
@@ -1274,6 +1423,7 @@ JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxi
 }
 
 JointId World::addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addConeTwistJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: cone/twist anchor must be finite");
@@ -1297,6 +1447,7 @@ JointId World::addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worl
 }
 
 JointId World::addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addFixedJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: fixed-joint anchor must be finite");
@@ -1316,6 +1467,7 @@ JointId World::addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
 
 JointId World::addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor,
                                  Vec3 worldAxis) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addPrismaticJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: prismatic-joint anchor must be finite");
@@ -1340,6 +1492,7 @@ JointId World::addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor,
 }
 
 JointId World::addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addSixDofJoint");
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: 6DoF-joint anchor must be finite");
@@ -1358,6 +1511,7 @@ JointId World::addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
 }
 
 float World::hingeAngle(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "hingeAngle");
     const Joint& j = joint(id);
     if (j.type != JointType::Hinge)
         throw std::invalid_argument("velox: hingeAngle requires a hinge joint");
@@ -1373,6 +1527,7 @@ float World::hingeAngle(JointId id) const {
 }
 
 float World::coneSwingAngle(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "coneSwingAngle");
     const Joint& j = joint(id);
     if (j.type != JointType::ConeTwist)
         throw std::invalid_argument("velox: coneSwingAngle requires a cone/twist joint");
@@ -1382,6 +1537,7 @@ float World::coneSwingAngle(JointId id) const {
 }
 
 float World::coneTwistAngle(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "coneTwistAngle");
     const Joint& j = joint(id);
     if (j.type != JointType::ConeTwist)
         throw std::invalid_argument("velox: coneTwistAngle requires a cone/twist joint");
@@ -1395,6 +1551,7 @@ float World::coneTwistAngle(JointId id) const {
 }
 
 float World::prismaticTranslation(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "prismaticTranslation");
     const Joint& j = joint(id);
     if (j.type != JointType::Prismatic)
         throw std::invalid_argument(
@@ -1408,6 +1565,7 @@ float World::prismaticTranslation(JointId id) const {
 }
 
 Vec3 World::sixDofLinearTranslation(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "sixDofLinearTranslation");
     const Joint& j = joint(id);
     if (j.type != JointType::SixDof)
         throw std::invalid_argument(
@@ -1423,6 +1581,7 @@ Vec3 World::sixDofLinearTranslation(JointId id) const {
 }
 
 Vec3 World::sixDofAngularRotation(JointId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "sixDofAngularRotation");
     const Joint& j = joint(id);
     if (j.type != JointType::SixDof)
         throw std::invalid_argument(
@@ -1431,6 +1590,7 @@ Vec3 World::sixDofAngularRotation(JointId id) const {
 }
 
 void World::wake(BodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "wake");
     Body& b = body(id);
     b.asleep = 0;
     b.sleepTimer = 0.0f;
@@ -1542,7 +1702,15 @@ void World::buildCandidatePairs(float dt) {
         candidatePairs_.end());
 }
 
-bool World::isAwake(BodyId id) const { return !body(id).asleep; }
+bool World::isAwake(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isAwake");
+    return !bodies_[resolve(id)].asleep;
+}
+
+void World::setContactModifier(ContactModifier modifier) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setContactModifier");
+    contactModifier_ = std::move(modifier);
+}
 
 void World::removeJointDense(uint32_t dense) {
     uint32_t last = static_cast<uint32_t>(joints_.size() - 1);
@@ -1564,9 +1732,13 @@ void World::removeJointDense(uint32_t dense) {
     }
 }
 
-void World::removeJoint(JointId id) { removeJointDense(resolve(id)); }
+void World::removeJoint(JointId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "removeJoint");
+    removeJointDense(resolve(id));
+}
 
 void World::removeBody(BodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "removeBody");
     BodyIndex dense = resolve(id);
     broadPhase_->structureDirty = true; // dense indices reshuffle on removal
 
@@ -2226,6 +2398,7 @@ void World::updateSleeping(float dt) {
 //    (rotation included) to the moment of first contact. Tunneling stays
 //    impossible regardless of linear or angular speed.
 void World::step(float dt) {
+    AccessGuard guard(*this, AccessKind::Step, "step");
     using Clock = std::chrono::steady_clock;
     const auto stepStart = Clock::now();
     lastStepStats_ = {};
