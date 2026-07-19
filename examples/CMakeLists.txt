@@ -29,6 +29,9 @@ target_link_libraries(islands_demo PRIVATE velox)
 add_executable(determinism_demo determinism_demo.cpp)
 target_link_libraries(determinism_demo PRIVATE velox)
 
+add_executable(release_gate release_gate.cpp)
+target_link_libraries(release_gate PRIVATE velox)
+
 add_executable(vehicle_demo vehicle_demo.cpp)
 target_link_libraries(vehicle_demo PRIVATE velox)
 
@@ -40,7 +43,9 @@ target_link_libraries(geometry_fuzz PRIVATE velox)
 if(BUILD_TESTING)
     add_test(NAME velox.geometry_fuzz COMMAND geometry_fuzz 1000)
     add_test(NAME velox.determinism COMMAND determinism_demo)
+    add_test(NAME velox.release_gate COMMAND release_gate)
     set_tests_properties(velox.determinism PROPERTIES TIMEOUT 180)
+    set_tests_properties(velox.release_gate PROPERTIES TIMEOUT 180)
 endif()
 
 add_executable(proto_manifold proto_manifold.cpp)
