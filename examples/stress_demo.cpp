@@ -2214,6 +2214,29 @@ static void testCcdConfigurationAndMultiToiQuery() {
     const bool cudaHighChainImpact = std::string(autoProbe.backendName()) != "cuda" ||
                                      chainMatchesExpected(runHighChain(velox::BackendType::Auto));
 
+    velox::World staircase(velox::BackendType::Cpu);
+    staircase.gravity = {0, 0, 0};
+    staircase.setCcdDefaults(defaults);
+    velox::WorldMultiToiSettings stairSettings = multiSettings;
+    stairSettings.defaultConfig.maxToiEventsPerBody = 16;
+    stairSettings.maxTotalEventsPerStep = 64;
+    staircase.setMultiToiSettings(stairSettings);
+    for (int step = 0; step < 10; ++step) {
+        const float x = static_cast<float>(step) * 0.1f;
+        const float y = static_cast<float>(10 - step) * 0.1f;
+        staircase.addBox({x, y - 1.0f, 0}, {0.05f, 1.0f, 1.0f}, 0.0f);
+        staircase.addBox({x + 0.05f, y - 0.05f, 0}, {0.05f, 0.05f, 1.0f}, 0.0f);
+    }
+    const auto stairBox = staircase.addBox({0.02f, 1.2f, 0}, {0.04f, 0.04f, 0.04f},
+                                           1.0f);
+    staircase.body(stairBox).restitution = 0.0f;
+    staircase.setLinearVelocity(stairBox, {100, -1000, 0});
+    staircase.step(0.01f);
+    const velox::Body stairBoxAfter = staircase.bodyState(stairBox);
+    const bool stairGrazing = staircase.lastStepStats().multiToiEvents >= 8 &&
+                              stairBoxAfter.position.x > 0.95f &&
+                              stairBoxAfter.position.y > 0.15f;
+
     const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
     velox::BodyCcdTuning locked = w.ccdTuning(frozen);
     locked.quality = velox::MotionQuality::Locked;
@@ -2235,7 +2258,7 @@ static void testCcdConfigurationAndMultiToiQuery() {
     const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
                            std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
     check(ordered && capped && steppedImpact && sequentialImpacts && eventCap && dynamicImpact &&
-              dynamicChainImpact && cudaHighChainImpact &&
+              dynamicChainImpact && cudaHighChainImpact && stairGrazing &&
               immobile && inherited && restoredSettings,
           "CCD tuning, locked body, and ordered multi-TOI query");
 }

@@ -35,7 +35,9 @@ both bodies, and preserves the center of mass. A three-body High chain reports
 two events: the first transfers momentum to the middle body and the scheduler
 then finds and resolves its newly possible collision with the third body. The
 same chain also passes through the CUDA Auto backend, exercising the required
-host fallback after GPU substeps. The CUDA-enabled stress suite remained green.
+host fallback after GPU substeps. A High box grazing a ten-step, 0.1 m-rise/run
+staircase records at least eight events and remains above the final step rather
+than tunneling through it. The CUDA-enabled stress suite remained green.
 
 After the shared timeline pass, the full CUDA-enabled CTest suite passed all 13
 tests, `fuzz_demo 80` passed twice, and `proto_manifold` passed all eight
@@ -45,10 +47,22 @@ scene at 11.574 ms (CPU-1), 6.077 ms (CPU-auto), and 6.821 ms (CUDA); the
 The High path is inactive unless a body explicitly selects it, so it adds no
 work to those default workloads.
 
-## Remaining Work
+## Scope And Follow-Up
 
-This does **not** complete roadmap item 03. Static and opt-in High/High dynamic
-pairs are handled chronologically, but mixed-quality dynamic pairs deliberately
-fall back to PCS. The bullet/staircase integration acceptance tests and a
-GPU-native multi-TOI implementation remain required before claiming complete
-multi-TOI CCD.
+Roadmap item 03 is complete for the portable CPU event scheduler and the CUDA
+host fallback: it has sequential static and High/High dynamic impacts, strict
+global event selection, restitution/momentum checks, event caps, a staircase
+regression, and CUDA fallback coverage. Static geometry and opt-in High/High
+dynamic pairs are handled chronologically; mixed-quality dynamic pairs
+deliberately retain PCS so that the scheduler never rewinds one side of a
+shared momentum interaction.
+
+A GPU-native multi-TOI event scheduler remains a performance follow-up, not a
+correctness limitation. It would avoid invalidating the CUDA caches after a
+High-quality replay, but it is not required for the documented CPU fallback.
+
+## Merge Recommendation
+
+Ready to merge after normal review. The implementation is bounded by per-body
+and global caps, is opt-in through `MotionQuality::High`, and the default
+Medium-quality workload path remains unchanged.
