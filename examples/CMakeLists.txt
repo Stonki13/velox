@@ -4,11 +4,15 @@ target_link_libraries(bullet_demo PRIVATE velox)
 add_executable(hello_velox hello_velox.cpp)
 target_link_libraries(hello_velox PRIVATE velox)
 
+add_executable(contact_events contact_events.cpp)
+target_link_libraries(contact_events PRIVATE velox)
+
 add_executable(stress_demo stress_demo.cpp)
 target_link_libraries(stress_demo PRIVATE velox)
 
 if(BUILD_TESTING)
     add_test(NAME velox.hello COMMAND hello_velox)
+    add_test(NAME velox.contact_events COMMAND contact_events)
     # Run the bounded real-workload health check before the longer stress
     # process so a failure reports its own scene rather than a late-suite
     # timeout on heavily loaded Windows runners.
