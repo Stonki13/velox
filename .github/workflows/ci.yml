@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '17 3 * * *'
 
 jobs:
   cpu:
@@ -91,3 +93,34 @@ jobs:
           tr -d '\r' < <(cat traces/strict-trace-*.txt) | sort -u > distinct-traces.txt
           test "$(wc -l < distinct-traces.txt)" -eq 1
           cat distinct-traces.txt
+
+  documentation:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install --yes doxygen
+      - name: Build API reference
+        run: doxygen docs/Doxyfile
+      - name: Require generated index
+        run: test -f docs/api-reference/html/index.html
+
+  nightly-reliability:
+    name: Nightly reliability
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CPU release build
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Extended fuzz corpus
+        run: build/examples/fuzz_demo 1000
+      - name: Extended geometry metamorphics
+        run: build/examples/geometry_fuzz 20000
+      - name: Long-duration soak
+        run: build/examples/fuzz_demo soak 60000
