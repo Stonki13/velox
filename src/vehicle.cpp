@@ -40,10 +40,24 @@ void Vehicle::AddDefaultWheels() {
     const float x = half.x * 0.9f;
     const float z = half.z * 0.72f;
     const float y = -half.y * 0.4f;
+    // Quarter-car tuning: spring rate and damping derived from the sprung
+    // corner mass and the configured ride frequency / damping ratio.
+    const float cornerMass = config_.chassisMass * 0.25f;
+    const float omega = 2.0f * 3.14159265f * config_.suspensionFrequencyHz;
+    const float stiffness = cornerMass * omega * omega;
+    const float damping =
+        2.0f * config_.suspensionDampingRatio * std::sqrt(stiffness * cornerMass);
     for (int i = 0; i < 4; ++i) {
         WheelConfig wheel;
         const bool front = i < 2;
         wheel.localPosition = {i % 2 == 0 ? -x : x, y, front ? z : -z};
+        wheel.suspensionStiffness = stiffness;
+        wheel.suspensionDamping = damping;
+        wheel.suspensionRestLength = 0.42f;
+        wheel.suspensionCompression = 0.16f;
+        wheel.suspensionExtension = 0.28f;
+        wheel.lateralFriction = config_.defaultTireFriction;
+        wheel.longitudinalFriction = config_.defaultTireFriction;
         wheel.steerable = front;
         wheel.driven = config_.drivetrain == DrivetrainType::AWD ||
                        (config_.drivetrain == DrivetrainType::FWD) == front;
@@ -129,6 +143,15 @@ void Vehicle::Step(float dt) {
         const float compressionRate = dot(hubVelocity, down);
         float suspensionForce = wheel.suspensionStiffness * compression +
                                 wheel.suspensionDamping * compressionRate;
+        // Progressive bump stop over the last 25% of compression travel:
+        // real dampers stiffen sharply near the end instead of clanging into
+        // a hard limit (and it keeps soft ride rates from bottoming out).
+        const float bumpStart = 0.75f * wheel.suspensionCompression;
+        if (compression > bumpStart) {
+            const float excess = compression - bumpStart;
+            suspensionForce += 8.0f * wheel.suspensionStiffness * excess *
+                               (1.0f + excess / (wheel.suspensionCompression - bumpStart));
+        }
         suspensionForce = std::max(0.0f, suspensionForce);
         state.compression = compression;
         state.suspensionForce = suspensionForce;
@@ -168,9 +191,14 @@ void Vehicle::Step(float dt) {
             longitudinalForce *= scale;
             lateralForce *= scale;
         }
-        world_.addForceAtPoint(chassis_,
-                               forward * longitudinalForce + side * lateralForce,
-                               hit.point);
+        // Longitudinal force acts at the contact patch (weight transfer under
+        // throttle/braking); lateral force acts at the suspension roll center
+        // so a tall chassis leans like a road car instead of tripping over
+        // its own grip.
+        world_.addForceAtPoint(chassis_, forward * longitudinalForce, hit.point);
+        const Vec3 rollCenter =
+            hit.point + (body.position - hit.point) * config_.lateralRollCenterFactor;
+        world_.addForceAtPoint(chassis_, side * lateralForce, rollCenter);
 
         // Wheel spin integration: drive torque, brake torque, and the ground
         // reaction from the tire force.
@@ -185,10 +213,14 @@ void Vehicle::Step(float dt) {
             if (std::fabs(state.spinVelocity) <= brakeDelta) state.spinVelocity = 0.0f;
             else state.spinVelocity -= brakeDelta * (state.spinVelocity > 0.0f ? 1.0f : -1.0f);
         }
-        // Grounded free-rolling relaxation toward ground speed.
-        const float targetSpin = vForward / wheel.radius;
-        state.spinVelocity += (targetSpin - state.spinVelocity) *
-                              std::min(1.0f, 8.0f * dt);
+        // Grounded free-rolling relaxation toward ground speed — but NOT
+        // while braking: it would erase the very slip the brake torque
+        // creates and cap deceleration far below the tire's grip.
+        if (brakeTorqueMax <= 0.0f) {
+            const float targetSpin = vForward / wheel.radius;
+            state.spinVelocity += (targetSpin - state.spinVelocity) *
+                                  std::min(1.0f, 8.0f * dt);
+        }
         state.rotation += state.spinVelocity * dt;
         if (wheel.driven) drivenSpinSum += std::fabs(state.spinVelocity);
     }

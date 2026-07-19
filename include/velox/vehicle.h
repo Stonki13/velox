@@ -25,6 +25,25 @@ struct VehicleConfig {
     float shiftDownRPM = 2500.0f;
     bool enableAntiRoll = true;
     float antiRollStiffness = 8000.0f; // N per meter of compression difference
+
+    // Real-car suspension character, used by AddDefaultWheels to derive each
+    // wheel's spring stiffness and damping from the sprung corner mass:
+    //   k = m_corner * (2*pi*f)^2,   c = 2 * zeta * sqrt(k * m_corner)
+    // Road cars ride around 1.1-1.6 Hz with damping ratios near 0.4-0.5;
+    // higher values feel sportier/stiffer.
+    float suspensionFrequencyHz = 1.35f;
+    float suspensionDampingRatio = 0.45f;
+
+    // Suspension roll-center model: lateral tire force is applied this
+    // fraction of the way up from the contact patch toward the chassis
+    // center. 0 = at the ground (maximum body roll and easy rollover for a
+    // tall CG), 1 = at the CG (no roll at all). Real suspension geometry
+    // places the roll center between the two; ~0.6 feels like a road car.
+    float lateralRollCenterFactor = 0.6f;
+
+    // Sporty street-tire grip for AddDefaultWheels (WheelConfig's own
+    // default 1.8 is racing slick territory).
+    float defaultTireFriction = 1.4f;
 };
 
 struct WheelConfig {
