@@ -445,6 +445,7 @@ uint32_t World::workerCount() const {
 void World::setTaskSystem(TaskSystem* system) {
     AccessGuard guard(*this, AccessKind::Mutation, "setTaskSystem");
     taskSystem_ = system;
+    backend_->setTaskSystem(system);
 }
 
 TaskSystem* World::taskSystem() const {

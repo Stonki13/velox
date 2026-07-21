@@ -196,12 +196,21 @@ public:
 
     void setParallelIslands(bool enabled) override { parallelIslands_ = enabled; }
 
+    void setTaskSystem(TaskSystem* system) override { externalTasks_ = system; }
+
     void parallelChunks(size_t items, size_t minPerChunk,
                         const std::function<void(size_t, size_t, size_t)>& fn,
                         size_t* chunkCountOut) override {
         size_t chunks = chunkCount(items, minPerChunk);
         if (chunkCountOut) *chunkCountOut = chunks;
         if (chunks == 0) return;
+        if (externalTasks_) {
+            externalTasks_->parallelFor(0, chunks, 1, [&](size_t begin, size_t end) {
+                for (size_t chunk = begin; chunk < end; ++chunk)
+                    fn(chunk, items * chunk / chunks, items * (chunk + 1) / chunks);
+            });
+            return;
+        }
         workers_.parallelFor(chunks, [&](size_t chunk) {
             fn(chunk, items * chunk / chunks, items * (chunk + 1) / chunks);
         });
@@ -506,6 +515,13 @@ private:
     template <typename F>
     void dispatchChunks(size_t items, size_t parallelThreshold, F&& function) {
         size_t chunks = chunkCount(items, parallelThreshold);
+        if (externalTasks_) {
+            externalTasks_->parallelFor(0, chunks, 1, [&](size_t begin, size_t end) {
+                for (size_t chunk = begin; chunk < end; ++chunk)
+                    function(items * chunk / chunks, items * (chunk + 1) / chunks);
+            });
+            return;
+        }
         workers_.parallelFor(chunks, [&](size_t chunk) {
             function(items * chunk / chunks, items * (chunk + 1) / chunks);
         });
@@ -513,6 +529,7 @@ private:
 
     struct Aabb { Vec3 lo, hi; };
     WorkerPool workers_;
+    TaskSystem* externalTasks_ = nullptr;
     bool parallelIslands_ = true;
     std::vector<uint32_t> islandParent_;
     std::vector<uint32_t> islandIdOfRoot_;

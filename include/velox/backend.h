@@ -1,6 +1,7 @@
 #pragma once
 #include "joint.h"
 #include "solver.h"
+#include "task_system.h"
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -148,6 +149,9 @@ public:
     // Bitwise identical to sequential solving because islands share no
     // dynamic bodies. GPU backends ignore it (graph coloring instead).
     virtual void setParallelIslands(bool) {}
+    // Inject an external task system for parallel work distribution.
+    // Pass nullptr to use the internal worker pool.
+    virtual void setTaskSystem(TaskSystem*) {}
     // Number of velocity sweeps performed by the latest solve call. This is
     // reported through StepStats so adaptive policies are observable.
     virtual uint32_t lastVelocityIterations() const { return 0; }
