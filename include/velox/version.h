@@ -24,3 +24,21 @@ inline constexpr const char* versionString() { return kVersionString; }
 #else
 #define VELOX_DEPRECATED(message)
 #endif
+
+#if defined(VELOX_BUILDING_SHARED)
+  #if defined(_MSC_VER)
+    #define VELOX_API __declspec(dllexport)
+  #elif defined(__GNUC__) || defined(__clang__)
+    #define VELOX_API __attribute__((visibility("default")))
+  #else
+    #define VELOX_API
+  #endif
+#elif defined(VELOX_USING_SHARED)
+  #if defined(_MSC_VER)
+    #define VELOX_API __declspec(dllimport)
+  #else
+    #define VELOX_API
+  #endif
+#else
+  #define VELOX_API
+#endif

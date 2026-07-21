@@ -67,7 +67,7 @@ struct CompoundChild {
 
 // Data-oriented body layout: plain structs in contiguous arrays so the same
 // data can be uploaded to a GPU backend unchanged.
-struct Body {
+struct alignas(64) Body {
     Vec3 position;
     Quat orientation;
     Vec3 velocity;

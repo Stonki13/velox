@@ -59,7 +59,7 @@ VELOX_HD inline Body compoundChildBody(const Body& parent,
 // the relative motion could close the gap within the step. gap > 0 means
 // "not yet touching"; the solver only removes approach velocity in excess of
 // gap/dt, so grazing bodies are never artificially stopped.
-struct Contact {
+struct alignas(64) Contact {
     BodyIndex a, b;
     uint64_t featureKey;  // stable shape-feature pair; 0 when unavailable
     Vec3 normal;          // from b towards a
