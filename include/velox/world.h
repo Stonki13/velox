@@ -542,6 +542,7 @@ private:
     std::vector<ContactEvent> events_;
     std::vector<JointBreakEvent> jointBreakEvents_;
     std::vector<BodyEvent> bodyEvents_;
+    std::vector<BodyEvent> pendingBodyEvents_;
     std::vector<uint64_t> prevPairKeys_;
     ContactModifier contactModifier_;
     IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;

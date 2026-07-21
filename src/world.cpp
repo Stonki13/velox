@@ -601,7 +601,9 @@ BodyId World::addBody(Body bodyValue) {
     bodies_.push_back(bodyValue);
     bodyDenseToSlot_.push_back(slot);
     bodySlots_[slot].dense = dense;
-    return BodyId::make(slot, bodySlots_[slot].generation);
+    BodyId id = BodyId::make(slot, bodySlots_[slot].generation);
+    pendingBodyEvents_.push_back({BodyEventType::Created, id, bodyValue.position, bodyValue.orientation});
+    return id;
 }
 
 JointId World::addJoint(Joint jointValue) {
@@ -2426,6 +2428,7 @@ void World::removeJoint(JointId id) {
 void World::removeBody(BodyId id) {
     AccessGuard guard(*this, AccessKind::Mutation, "removeBody");
     BodyIndex dense = resolve(id);
+    pendingBodyEvents_.push_back({BodyEventType::Destroyed, id, bodies_[dense].position, bodies_[dense].orientation});
     broadPhase_->structureDirty = true; // dense indices reshuffle on removal
 
     // Removing an endpoint also removes every constraint that references it.
@@ -3350,6 +3353,8 @@ void World::stepImpl(float dt) {
     }
     jointBreakEvents_.clear();
     bodyEvents_.clear();
+    bodyEvents_.swap(pendingBodyEvents_);
+    pendingBodyEvents_.clear();
     if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
     if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
     for (Body& body : bodies_) {
