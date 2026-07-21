@@ -3230,13 +3230,22 @@ void World::stepImpl(float dt) {
     std::vector<Body> highToiStarts;
     if (hasHighStaticToi) highToiStarts = bodies_;
     const std::vector<uint64_t>* hostPairs = nullptr;
+    const auto broadPhaseStart = Clock::now();
     if (backend_->wantsHostPairs()) {
         buildCandidatePairs(dt); // incremental AABB-tree broad phase
         hostPairs = &candidatePairs_;
     }
+    const auto broadPhaseEnd = Clock::now();
     backend_->findContacts(bodies_, meshes_, dt, hostPairs, contacts_);
     const auto detectionEnd = Clock::now();
     lastStepStats_.generatedContacts = contacts_.size();
+    lastStepStats_.narrowPhaseTests = candidatePairs_.size();
+    {
+        size_t proxyCount = 0;
+        for (int32_t p : broadPhase_->proxies)
+            if (p >= 0) ++proxyCount;
+        lastStepStats_.broadPhaseProxies = proxyCount;
+    }
 
     // Joint-connected bodies do not collide by default. Without this filter,
     // contacts at a hinge anchor fight the joint and CCD repeatedly rewinds the
@@ -3384,6 +3393,7 @@ void World::stepImpl(float dt) {
         if (!bodies_[contact.a].isSensor() && !bodies_[contact.b].isSensor())
             ++lastStepStats_.solvedContacts;
     const auto solverStart = Clock::now();
+    double contactSolverAccum = 0.0, jointSolverAccum = 0.0;
 
     // --- solver substeps -------------------------------------------------------
     // Each substep: gravity, velocity solve against live gaps, joints, and
@@ -3398,9 +3408,15 @@ void World::stepImpl(float dt) {
     if (!advancedOnDevice) {
         for (int s = 0; s < nSub; ++s) {
             if (s > 0) backend_->integrate(bodies_, gravity, h);
+            const auto csStart = Clock::now();
             backend_->solveVelocities(bodies_, contacts_, h, s == 0, solverOptions_);
+            const auto csEnd = Clock::now();
             lastStepStats_.velocityIterations += backend_->lastVelocityIterations();
+            const auto jsStart = Clock::now();
             solveJoints(h);
+            const auto jsEnd = Clock::now();
+            contactSolverAccum += std::chrono::duration<double, std::milli>(csEnd - csStart).count();
+            jointSolverAccum += std::chrono::duration<double, std::milli>(jsEnd - jsStart).count();
             for (Body& b : bodies_) {
                 if (b.isStatic() || b.asleep) continue;
                 b.advanceTransform(h);
@@ -3674,6 +3690,12 @@ void World::stepImpl(float dt) {
                              milliseconds(solverStart - detectionEnd);
     lastStepStats_.finalizeMs = milliseconds(stepEnd - ccdEnd);
     lastStepStats_.totalMs = milliseconds(stepEnd - stepStart);
+    lastStepStats_.broadPhaseMs = milliseconds(broadPhaseEnd - broadPhaseStart);
+    lastStepStats_.narrowPhaseMs = milliseconds(detectionEnd - broadPhaseEnd);
+    lastStepStats_.contactSolverMs = contactSolverAccum;
+    lastStepStats_.jointSolverMs = jointSolverAccum;
+    lastStepStats_.ccdRecoveryMs = lastStepStats_.ccdMs;
+    lastStepStats_.islandCount = backend_->lastIslandCount();
 }
 
 } // namespace velox

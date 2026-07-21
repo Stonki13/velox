@@ -176,6 +176,7 @@ public:
     void setWorkerCount(uint32_t count) override { workers_.configure(count); }
     uint32_t workerCount() const override { return workers_.workerCount(); }
     uint32_t lastVelocityIterations() const override { return lastVelocityIterations_; }
+    size_t lastIslandCount() const override { return lastIslandCount_; }
 
     void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) override {
         dispatchChunks(bodies.size(), 512, [&](size_t begin, size_t end) {
@@ -209,7 +210,9 @@ public:
                           bool warmStart,
                           const SolverOptions& options) override {
         lastVelocityIterations_ = 0;
+        lastIslandCount_ = 0;
         if (contacts.empty()) return;
+        lastIslandCount_ = 1;
         // Elliptical anisotropic limits couple the two tangent rows. The GPU
         // path already runs two sweeps per base iteration for graph coloring;
         // match that convergence budget on CPU only when the directional
@@ -253,6 +256,7 @@ public:
         if (parallelIslands_) {
             if (warmStart || islandOfContact_.size() != contacts.size())
                 buildIslands(bodies, contacts);
+            lastIslandCount_ = islandRanges_.size();
             if (islandRanges_.size() >= 2) {
                 lastVelocityIterations_ = static_cast<uint32_t>(velocityIterations);
                 workers_.parallelFor(islandRanges_.size(), [&](size_t island) {
@@ -523,6 +527,7 @@ private:
     std::vector<uint32_t> solverBodyStamp_;
     size_t solverBatchContactCount_ = SIZE_MAX;
     uint32_t lastVelocityIterations_ = 0;
+    size_t lastIslandCount_ = 0;
 };
 
 Backend* createCpuBackend() { return new CpuBackend(); }

@@ -151,6 +151,7 @@ public:
     // Number of velocity sweeps performed by the latest solve call. This is
     // reported through StepStats so adaptive policies are observable.
     virtual uint32_t lastVelocityIterations() const { return 0; }
+    virtual size_t lastIslandCount() const { return 0; }
     // Runs chunk callbacks on the backend's host worker pool (read-only
     // fan-out work like broad-phase queries). Default: serial.
     virtual void parallelChunks(size_t items, size_t /*minPerChunk*/,

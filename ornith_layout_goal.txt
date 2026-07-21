@@ -1,0 +1,79 @@
+GOAL: Create the complete production-readiness LAYOUT for the Velox physics engine. You are the architect, not the implementer. You produce design documents and draft API headers that a senior engineer will implement later. Work until every item listed below has its layout files created, then stop.
+
+=== HARD RULES ===
+1. Use RELATIVE paths only (e.g. docs/roadmap/01-contact-manifolds.md). NEVER write an absolute path. Never mention the project directory name.
+2. Create NEW files only. Do NOT modify any existing file, with one exception: you may append links to docs/roadmap/README.md if you created it earlier in this session.
+3. Do NOT touch CMakeLists.txt, src/, include/velox/, examples/, or .github/. Your draft headers go in design/ (a new folder that is not part of the build).
+4. Do not run cmake or build anything. Your work is documents and header sketches only.
+5. If a tool call fails twice, skip that step, note it in docs/roadmap/SKIPPED.md, and continue with the next file. Never stall.
+
+=== CONTEXT: WHAT VELOX ALREADY HAS ===
+C++17 rigid-body engine. Shapes: sphere, box, capsule, cylinder, cone, convex hull (QuickHull, exact mass), compound, static plane/triangle-mesh (BVH)/heightfield. Pipeline: speculative contacts + solver substeps (TGS-style live gaps) + split-impulse position correction + conservative-advancement CCD safety net. Joints: ball, distance, spring, hinge, cone-twist, fixed, prismatic, 6DoF, with motors/limits/breaking. Sleeping/islands, contact events/sensors/filtering, contact modification callback, world snapshots/rollback, origin shifting, debug-line output, per-step stats. Queries: raycast (closest + all hits), overlaps, shape casts, closest-points, all filtered and accelerated by an incremental dynamic AABB tree. Backends: deterministic multithreaded CPU and CUDA (graph-colored solver, CUDA Graphs). CI: Windows+Linux, MSVC/GCC/Clang, ASan/UBSan, 48-test stress suite, randomized fuzzing, soak tests. Public API lives in include/velox/world.h (class World with BodyId/JointId stable handles).
+
+=== YOUR DELIVERABLES ===
+
+A) docs/roadmap/README.md — master index: every item below with its number, tier, one-line goal, link to its detail file, and a dependency note (which items block which).
+
+B) One file docs/roadmap/NN-<slug>.md per item (NN = the number below). Each file MUST contain these sections:
+   ## Goal            (2-4 sentences, what exists after this ships)
+   ## Public API      (exact C++ declarations to add, in a velox namespace code block)
+   ## Data structures (new structs/fields, where they live)
+   ## Algorithm       (step-by-step outline; name the standard technique, e.g. "Sutherland-Hodgman clipping")
+   ## Files           (which existing files change, which new files are created)
+   ## Tests           (concrete stress-test scenarios with pass criteria)
+   ## Acceptance      (checklist: what must be true to call it done)
+   ## Size            (S / M / L / XL)
+   ## Risks           (what is most likely to go wrong)
+
+C) Draft headers in design/ for the five biggest systems, written as self-contained compilable-in-isolation sketches (include guards, forward declarations, TODO comments on every method):
+   design/character_controller.h
+   design/vehicle.h
+   design/manifold_clipping.h
+   design/serialization.h
+   design/articulation.h
+
+=== THE ITEMS ===
+
+TIER 1 (blockers)
+01 persistent-contact-manifolds — general convex face clipping (Sutherland-Hodgman), feature ids for warm starting, replaces sampled/support-plane manifolds
+02 gjk-epa-hardening — degenerate geometry robustness: near-coplanar hulls, tiny/huge/needle shapes; dedicated geometry fuzzer
+03 multi-toi-ccd — sequential time-of-impact processing per step (bullet through several walls in one step)
+04 ccd-quality-controls — per-body motion quality flags, collision margins, speculative distance tuning
+05 thread-safety-contract — documented + enforced rules for cross-thread queries and mutation during step
+06 api-versioning — semver, CHANGELOG, deprecation policy
+07 documentation — Doxygen API reference, getting-started, concepts guide
+08 differential-testing — same scenes run in Jolt/Bullet, statistical trajectory/energy comparison harness
+09 geometry-fuzzing-and-long-soaks — degenerate-shape fuzzer, multi-hour soaks with energy/momentum drift tracking
+10 real-workload-scene — game-like level as a release gate
+
+TIER 2 (expected features)
+11 character-controller — capsule sweep-and-slide, step climbing, slope limits, grounded state
+12 vehicle-model — raycast suspension, tire friction curves, drivetrain, anti-roll
+13 ragdoll-articulation — authoring helpers over existing joints; reduced-coordinate articulation later
+14 joint-completeness — soft constraints/compliance and position drives on all joint types; gear/pulley constraints
+15 solver-options — friction-cone block solving, iteration policies, stack stabilization presets
+16 batched-async-queries — batched query API, async query contract
+17 runtime-collider-mutation — safe shape replacement and scaling without remove/re-add
+18 serialization — versioned scene save/load, replay recording, network snapshot compression
+19 extra-shapes — rounded box, ellipsoid; SDF/voxel collision and mutable terrain (design only)
+20 parallel-island-solving — solve independent islands on the CPU worker pool
+21 gpu-resident-stepping — eliminate per-substep host copies, device-side coloring and event prep
+22 cuda-error-recovery — allocation-failure fallback to CPU, device-loss handling
+23 performance-telemetry — memory/transfer counters in StepStats, benchmark regression tracking in CI
+
+TIER 3 (maturity)
+24 cross-platform-determinism — fixed-order math and FMA control for lockstep multiplayer
+25 large-worlds-double-precision — double-precision option, scale-aware tolerances
+26 interactive-sandbox — windowed demo + contact/constraint inspector on the debug-line API
+27 platform-coverage — macOS/ARM CI lanes
+28 release-automation — prebuilt binaries, vcpkg/Conan packaging
+29 community-infrastructure — issue templates with repro-scene requests, contribution guide, polished examples
+
+=== ORDER OF WORK ===
+1. Create docs/roadmap/README.md with the full index first.
+2. Then items 01-10 detail files (most important, be most thorough here).
+3. Then the five design/ headers.
+4. Then items 11-29 detail files (these may be shorter but must keep all sections).
+5. Finish by re-reading docs/roadmap/README.md and confirming every listed file exists.
+
+Quality bar: an engineer who has never spoken to you should be able to open any detail file and start implementing without asking questions. Prefer concrete C++ signatures over prose. When you know the standard algorithm name, name it and cite the key steps.

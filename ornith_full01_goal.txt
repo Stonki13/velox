@@ -1,0 +1,37 @@
+GOAL: Implement persistent contact manifolds with Sutherland-Hodgman face clipping in the Velox physics engine, END TO END: prototype, integrate into the narrow phase, warm-start by feature id, extend the stress suite, and leave the FULL test suite passing. Your spec is docs/roadmap/01-persistent-contact-manifolds.md.
+
+=== HARD RULES ===
+1. RELATIVE paths only. Never write an absolute path.
+2. FIRST ACTION: run in bash:  git checkout -b proto/manifolds
+   All your work stays on this branch. Never run git push, git merge, git rebase, or git reset. Commit locally as often as you like with:  git add -A && git commit -m "wip: <what you did>"
+3. Never delete existing tests or weaken existing test tolerances to make them pass. If a test fails, fix your code, not the test.
+4. If a tool call fails twice in a row, note it in docs/roadmap/PROTO01_NOTES.md and try a different approach. Never stall.
+5. Read before you edit: read docs/roadmap/01-persistent-contact-manifolds.md, then src/gjk.h, then src/narrowphase.h fully before changing anything.
+
+=== STAGE 1: prototype in isolation ===
+Create src/manifold.h (header-only, namespace velox, every function VELOX_HD inline so it can later run in CUDA):
+- Face polygon extraction: for a Convex of kind Box or Hull and a direction, return the face polygon most anti-parallel to that direction (<= 16 ordered vertices, each carrying a stable feature id derived from source vertex indices).
+- clipFaceManifold(const Convex& a, const Convex& b, Vec3 normal) -> up to 8 ManifoldPoint {Vec3 point; float gap; uint32_t featureA, featureB;} via Sutherland-Hodgman: reference face on B (most anti-parallel to normal), incident face on A, clip incident against reference side planes, keep vertices at/below the reference plane, reduce to 8 keeping deepest + maximal area.
+- Deterministic: fixed iteration order, no unordered containers, no randomness.
+Create examples/proto_manifold.cpp (standalone main, check() helper like stress_demo) covering: 4-point box-on-box face stack, 2-point edge-on-face, partial overlap area, hull-vs-box face, and a run-3-times bitwise determinism case. Append its add_executable/target_link_libraries lines to examples/CMakeLists.txt.
+Build and run it until all cases PASS:
+  cmake --build build --config Release --target proto_manifold
+  ./build/examples/Release/proto_manifold.exe
+
+=== STAGE 2: integrate ===
+Only start after Stage 1 fully passes.
+1. In src/narrowphase.h, inside convexConvex: when BOTH shapes are Box or Hull and the GJK distance is below 0.05f, generate the manifold with clipFaceManifold using the existing face-snapped normal selection, and emit each ManifoldPoint through the existing emit(...) path. Store a per-point featureKey (combine featureA/featureB into the Contact::featureKey field) so warm starting matches by feature instead of by proximity. Keep the existing box-box vertex path as the fallback when the clipped manifold produces fewer than 3 points.
+2. In src/world.cpp, find the warm-start matching block (it matches previous contacts by pair key and point distance). Extend it: when both the new and previous contact have nonzero featureKey, match by exact featureKey equality first; fall back to the existing distance match otherwise.
+3. Do NOT change the solver, the CCD safety net, sleeping, events, or any public header other than (if needed) a comment.
+
+=== STAGE 3: prove it ===
+1. Add to examples/stress_demo.cpp one new test, registered last in main():
+   - a 10-box tower simulated 10 seconds must show max horizontal drift of any box < 0.05 and every box's resting contact count >= 3 manifold points against its lower neighbor at the final frame is NOT directly observable, so instead assert positions: |x| and |z| of every box < 0.05 and |y - expected| < 0.05.
+2. Build the full suite and run it:
+  cmake --build build --config Release
+  ./build/examples/Release/stress_demo.exe
+   EVERY test must print PASS, including all pre-existing ones. If any existing test regresses, your integration is wrong: fix it or (if you cannot within several attempts) revert Stage 2 with git and leave Stage 1 + notes.
+3. Run the fuzzer twice:  ./build/examples/Release/fuzz_demo.exe 40   must report 0 failures.
+
+=== FINISH CONDITION ===
+All tests + fuzzer pass on branch proto/manifolds, everything committed locally, and docs/roadmap/PROTO01_NOTES.md contains: what was implemented, integration decisions taken, known weaknesses, and what the reviewer should look at first. Then stop. Do not push.

@@ -114,6 +114,14 @@ struct StepStats {
     double ccdMs = 0.0;
     double finalizeMs = 0.0;
     double totalMs = 0.0;
+    size_t broadPhaseProxies = 0;
+    size_t narrowPhaseTests = 0;
+    size_t islandCount = 0;
+    double broadPhaseMs = 0.0;
+    double narrowPhaseMs = 0.0;
+    double contactSolverMs = 0.0;
+    double jointSolverMs = 0.0;
+    double ccdRecoveryMs = 0.0;
 };
 
 class World;

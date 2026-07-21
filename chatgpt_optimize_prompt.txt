@@ -1,0 +1,71 @@
+You are working in the Velox physics engine repo at:
+  C:\Users\adria\Desktop\PHYSIC PLACEHOLDER
+(the path contains a space - always quote it). Windows 11, PowerShell, MSVC
+2022, CMake, CUDA 13.2, RTX 5080 (sm_120), 16-core CPU.
+
+Create and work on a new branch: git checkout -b proto/optimize2 from main.
+Do NOT push, merge, rebase, or force-anything; commit locally only. NEVER
+weaken, disable, or delete an existing test to make it pass. Do not add a
+Co-Authored-By trailer to commits.
+
+CONTEXT
+Velox is a C++17/CUDA rigid-body engine (docs/roadmap/ has design notes,
+PROTO*_NOTES.md record previous passes). Three optimization passes are done:
+ 1. Contact-event pairing was O(pairs x contacts) -> one sorted pass
+    (src/world.cpp, event block near the end of World::step).
+ 2. Host broad phase: candidate AABB-tree queries fan out across the worker
+    pool (src/world.cpp buildCandidatePairs + Backend::parallelChunks in
+    include/velox/backend.h, pool in src/solver.cpp); solver conflict batches
+    cached per step (src/solver.cpp).
+ 3. CUDA broad phase: uniform grid with packed cell keys + cached thrust
+    scratch (src/backend_cuda.cu). VELOX_CUDA_PROFILE=1 env var prints
+    per-stage GPU timings.
+Current 8192-sphere-pile numbers (examples/benchmark.exe): CPU-16 ~7.0
+ms/step, CUDA ~8.8 ms/step, CPU-1 ~18 ms/step.
+
+YOUR TASK: continue the optimization passes. Profile FIRST, then fix what
+measurement shows; do not micro-optimize blind. Remaining known candidates,
+roughly by expected value:
+
+ 1. CPU narrowphase SIMD/data layout (src/narrowphase.h, src/gjk.h): the
+    per-pair convex code is shared VELOX_HD host/device code. Do NOT break
+    the CUDA build or diverge results; consider a host-only specialized
+    sphere-sphere / sphere-plane fast path in the CPU backend's findContacts
+    (src/solver.cpp) before touching shared headers. Contacts must stay
+    bitwise identical (velox.islands and fuzz replay determinism gate this).
+ 2. Serial AABB-tree refit (src/world.cpp ensureBroadPhase + src/aabb_tree.h):
+    per-body move() calls are serial; batch or parallelize leaf refits while
+    keeping tree structure deterministic.
+ 3. CUDA solver/step pipeline (src/backend_cuda.cu): solveVelocities uploads
+    contacts H->D each step and fetchImpulses copies them back; investigate
+    device-side warm-start matching to keep contacts resident (bigger
+    project - only start it if the profiler shows it is worth it).
+ 4. CPU solver inner loop (src/narrowphase.h solveContact): called ~4
+    substeps x iterations x contacts; look at memory layout (Contact struct
+    order), redundant recomputation (contactTangents per call), and
+    prefetch-friendly contact ordering. Changes here alter float ordering -
+    if results change bitwise, ALL determinism tests must still pass
+    against themselves (sequential==parallel) and physics gates must hold.
+
+TOOLS AND GATES
+- Configure: cmake -S . -B build -DVELOX_BUILD_SANDBOX=ON -DVELOX_BUILD_DIFFTEST=ON
+- Build: cmake --build build --config Release -j 16
+- Profiling scene: tests/difftest/diag.cpp is a scratch file wired as target
+  velox_difftest_diag (EXCLUDE_FROM_ALL); overwrite it freely with profiling
+  code (StepStats on World::lastStepStats() has per-phase ms; CUDA stages
+  via $env:VELOX_CUDA_PROFILE=1). git checkout -- it before committing.
+- Full gate before finishing, ALL must pass:
+    ctest --test-dir build -C Release   (10 suites incl. velox.islands
+      bitwise determinism, velox.difftest vs Jolt, velox.sandbox selftest)
+    build\examples\Release\fuzz_demo.exe 80   (twice)
+    build\examples\Release\proto_manifold.exe
+    build\examples\Release\benchmark.exe   (record before/after numbers;
+      no scene may regress >10% without written justification)
+- Write docs/roadmap/PROTO_OPT2_NOTES.md in the style of the other
+  PROTO*_NOTES.md: what you profiled, what you changed, before/after
+  numbers per scene, and any deviations.
+- Commit on proto/optimize2 with clear messages (one commit per logical
+  optimization is preferred). Do NOT push.
+
+Finish with a summary: measured bottlenecks, changes made, before/after
+benchmark table, and whether the branch is ready to merge.
