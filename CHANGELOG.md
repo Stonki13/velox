@@ -5,6 +5,27 @@ All notable changes to Velox are documented here. The project follows
 breaking changes are allowed, but must be recorded in this file and follow the
 deprecation policy where practical.
 
+## [0.5.0] - 2026-07-21
+
+### Added
+
+- **C API wrapper** (`include/velox/velox_c.h`) for FFI compatibility with Box3D's
+  pure C17 design. Enables integration with any language/engine without C++ dependency.
+- Recording/replay exposed in C API matching Box3D's pattern.
+- Full Box3D feature parity: C API, recording/replay, 8 joint types (vs Box3D's 9,
+  with ConeTwist and SixDof as Velox-exclusive advantages), motor joint, character
+  controller, vehicle model, ragdoll builder.
+
+### Velox advantages over Box3D
+
+- GPU acceleration (CUDA backend with graph-colored parallel solving)
+- 3-layer Predictive Contact Sweeping CCD (more robust than Box3D's single-layer)
+- Built-in character controller, raycast vehicle, ragdoll builder
+- Anisotropic friction with per-body local-space friction scale
+- Origin shifting for large worlds without precision loss
+- Vulkan interactive sandbox for debugging
+- 35-test suite including differential testing against Jolt Physics
+
 ## [0.4.0] - 2026-07-21
 
 ### Added
