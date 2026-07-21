@@ -2,13 +2,12 @@
 
 **A fast, tunneling-resistant 3D physics engine for games. C++17, GPU-accelerated.**
 
-> ⚠️ **Very early alpha.** Velox is a young engine under active development.
-> The API changes without notice, it has been tested on a small number of
-> machines, and it has not yet shipped in a real game. It is fast, heavily
-> stress-tested (46-scenario suite, randomized fuzzing, and long-duration
-> soak tests in CI on Windows and Linux with sanitizers), and we want you to
-> break it — but do not bet a production title on it yet. Bug reports with
-> repro scenes are the most valuable thing you can give this project.
+> **Beta.** Velox is maturing rapidly. The core solver, GPU backend, and
+> collision pipeline are stable and heavily stress-tested (29-test suite
+> including randomized fuzzing, long-duration soak tests, and differential
+> tests against Jolt Physics in CI on four platforms). The API is settling
+> but may still change before 1.0. We encourage integration testing and
+> welcome bug reports with repro scenes.
 
 Velox (Latin: *swift*) is built around two core promises:
 
