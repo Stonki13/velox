@@ -19,7 +19,7 @@ inline bool operator==(JointId a, JointId b) { return a.value == b.value; }
 inline bool operator!=(JointId a, JointId b) { return !(a == b); }
 
 enum class JointType : uint8_t {
-    Ball, Distance, Hinge, ConeTwist, Fixed, Prismatic, SixDof
+    Ball, Distance, Hinge, ConeTwist, Fixed, Prismatic, SixDof, Motor
 };
 
 enum JointAxisBits : uint8_t {

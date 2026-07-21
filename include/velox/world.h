@@ -388,6 +388,10 @@ public:
     JointId addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor);
     JointId addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis);
     JointId addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor);
+    // Motor joint: drives body B towards a target transform relative to body A.
+    // maxForce/maxTorque clamp the corrective impulses each step.
+    JointId addMotorJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB,
+                          float maxForce, float maxTorque);
     Joint& joint(JointId id);                              // configure motors/limits
     const Joint& joint(JointId id) const;
     Joint jointState(JointId id) const;

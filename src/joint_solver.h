@@ -487,6 +487,18 @@ VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
         solveAngularFrame(joint, a, b, kBeta / dt);
         break;
     }
+    case JointType::Motor: {
+        Vec3 bias = (pa - pb) * (kBeta / dt);
+        Vec3 impulse = mul(inverse(pointMass(a, b, ra, rb)),
+                           -(velocity + bias));
+        float maxImpulse = joint.maxMotorForce * dt;
+        float mag = length(impulse);
+        if (mag > maxImpulse && mag > 1e-9f)
+            impulse = impulse * (maxImpulse / mag);
+        applyLinear(joint, a, b, ra, rb, impulse, 1.0f);
+        solveAngularFrame(joint, a, b, kBeta / dt);
+        break;
+    }
     case JointType::SixDof:
         solveSixDof(joint, a, b, ra, rb, pa, pb, dt);
         break;
@@ -505,7 +517,7 @@ VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
 }
 
 inline bool supported(const Joint& joint) {
-    return (uint8_t)joint.type <= (uint8_t)JointType::SixDof;
+    return (uint8_t)joint.type <= (uint8_t)JointType::Motor;
 }
 
 } // namespace velox::joint_solver

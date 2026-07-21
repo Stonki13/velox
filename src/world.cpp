@@ -2198,6 +2198,31 @@ JointId World::addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
     return addJoint(j);
 }
 
+JointId World::addMotorJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB,
+                             float maxForce, float maxTorque) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addMotorJoint");
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchorA, "velox: motor joint anchor A must be finite");
+    requireFiniteVec(worldAnchorB, "velox: motor joint anchor B must be finite");
+    if (maxForce < 0.0f || maxTorque < 0.0f)
+        throw std::invalid_argument("velox: motor joint limits must be non-negative");
+    Joint j;
+    j.type = JointType::Motor;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchorA - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchorB - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, {1, 0, 0});
+    j.localAxisB = rotateInv(bodies_[ib].orientation, {1, 0, 0});
+    j.localRefA = rotateInv(bodies_[ia].orientation, {0, 1, 0});
+    j.localRefB = rotateInv(bodies_[ib].orientation, {0, 1, 0});
+    j.maxMotorForce = maxForce;
+    j.maxMotorTorque = maxTorque;
+    return addJoint(j);
+}
+
 float World::hingeAngle(JointId id) const {
     AccessGuard guard(*this, AccessKind::Query, "hingeAngle");
     const Joint& j = joint(id);
@@ -3217,6 +3242,22 @@ void World::solveJoints(float dt) {
                         }
                     }
                 }
+                break;
+            }
+            case JointType::Motor: {
+                Vec3 bias = (pa - pb) * (kBeta / dt);
+                Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
+                float maxImpulse = j.maxMotorForce * dt;
+                float mag = length(P);
+                if (mag > maxImpulse && mag > 1e-9f)
+                    P = P * (maxImpulse / mag);
+                applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
+                Vec3 angVel = a.angularVelocity - b.angularVelocity;
+                float maxAngImpulse = j.maxMotorTorque * dt;
+                float angMag = length(angVel);
+                if (angMag > maxAngImpulse && angMag > 1e-9f)
+                    angVel = angVel * (maxAngImpulse / angMag);
+                applyJointAngularImpulse(j, a, b, -angVel);
                 break;
             }
             }
