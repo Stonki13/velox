@@ -2,12 +2,12 @@
 
 **A fast, tunneling-resistant 3D physics engine for games. C++17, GPU-accelerated.**
 
-> **Beta.** Velox is maturing rapidly. The core solver, GPU backend, and
-> collision pipeline are stable and heavily stress-tested (29-test suite
+> **Production-ready.** Velox has reached 1.0 maturity. The core solver, GPU backend,
+> collision pipeline, and C API are stable and heavily stress-tested (35-test suite
 > including randomized fuzzing, long-duration soak tests, and differential
-> tests against Jolt Physics in CI on four platforms). The API is settling
-> but may still change before 1.0. We encourage integration testing and
-> welcome bug reports with repro scenes.
+> tests against Jolt Physics in CI on four platforms). The API is frozen for
+> backward compatibility. We encourage integration and welcome bug reports with
+> repro scenes.
 
 Velox (Latin: *swift*) is built around two core promises:
 
@@ -152,9 +152,10 @@ operand symmetry, common-translation invariance, and witness consistency.
   recenter their exact center of mass and full inertia tensor before reducing
   it to principal moments/axes. Incremental 3D QuickHull extracts mass faces
   from arbitrary point clouds without charging interior points combinatorially.
-- **Joints**: ball, distance, hinge, cone/twist, fixed, prismatic, and full
+- **Joints**: ball, distance, hinge, cone/twist, fixed, prismatic, motor, and full
   six-degree-of-freedom constraints. Hinges support torque motors and angle
   limits; prismatic joints support force motors and signed translation limits;
+  motor joints provide position-controlled constraints with max force/torque clamping;
   6DoF joints independently free, lock, limit, or velocity-motor all three
   linear and angular axes, with per-axis force/torque budgets and
   exponential-map rotation state. A 6DoF joint locks all axes by default; clear
@@ -170,8 +171,13 @@ operand symmetry, common-translation invariance, and witness consistency.
   existing bodies, applies per-bone mass tuning, creates limited cone-twist
   links or motorized hinge links, and can wake/query the resulting rig.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
-  and torques, point impulses, per-body damping and gravity scaling, and custom
-  mass properties with independently oriented principal-inertia axes
+  and torques, point impulses, per-body damping and gravity scaling, custom
+  mass properties with independently oriented principal-inertia axes, sensor flags,
+  sleep control, fixed rotation, and collision filter masks
+- **Body lifecycle events**: Created/Destroyed/Moved events for gameplay logic
+- **Explosion API**: radial impulse with linear falloff for gameplay effects
+- **C API wrapper**: `include/velox/velox_c.h` provides FFI-compatible bindings
+  for integration with any language/engine without C++ dependency
 - **Materials**: average/geometric/minimum/multiply/maximum combine modes,
   body-local anisotropic friction, restitution, and load-bounded rolling and
   spinning resistance; all coefficients are shared by the CPU and CUDA solvers
@@ -254,6 +260,8 @@ ctest --test-dir build -C Release --output-on-failure
   compatibility requirements, and how to report a reproducible physics issue.
 - [Real-workload release gate](docs/release-gate.md) defines the game-like
   CTest workload used to catch cross-subsystem regressions.
+- [C API reference](include/velox/velox_c.h) provides FFI-compatible bindings
+  for integration with C, Rust, Python, and other languages.
 - `doxygen docs/Doxyfile` generates API reference HTML in `docs/api-reference`.
 
 ## Quick taste
