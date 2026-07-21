@@ -153,24 +153,23 @@ export const BenchmarkScene: React.FC = () => {
                       backgroundColor: `${bar.color}33`,
                       border: `1px solid ${bar.color}66`,
                       borderRadius: 6,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "flex-end",
-                      paddingRight: 12,
-                      minWidth: barSpring > 0.1 ? 80 : 0,
+                      minWidth: barSpring > 0.1 ? 8 : 0,
+                    }}
+                  />
+
+                  {/* Value — always to the right of the bar */}
+                  <span
+                    style={{
+                      fontFamily: FONT.mono,
+                      fontSize: 20,
+                      fontWeight: 700,
+                      color: bar.color,
+                      marginLeft: 14,
+                      whiteSpace: "nowrap",
                     }}
                   >
-                    <span
-                      style={{
-                        fontFamily: FONT.mono,
-                        fontSize: 20,
-                        fontWeight: 700,
-                        color: bar.color,
-                      }}
-                    >
-                      {countUp.toFixed(2)} ms
-                    </span>
-                  </div>
+                    {countUp.toFixed(2)} ms
+                  </span>
                 </div>
               );
             })}

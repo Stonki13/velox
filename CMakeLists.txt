@@ -30,6 +30,7 @@ add_library(velox
     src/vehicle.cpp
     src/serialization.cpp
     src/benchmark.cpp
+    src/velox_c.cpp
 )
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

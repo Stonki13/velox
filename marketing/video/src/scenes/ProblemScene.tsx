@@ -13,7 +13,7 @@ const Wall: React.FC<{ x: number }> = ({ x }) => (
     style={{
       position: "absolute",
       left: x,
-      top: 340,
+      top: 100,
       width: 30,
       height: 300,
       backgroundColor: COLORS.grayDark,
@@ -60,7 +60,7 @@ export const ProblemScene: React.FC = () => {
   });
 
   const wallX = 900;
-  const bulletY = 475;
+  const bulletY = 240;
   const passedThrough = bulletX > wallX + 40;
 
   // Red X appears when bullet passes
@@ -147,7 +147,7 @@ export const ProblemScene: React.FC = () => {
           style={{
             position: "absolute",
             left: wallX - 20,
-            top: 650,
+            top: 410,
             fontFamily: FONT.mono,
             fontSize: 16,
             color: COLORS.gray,
