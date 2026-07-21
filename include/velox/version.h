@@ -8,9 +8,9 @@ namespace velox {
 // configuring the package, so installed package metadata cannot drift from the
 // headers consumers compile against.
 inline constexpr uint32_t kVersionMajor = 0;
-inline constexpr uint32_t kVersionMinor = 2;
+inline constexpr uint32_t kVersionMinor = 3;
 inline constexpr uint32_t kVersionPatch = 0;
-inline constexpr const char kVersionString[] = "0.2.0";
+inline constexpr const char kVersionString[] = "0.3.0";
 inline constexpr uint32_t kMinCxxStandard = 17;
 
 inline constexpr const char* versionString() { return kVersionString; }
