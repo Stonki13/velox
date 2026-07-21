@@ -72,6 +72,10 @@ if(VELOX_BUILD_SANDBOX)
     add_subdirectory(examples/sandbox)
 endif()
 
+if(BUILD_TESTING)
+    add_subdirectory(tests/unit)
+endif()
+
 if(VELOX_BUILD_DIFFTEST)
     add_subdirectory(tests/difftest)
 endif()

@@ -1,0 +1,28 @@
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/doctest.h")
+    message(STATUS "velox: downloading doctest single header")
+    file(DOWNLOAD
+        "https://raw.githubusercontent.com/doctest/doctest/v2.4.11/doctest/doctest.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/doctest.h"
+        STATUS download_status)
+    list(GET download_status 0 status_code)
+    if(NOT status_code EQUAL 0)
+        message(FATAL_ERROR "Failed to download doctest.h")
+    endif()
+endif()
+
+add_library(doctest INTERFACE)
+target_include_directories(doctest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+function(velox_add_unit_test name)
+    add_executable(${name} ${name}.cpp test_main.cpp)
+    target_link_libraries(${name} PRIVATE velox doctest)
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME velox.unit.${name} COMMAND ${name})
+    set_tests_properties(velox.unit.${name} PROPERTIES TIMEOUT 30)
+endfunction()
+
+velox_add_unit_test(test_math)
+velox_add_unit_test(test_gjk)
+velox_add_unit_test(test_mass_properties)
+velox_add_unit_test(test_narrowphase)
+velox_add_unit_test(test_serialization)
