@@ -78,7 +78,7 @@ void validateSolverOptions(const SolverOptions& options) {
 }
 
 bool validJointType(JointType type) {
-    return (uint8_t)type <= (uint8_t)JointType::SixDof;
+    return (uint8_t)type <= (uint8_t)JointType::Motor;
 }
 
 void jointFrame(const Joint& joint, const Body& a, const Body& b,
@@ -3482,7 +3482,8 @@ void World::stepImpl(float dt) {
                       joint.type == JointType::ConeTwist ||
                       joint.type == JointType::Fixed ||
                       joint.type == JointType::Prismatic ||
-                      joint.type == JointType::SixDof;
+                      joint.type == JointType::SixDof ||
+                      joint.type == JointType::Motor;
         if (framed && (lengthSq(joint.localAxisA) < 1e-12f ||
                        lengthSq(joint.localAxisB) < 1e-12f ||
                        lengthSq(joint.localRefA) < 1e-12f ||
