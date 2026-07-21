@@ -271,6 +271,8 @@ LocalHit rayBody(const Vec3& origin, const Vec3& dir, const Body& body,
     case ShapeType::Hull:
     case ShapeType::Cylinder:
     case ShapeType::Cone:
+    case ShapeType::RoundedBox:
+    case ShapeType::Ellipsoid:
         return rayConvex(origin, dir, body, soup, maxDist);
     default:
         return {};

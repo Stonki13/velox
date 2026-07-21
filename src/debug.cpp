@@ -104,6 +104,15 @@ void addShape(std::vector<DebugLine>& out, const Body& body,
             addLine(out, base + radial * body.radius, tip, color);
         break;
     }
+    case ShapeType::RoundedBox:
+        addBox(out, body.position, body.orientation, body.halfExtents, color);
+        break;
+    case ShapeType::Ellipsoid: {
+        addCircle(out, body.position, x, y, vmax(body.halfExtents.x, body.halfExtents.y), color);
+        addCircle(out, body.position, x, z, vmax(body.halfExtents.x, body.halfExtents.z), color);
+        addCircle(out, body.position, y, z, vmax(body.halfExtents.y, body.halfExtents.z), color);
+        break;
+    }
     case ShapeType::Hull:
         for (uint32_t i = 0; i < body.hullCount; ++i)
             addPointCross(out, body.position + rotate(

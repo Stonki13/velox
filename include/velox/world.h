@@ -202,7 +202,7 @@ struct ThreadSafetyReport {
 // compound payloads are value-owned so callers can safely retain their input
 // after mutation returns.
 struct ShapeMutation {
-    enum class Type : uint8_t { Sphere, Box, Capsule, Cylinder, Cone, Hull, Compound };
+    enum class Type : uint8_t { Sphere, Box, Capsule, Cylinder, Cone, Hull, Compound, RoundedBox, Ellipsoid };
     Type type = Type::Sphere;
     float radius = 0.0f;
     Vec3 halfExtents{0.5f, 0.5f, 0.5f};
@@ -279,6 +279,8 @@ public:
     BodyId addCapsule(Vec3 position, float radius, float halfHeight, float mass);
     BodyId addCylinder(Vec3 position, float radius, float halfHeight, float mass);
     BodyId addCone(Vec3 position, float radius, float height, float mass);
+    BodyId addRoundedBox(Vec3 position, Vec3 halfExtents, float radius, float mass);
+    BodyId addEllipsoid(Vec3 position, Vec3 radii, float mass);
     // Convex hull from a local-space point cloud. Interior points are excluded
     // from mass integration but still cost support-function time.
     BodyId addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass);

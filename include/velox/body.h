@@ -28,7 +28,8 @@ VELOX_HD inline bool operator!=(BodyId a, BodyId b) { return !(a == b); }
 VELOX_HD inline bool operator<(BodyId a, BodyId b) { return a.value < b.value; }
 
 enum class ShapeType : uint8_t {
-    Sphere, Plane, Box, Capsule, Mesh, Hull, Compound, Cylinder, Cone
+    Sphere, Plane, Box, Capsule, Mesh, Hull, Compound, Cylinder, Cone,
+    RoundedBox, Ellipsoid
 };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
 // Controls the amount of numerical work spent on this body's convex geometry.
@@ -200,6 +201,8 @@ struct Body {
     VELOX_HD float maxPointSpeed() const {
         float r = radius;
         if (shape == ShapeType::Box) r = length(halfExtents);
+        else if (shape == ShapeType::RoundedBox) r = length(halfExtents) + radius;
+        else if (shape == ShapeType::Ellipsoid) r = vmax(halfExtents.x, vmax(halfExtents.y, halfExtents.z));
         else if (shape == ShapeType::Capsule) r = capsuleHalfHeight + radius;
         else if (shape == ShapeType::Cylinder)
             r = sqrtf(capsuleHalfHeight * capsuleHalfHeight + radius * radius);

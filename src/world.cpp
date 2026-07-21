@@ -193,6 +193,21 @@ void refreshPrimitiveInertia(Body& body) {
                   sphereMass * (0.4f * r * r + 0.75f * h * r + h * h);
         break;
     }
+    case ShapeType::RoundedBox: {
+        Vec3 e = body.halfExtents * 2.0f;
+        float k = mass / 12.0f;
+        ix = k * (e.y * e.y + e.z * e.z);
+        iy = k * (e.x * e.x + e.z * e.z);
+        iz = k * (e.x * e.x + e.y * e.y);
+        break;
+    }
+    case ShapeType::Ellipsoid: {
+        float a = body.halfExtents.x, b = body.halfExtents.y, c = body.halfExtents.z;
+        ix = 0.2f * mass * (b * b + c * c);
+        iy = 0.2f * mass * (a * a + c * c);
+        iz = 0.2f * mass * (a * a + b * b);
+        break;
+    }
     default:
         return;
     }
@@ -752,6 +767,53 @@ BodyId World::addCone(Vec3 position, float radius, float height, float mass) {
     return addBody(b);
 }
 
+BodyId World::addRoundedBox(Vec3 position, Vec3 halfExtents, float radius, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addRoundedBox");
+    requireFiniteVec(position, "velox: rounded box position must be finite");
+    requireFiniteVec(halfExtents, "velox: rounded box half extents must be finite");
+    if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
+        throw std::invalid_argument("velox: rounded box half extents must be positive");
+    requirePositive(radius, "velox: rounded box radius must be finite and positive");
+    requireMass(mass);
+    Body b;
+    b.position = position;
+    b.shape = ShapeType::RoundedBox;
+    b.halfExtents = halfExtents;
+    b.radius = radius;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
+    b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    if (mass > 0.0f) {
+        Vec3 e = halfExtents * 2.0f;
+        float k = mass / 12.0f;
+        b.invInertia = {1.0f / (k * (e.y * e.y + e.z * e.z)),
+                        1.0f / (k * (e.x * e.x + e.z * e.z)),
+                        1.0f / (k * (e.x * e.x + e.y * e.y))};
+    }
+    return addBody(b);
+}
+
+BodyId World::addEllipsoid(Vec3 position, Vec3 radii, float mass) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addEllipsoid");
+    requireFiniteVec(position, "velox: ellipsoid position must be finite");
+    requireFiniteVec(radii, "velox: ellipsoid radii must be finite");
+    if (radii.x <= 0.0f || radii.y <= 0.0f || radii.z <= 0.0f)
+        throw std::invalid_argument("velox: ellipsoid radii must be positive");
+    requireMass(mass);
+    Body b;
+    b.position = position;
+    b.shape = ShapeType::Ellipsoid;
+    b.halfExtents = radii;
+    b.motionType = mass > 0.0f ? MotionType::Dynamic : MotionType::Static;
+    b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    if (mass > 0.0f) {
+        float a = radii.x, bv = radii.y, c = radii.z;
+        b.invInertia = {1.0f / (0.2f * mass * (bv * bv + c * c)),
+                        1.0f / (0.2f * mass * (a * a + c * c)),
+                        1.0f / (0.2f * mass * (a * a + bv * bv))};
+    }
+    return addBody(b);
+}
+
 BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, float mass) {
     AccessGuard guard(*this, AccessKind::Mutation, "addConvexHull");
     requireFiniteVec(position, "velox: convex hull position must be finite");
@@ -971,6 +1033,46 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
             }
             break;
         }
+        case ShapeType::RoundedBox:
+            requireFiniteVec(shape.halfExtents,
+                             "velox: compound rounded box extents must be finite");
+            if (shape.halfExtents.x <= 0.0f || shape.halfExtents.y <= 0.0f ||
+                shape.halfExtents.z <= 0.0f)
+                throw std::invalid_argument(
+                    "velox: compound rounded box extents must be positive");
+            requirePositive(shape.radius,
+                            "velox: compound rounded box radius must be positive");
+            child.halfExtents = shape.halfExtents;
+            child.radius = shape.radius;
+            bound = length(shape.halfExtents) + shape.radius;
+            if (mass > 0.0f) {
+                Vec3 e = shape.halfExtents * 2.0f;
+                massData.volume = 8.0 * shape.halfExtents.x * shape.halfExtents.y * shape.halfExtents.z;
+                float childMassValue = float(massData.volume);
+                float k = childMassValue / 12.0f;
+                massData.principalInertia = {k * (e.y * e.y + e.z * e.z),
+                                             k * (e.x * e.x + e.z * e.z),
+                                             k * (e.x * e.x + e.y * e.y)};
+            }
+            break;
+        case ShapeType::Ellipsoid:
+            requireFiniteVec(shape.halfExtents,
+                             "velox: compound ellipsoid radii must be finite");
+            if (shape.halfExtents.x <= 0.0f || shape.halfExtents.y <= 0.0f ||
+                shape.halfExtents.z <= 0.0f)
+                throw std::invalid_argument(
+                    "velox: compound ellipsoid radii must be positive");
+            child.halfExtents = shape.halfExtents;
+            bound = vmax(shape.halfExtents.x, vmax(shape.halfExtents.y, shape.halfExtents.z));
+            if (mass > 0.0f) {
+                float a = shape.halfExtents.x, b = shape.halfExtents.y, c = shape.halfExtents.z;
+                massData.volume = 4.0 * 3.141592653589793 * a * b * c / 3.0;
+                float childMassValue = float(massData.volume);
+                massData.principalInertia = {0.2f * childMassValue * (b * b + c * c),
+                                             0.2f * childMassValue * (a * a + c * c),
+                                             0.2f * childMassValue * (a * a + b * b)};
+            }
+            break;
         case ShapeType::Hull: {
             if (shape.hullPoints.size() < 4)
                 throw std::invalid_argument("velox: compound hull requires at least four points");
@@ -1361,6 +1463,26 @@ void World::mutateShape(BodyId id, const ShapeMutation& mutation) {
         candidate.radius = mutation.radius;
         candidate.capsuleHalfHeight = mutation.capsuleHalfHeight;
         break;
+    case ShapeMutation::Type::RoundedBox:
+        requireFiniteVec(mutation.halfExtents,
+                         "velox: mutated rounded box extents must be finite");
+        if (mutation.halfExtents.x <= 0.0f || mutation.halfExtents.y <= 0.0f ||
+            mutation.halfExtents.z <= 0.0f)
+            throw std::invalid_argument("velox: mutated rounded box extents must be positive");
+        requirePositive(mutation.radius, "velox: mutated rounded box radius must be positive");
+        candidate.shape = ShapeType::RoundedBox;
+        candidate.halfExtents = mutation.halfExtents;
+        candidate.radius = mutation.radius;
+        break;
+    case ShapeMutation::Type::Ellipsoid:
+        requireFiniteVec(mutation.halfExtents,
+                         "velox: mutated ellipsoid radii must be finite");
+        if (mutation.halfExtents.x <= 0.0f || mutation.halfExtents.y <= 0.0f ||
+            mutation.halfExtents.z <= 0.0f)
+            throw std::invalid_argument("velox: mutated ellipsoid radii must be positive");
+        candidate.shape = ShapeType::Ellipsoid;
+        candidate.halfExtents = mutation.halfExtents;
+        break;
     case ShapeMutation::Type::Hull:
     case ShapeMutation::Type::Compound: {
         const float mass = candidate.invMass > 0.0f ? 1.0f / candidate.invMass : 0.0f;
@@ -1433,6 +1555,21 @@ void World::scaleShape(BodyId id, const ShapeScale& scale) {
     switch (body.shape) {
     case ShapeType::Box:
         mutation.type = ShapeMutation::Type::Box;
+        mutation.halfExtents = {body.halfExtents.x * scale.factor.x,
+                                body.halfExtents.y * scale.factor.y,
+                                body.halfExtents.z * scale.factor.z};
+        break;
+    case ShapeType::RoundedBox:
+        if (scale.factor.x != scale.factor.y || scale.factor.y != scale.factor.z)
+            throw std::invalid_argument("velox: rounded box scaling must be uniform");
+        mutation.type = ShapeMutation::Type::RoundedBox;
+        mutation.halfExtents = {body.halfExtents.x * scale.factor.x,
+                                body.halfExtents.y * scale.factor.y,
+                                body.halfExtents.z * scale.factor.z};
+        mutation.radius = body.radius * scale.factor.x;
+        break;
+    case ShapeType::Ellipsoid:
+        mutation.type = ShapeMutation::Type::Ellipsoid;
         mutation.halfExtents = {body.halfExtents.x * scale.factor.x,
                                 body.halfExtents.y * scale.factor.y,
                                 body.halfExtents.z * scale.factor.z};
@@ -3099,6 +3236,17 @@ void World::stepImpl(float dt) {
             requirePositive(body.radius, "velox: cone body has an invalid radius");
             requirePositive(body.capsuleHalfHeight,
                             "velox: cone body has an invalid half height");
+            break;
+        case ShapeType::RoundedBox:
+            if (!finiteVec(body.halfExtents) || body.halfExtents.x <= 0.0f ||
+                body.halfExtents.y <= 0.0f || body.halfExtents.z <= 0.0f)
+                throw std::invalid_argument("velox: rounded box body has invalid half extents");
+            requirePositive(body.radius, "velox: rounded box body has an invalid radius");
+            break;
+        case ShapeType::Ellipsoid:
+            if (!finiteVec(body.halfExtents) || body.halfExtents.x <= 0.0f ||
+                body.halfExtents.y <= 0.0f || body.halfExtents.z <= 0.0f)
+                throw std::invalid_argument("velox: ellipsoid body has invalid radii");
             break;
         case ShapeType::Plane:
             if (!finiteVec(body.planeNormal) || lengthSq(body.planeNormal) < 1e-12f ||

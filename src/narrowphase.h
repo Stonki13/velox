@@ -322,6 +322,8 @@ VELOX_HD inline void bodyAabb(const Body& b, float dt, Vec3& lo, Vec3& hi) {
     float ext;
     switch (b.shape) {
     case ShapeType::Box:     ext = length(b.halfExtents); break;
+    case ShapeType::RoundedBox: ext = length(b.halfExtents) + b.radius; break;
+    case ShapeType::Ellipsoid: ext = vmax(b.halfExtents.x, vmax(b.halfExtents.y, b.halfExtents.z)); break;
     case ShapeType::Capsule: ext = b.capsuleHalfHeight + b.radius; break;
     case ShapeType::Sphere:  ext = b.radius; break;
     case ShapeType::Hull:    ext = b.radius; break;
@@ -597,7 +599,8 @@ VELOX_HD inline void meshConvex(const Body& conv, const Body& meshBody,
 VELOX_HD inline bool isConvexVolume(ShapeType t) {
     return t == ShapeType::Sphere || t == ShapeType::Box ||
            t == ShapeType::Capsule || t == ShapeType::Hull ||
-           t == ShapeType::Cylinder || t == ShapeType::Cone;
+           t == ShapeType::Cylinder || t == ShapeType::Cone ||
+           t == ShapeType::RoundedBox || t == ShapeType::Ellipsoid;
 }
 
 // Narrow phase for one pair; returns the number of contacts written to out

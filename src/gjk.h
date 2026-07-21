@@ -10,7 +10,7 @@ namespace velox {
 // GJK cores from ever overlapping in practice; boxes and triangles have
 // radius 0.
 struct Convex {
-    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull, Cylinder, Cone } kind;
+    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull, Cylinder, Cone, RoundedBox, Ellipsoid } kind;
     Vec3 position;      // world transform
     Quat orientation;
     Vec3 halfExtents;   // Box
@@ -76,6 +76,23 @@ struct Convex {
             Vec3 local = dot(d, tip) > dot(d, base) ? tip : base;
             return rotate(orientation, local);
         }
+        case RoundedBox: {
+            Vec3 d = rotateInv(orientation, dir);
+            Vec3 core{d.x >= 0 ? halfExtents.x : -halfExtents.x,
+                      d.y >= 0 ? halfExtents.y : -halfExtents.y,
+                      d.z >= 0 ? halfExtents.z : -halfExtents.z};
+            Vec3 n = normalize(d);
+            return rotate(orientation, core + n * radius);
+        }
+        case Ellipsoid: {
+            Vec3 d = rotateInv(orientation, dir);
+            Vec3 scaled{halfExtents.x * halfExtents.x * d.x,
+                        halfExtents.y * halfExtents.y * d.y,
+                        halfExtents.z * halfExtents.z * d.z};
+            float len = length(scaled);
+            Vec3 local = len > 1e-9f ? scaled * (1.0f / len) : Vec3{};
+            return rotate(orientation, local);
+        }
         }
         return {};
     }
@@ -138,6 +155,18 @@ VELOX_HD inline Convex makeConvex(const Body& b, const MeshSoupView& soup) {
         c.boundingRadius = vmax(1.5f * b.capsuleHalfHeight,
                                 sqrtf(b.radius * b.radius +
                                       0.25f * b.capsuleHalfHeight * b.capsuleHalfHeight));
+        break;
+    case ShapeType::RoundedBox:
+        c.kind = Convex::RoundedBox;
+        c.halfExtents = b.halfExtents;
+        c.radius = b.radius;
+        c.boundingRadius = length(b.halfExtents) + b.radius;
+        break;
+    case ShapeType::Ellipsoid:
+        c.kind = Convex::Ellipsoid;
+        c.halfExtents = b.halfExtents;
+        c.radius = 0.0f;
+        c.boundingRadius = vmax(b.halfExtents.x, vmax(b.halfExtents.y, b.halfExtents.z));
         break;
     default: // Plane/Mesh are not convex volumes; callers handle them separately
         c.kind = Convex::Point;
