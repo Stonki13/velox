@@ -100,6 +100,15 @@ void velox_World_RemoveJoint(velox_World* world, velox_JointId joint);
 // Explosion effect
 void velox_World_Explode(velox_World* world, velox_Vec3 origin, float radius, float impulse);
 
+// Recording/Replay
+typedef struct velox_ReplayRecording velox_ReplayRecording;
+
+velox_ReplayRecording* velox_ReplayRecording_Create(void);
+void velox_ReplayRecording_Destroy(velox_ReplayRecording* recording);
+void velox_ReplayRecording_Begin(velox_ReplayRecording* recording, velox_World* world, float dt);
+void velox_ReplayRecording_RecordFrame(velox_ReplayRecording* recording, velox_World* world);
+uint64_t velox_ReplayRecording_Verify(velox_ReplayRecording* recording, float positionTolerance, float velocityTolerance);
+
 #ifdef __cplusplus
 }
 #endif

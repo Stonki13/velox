@@ -168,3 +168,29 @@ void velox_World_RemoveJoint(velox_World* world, velox_JointId joint) {
 void velox_World_Explode(velox_World* world, velox_Vec3 origin, float radius, float impulse) {
     reinterpret_cast<World*>(world)->explode(toVec3(origin), radius, impulse);
 }
+
+// Recording/Replay
+velox_ReplayRecording* velox_ReplayRecording_Create(void) {
+    try {
+        ReplayRecording* r = new ReplayRecording();
+        return reinterpret_cast<velox_ReplayRecording*>(r);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void velox_ReplayRecording_Destroy(velox_ReplayRecording* recording) {
+    delete reinterpret_cast<ReplayRecording*>(recording);
+}
+
+void velox_ReplayRecording_Begin(velox_ReplayRecording* recording, velox_World* world, float dt) {
+    beginReplay(*reinterpret_cast<ReplayRecording*>(recording), *reinterpret_cast<World*>(world), dt);
+}
+
+void velox_ReplayRecording_RecordFrame(velox_ReplayRecording* recording, velox_World* world) {
+    recordReplayFrame(*reinterpret_cast<ReplayRecording*>(recording), *reinterpret_cast<World*>(world));
+}
+
+uint64_t velox_ReplayRecording_Verify(velox_ReplayRecording* recording, float positionTolerance, float velocityTolerance) {
+    return verifyReplay(*reinterpret_cast<ReplayRecording*>(recording), positionTolerance, velocityTolerance);
+}
