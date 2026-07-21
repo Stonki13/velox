@@ -93,6 +93,8 @@ struct Body {
     uint32_t categoryBits = 1u;
     uint32_t maskBits = UINT32_MAX;
     uint8_t sensor = 0;
+    uint8_t enableSleep = 1;    // when 0, body never enters sleep state
+    uint8_t fixedRotation = 0;  // when 1, angular velocity is zeroed and orientation is locked
 
     uint8_t asleep = 0;         // sleeping bodies skip integration and solving
     float sleepTimer = 0.0f;    // seconds below the motion threshold

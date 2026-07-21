@@ -185,9 +185,11 @@ public:
                 if (!b.isDynamic() || b.isLocked() || b.asleep) continue;
                 b.velocity += (gravity * b.gravityScale +
                                b.force * b.solverInvMass()) * dt;
-                b.angularVelocity += b.invInertiaMul(b.torque) * dt;
+                if (!b.fixedRotation) {
+                    b.angularVelocity += b.invInertiaMul(b.torque) * dt;
+                    b.angularVelocity *= 1.0f / (1.0f + b.angularDamping * dt);
+                }
                 b.velocity *= 1.0f / (1.0f + b.linearDamping * dt);
-                b.angularVelocity *= 1.0f / (1.0f + b.angularDamping * dt);
             }
         });
     }

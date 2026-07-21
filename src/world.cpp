@@ -1762,6 +1762,122 @@ void World::clearForces(BodyId id) {
     b.torque = {};
 }
 
+void World::setSensor(BodyId id, bool enabled) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setSensor");
+    Body& b = body(id);
+    b.sensor = enabled ? 1 : 0;
+    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+        [&](const Contact& c) { return c.a == resolve(id) || c.b == resolve(id); }),
+        contacts_.end());
+    broadPhase_->touched = true;
+}
+
+bool World::isSensor(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isSensor");
+    return bodies_[resolve(id)].sensor != 0;
+}
+
+void World::setGravityScale(BodyId id, float scale) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setGravityScale");
+    if (!finiteFloat(scale))
+        throw std::invalid_argument("velox: gravity scale must be finite");
+    body(id).gravityScale = scale;
+}
+
+float World::gravityScale(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "gravityScale");
+    return bodies_[resolve(id)].gravityScale;
+}
+
+void World::setLinearDamping(BodyId id, float damping) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setLinearDamping");
+    if (!finiteFloat(damping) || damping < 0.0f)
+        throw std::invalid_argument("velox: linear damping must be finite and non-negative");
+    body(id).linearDamping = damping;
+}
+
+void World::setAngularDamping(BodyId id, float damping) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setAngularDamping");
+    if (!finiteFloat(damping) || damping < 0.0f)
+        throw std::invalid_argument("velox: angular damping must be finite and non-negative");
+    body(id).angularDamping = damping;
+}
+
+void World::setCollisionFilter(BodyId id, uint32_t category, uint32_t mask) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setCollisionFilter");
+    Body& b = body(id);
+    b.categoryBits = category;
+    b.maskBits = mask;
+    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+        [&](const Contact& c) { return c.a == resolve(id) || c.b == resolve(id); }),
+        contacts_.end());
+    broadPhase_->touched = true;
+}
+
+void World::setEnableSleep(BodyId id, bool enabled) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setEnableSleep");
+    Body& b = body(id);
+    b.enableSleep = enabled ? 1 : 0;
+    if (!enabled) {
+        b.asleep = 0;
+        b.sleepTimer = 0.0f;
+    }
+}
+
+bool World::isSleepEnabled(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isSleepEnabled");
+    return bodies_[resolve(id)].enableSleep != 0;
+}
+
+void World::setFixedRotation(BodyId id, bool enabled) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setFixedRotation");
+    Body& b = body(id);
+    b.fixedRotation = enabled ? 1 : 0;
+    if (enabled) {
+        b.angularVelocity = {};
+        b.torque = {};
+    }
+}
+
+bool World::isFixedRotation(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isFixedRotation");
+    return bodies_[resolve(id)].fixedRotation != 0;
+}
+
+void World::wakeBody(BodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "wakeBody");
+    Body& b = body(id);
+    b.asleep = 0;
+    b.sleepTimer = 0.0f;
+}
+
+void World::sleepBody(BodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "sleepBody");
+    Body& b = body(id);
+    b.asleep = 1;
+    b.velocity = {};
+    b.angularVelocity = {};
+}
+
+void World::explode(Vec3 origin, float radius, float impulse) {
+    AccessGuard guard(*this, AccessKind::Mutation, "explode");
+    requireFiniteVec(origin, "velox: explosion origin must be finite");
+    requirePositive(radius, "velox: explosion radius must be positive");
+    if (radius <= 0.0f || impulse <= 0.0f) return;
+    float invRadius = 1.0f / radius;
+    for (Body& b : bodies_) {
+        if (!b.isDynamic() || b.asleep) continue;
+        Vec3 delta = b.position - origin;
+        float dist = length(delta);
+        if (dist >= radius || dist < 1e-8f) continue;
+        float falloff = 1.0f - dist * invRadius;
+        Vec3 dir = delta * (1.0f / dist);
+        b.velocity += dir * (impulse * falloff * b.invMass);
+        b.asleep = 0;
+        b.sleepTimer = 0.0f;
+    }
+}
+
 void World::shiftOrigin(Vec3 offset) {
     AccessGuard guard(*this, AccessKind::Mutation, "shiftOrigin");
     requireFiniteVec(offset, "velox: origin shift must be finite");
@@ -3144,7 +3260,7 @@ void World::updateSleeping(float dt) {
         if (bodies_[j.a].isDynamic() && bodies_[j.b].isDynamic()) unite(j.a, j.b);
 
     for (Body& b : bodies_) {
-        if (!b.isDynamic() || b.asleep) continue;
+        if (!b.isDynamic() || b.asleep || !b.enableSleep) continue;
         float motion = lengthSq(b.velocity) + lengthSq(b.angularVelocity);
         b.sleepTimer = motion < kMotionTol ? b.sleepTimer + dt : 0.0f;
     }
@@ -3153,13 +3269,13 @@ void World::updateSleeping(float dt) {
     islandTimer_.assign(n, 1e30f);
     for (BodyIndex i = 0; i < n; ++i) {
         Body& b = bodies_[i];
-        if (!b.isDynamic() || b.asleep) continue;
+        if (!b.isDynamic() || b.asleep || !b.enableSleep) continue;
         uint32_t root = find(i);
         if (b.sleepTimer < islandTimer_[root]) islandTimer_[root] = b.sleepTimer;
     }
     for (BodyIndex i = 0; i < n; ++i) {
         Body& b = bodies_[i];
-        if (!b.isDynamic() || b.asleep) continue;
+        if (!b.isDynamic() || b.asleep || !b.enableSleep) continue;
         if (islandTimer_[find(i)] > kTimeToSleep) {
             b.asleep = 1;
             b.velocity = {};

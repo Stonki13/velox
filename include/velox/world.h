@@ -338,6 +338,22 @@ public:
     void addLinearImpulse(BodyId id, Vec3 impulse);
     void addImpulseAtPoint(BodyId id, Vec3 impulse, Vec3 worldPoint);
     void clearForces(BodyId id);
+    void setSensor(BodyId id, bool enabled);
+    bool isSensor(BodyId id) const;
+    void setGravityScale(BodyId id, float scale);
+    float gravityScale(BodyId id) const;
+    void setLinearDamping(BodyId id, float damping);
+    void setAngularDamping(BodyId id, float damping);
+    void setCollisionFilter(BodyId id, uint32_t categoryBits, uint32_t maskBits);
+    void setEnableSleep(BodyId id, bool enabled);
+    bool isSleepEnabled(BodyId id) const;
+    void setFixedRotation(BodyId id, bool enabled);
+    bool isFixedRotation(BodyId id) const;
+    void wakeBody(BodyId id);
+    void sleepBody(BodyId id);
+    // Apply a radial impulse from origin to all dynamic bodies within radius.
+    // Falloff is linear: full impulse at center, zero at radius boundary.
+    void explode(Vec3 origin, float radius, float impulse);
     // Subtracts offset from every world-space coordinate while preserving
     // relative geometry and dynamics. Use this to keep large worlds near the
     // floating-point origin without rebuilding bodies, joints, or meshes.
