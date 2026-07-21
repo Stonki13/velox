@@ -31,6 +31,7 @@ add_library(velox
     src/serialization.cpp
     src/benchmark.cpp
     src/velox_c.cpp
+    src/manifold.cpp
 )
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
