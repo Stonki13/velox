@@ -5,6 +5,22 @@ All notable changes to Velox are documented here. The project follows
 breaking changes are allowed, but must be recorded in this file and follow the
 deprecation policy where practical.
 
+## [0.4.0] - 2026-07-21
+
+### Added
+
+- `TaskSystem` interface fully wired into CPU backend parallel dispatch
+  (`dispatchChunks`, `parallelChunks`, `integrate`) for game engine integration.
+- `Motor` joint type — position-controlled constraint with max force/torque clamping.
+- `World::addMotorJoint()` public API.
+- `BodyEvent` Created/Destroyed lifecycle events alongside existing Moved events.
+- Unit tests for character controller, vehicle model, and ragdoll builder.
+
+### Changed
+
+- Marked stale design sketches (`design/character_controller.h`, `design/vehicle.h`,
+  `design/serialization.h`) as superseded by production implementations.
+
 ## [0.3.0] - 2026-07-21
 
 ### Added
