@@ -3,6 +3,7 @@
 #include "joint.h"
 #include "queries.h"
 #include "solver.h"
+#include "task_system.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -43,6 +44,15 @@ struct JointBreakEvent {
     BodyId a, b;
     float force = 0.0f;
     float torque = 0.0f;
+};
+
+enum class BodyEventType : uint8_t { Created, Destroyed, Moved };
+
+struct BodyEvent {
+    BodyEventType type;
+    BodyId body;
+    Vec3 position;
+    Quat orientation;
 };
 
 // Closest points between two bodies' surfaces. distance is negative when the
@@ -269,6 +279,11 @@ public:
     const char* backendName() const;
     void setWorkerCount(uint32_t count);
     uint32_t workerCount() const;
+    // Inject an external task system for parallel work distribution.
+    // Pass nullptr to revert to the internal worker pool. The TaskSystem
+    // must remain alive for the lifetime of the World (or until replaced).
+    void setTaskSystem(TaskSystem* system);
+    TaskSystem* taskSystem() const;
 
     Vec3 gravity{0, -9.81f, 0};
 
@@ -387,6 +402,9 @@ public:
     const std::vector<JointBreakEvent>& jointBreakEvents() const {
         return jointBreakEvents_;
     }
+
+    // Body lifecycle events from the most recent step().
+    const std::vector<BodyEvent>& bodyEvents() const { return bodyEvents_; }
 
     // Contact and sensor Begin/Persist/End events from the most recent step().
     const std::vector<ContactEvent>& contactEvents() const { return events_; }
@@ -523,12 +541,14 @@ private:
     std::vector<float> islandTimer_;
     std::vector<ContactEvent> events_;
     std::vector<JointBreakEvent> jointBreakEvents_;
+    std::vector<BodyEvent> bodyEvents_;
     std::vector<uint64_t> prevPairKeys_;
     ContactModifier contactModifier_;
     IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;
     DeterminismMode determinismMode_ = DeterminismMode::Relaxed;
     DeviceLossPolicy deviceLossPolicy_ = DeviceLossPolicy::FallbackToCPU;
     GPUResidentMode gpuResidentMode_ = GPUResidentMode::Disabled;
+    TaskSystem* taskSystem_ = nullptr;
     bool fallbackToCPU_ = false;
     WorldCcdDefaults ccdDefaults_;
     WorldMultiToiSettings multiToiSettings_;

@@ -442,6 +442,16 @@ uint32_t World::workerCount() const {
     return backend_->workerCount();
 }
 
+void World::setTaskSystem(TaskSystem* system) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setTaskSystem");
+    taskSystem_ = system;
+}
+
+TaskSystem* World::taskSystem() const {
+    AccessGuard guard(*this, AccessKind::Query, "taskSystem");
+    return taskSystem_;
+}
+
 void World::setDeterminismMode(DeterminismMode mode) {
     AccessGuard guard(*this, AccessKind::Mutation, "setDeterminismMode");
     if (mode != DeterminismMode::Relaxed && mode != DeterminismMode::Strict)
@@ -3338,6 +3348,7 @@ void World::stepImpl(float dt) {
         return;
     }
     jointBreakEvents_.clear();
+    bodyEvents_.clear();
     if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
     if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
     for (Body& body : bodies_) {
@@ -3973,6 +3984,14 @@ void World::stepImpl(float dt) {
     lastStepStats_.jointSolverMs = jointSolverAccum;
     lastStepStats_.ccdRecoveryMs = lastStepStats_.ccdMs;
     lastStepStats_.islandCount = backend_->lastIslandCount();
+
+    for (size_t i = 0; i < bodies_.size(); ++i) {
+        const Body& b = bodies_[i];
+        if (!b.isDynamic()) continue;
+        uint32_t slot = bodyDenseToSlot_[i];
+        BodyId id = BodyId::make(slot, bodySlots_[slot].generation);
+        bodyEvents_.push_back({BodyEventType::Moved, id, b.position, b.orientation});
+    }
 }
 
 } // namespace velox
