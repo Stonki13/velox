@@ -29,6 +29,7 @@ add_library(velox
     src/ragdoll.cpp
     src/vehicle.cpp
     src/serialization.cpp
+    src/benchmark.cpp
 )
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

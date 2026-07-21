@@ -395,6 +395,19 @@ void World::setDeviceLossPolicy(DeviceLossPolicy policy) {
     deviceLossPolicy_ = policy;
 }
 
+GPUResidentMode World::gpuResidentMode() const {
+    AccessGuard guard(*this, AccessKind::Query, "gpuResidentMode");
+    return gpuResidentMode_;
+}
+
+void World::setGPUResidentMode(GPUResidentMode mode) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setGPUResidentMode");
+    if (mode != GPUResidentMode::Disabled &&
+        mode != GPUResidentMode::Resident)
+        throw std::invalid_argument("velox: invalid GPU resident mode");
+    gpuResidentMode_ = mode;
+}
+
 bool World::isOnCPUBackend() const {
     AccessGuard guard(*this, AccessKind::Query, "isOnCPUBackend");
     return fallbackToCPU_ || std::string(backend_->name()) == "cpu";

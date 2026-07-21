@@ -181,6 +181,14 @@ enum class DeterminismMode : uint8_t { Relaxed = 0, Strict = 1 };
 // lockstep-deterministic transition.
 enum class DeviceLossPolicy : uint8_t { FallbackToCPU = 0, ThrowException = 1 };
 
+// Controls whether the CUDA backend keeps body/contact/joint data resident on
+// the GPU across step() calls, eliminating per-substep PCIe transfers.
+// Disabled is the default and matches the original per-substep upload path.
+// Resident activates the fast path when the backend supports it; the world
+// silently falls back to the non-resident path when constraints prevent it
+// (unsupported joint types, adaptive iteration, shape mutations mid-step).
+enum class GPUResidentMode : uint8_t { Disabled = 0, Resident = 1 };
+
 // Controls which threads may enter World methods. Strict is the default and
 // confines all access to the creating thread. Relaxed permits cross-thread
 // query calls, but mutations and step() remain creator-thread only. Concurrent
@@ -232,6 +240,8 @@ public:
 
     DeviceLossPolicy deviceLossPolicy() const;
     void setDeviceLossPolicy(DeviceLossPolicy policy);
+    GPUResidentMode gpuResidentMode() const;
+    void setGPUResidentMode(GPUResidentMode mode);
     // True whenever the active backend is the portable CPU implementation,
     // including an Auto/CUDA world that fell back after a recoverable failure.
     bool isOnCPUBackend() const;
@@ -502,6 +512,7 @@ private:
     IslandSolvingMode islandSolvingMode_ = IslandSolvingMode::Parallel;
     DeterminismMode determinismMode_ = DeterminismMode::Relaxed;
     DeviceLossPolicy deviceLossPolicy_ = DeviceLossPolicy::FallbackToCPU;
+    GPUResidentMode gpuResidentMode_ = GPUResidentMode::Disabled;
     bool fallbackToCPU_ = false;
     WorldCcdDefaults ccdDefaults_;
     WorldMultiToiSettings multiToiSettings_;
