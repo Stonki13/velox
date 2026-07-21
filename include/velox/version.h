@@ -7,10 +7,10 @@ namespace velox {
 // Semantic version of the public Velox API. CMake reads these constants when
 // configuring the package, so installed package metadata cannot drift from the
 // headers consumers compile against.
-inline constexpr uint32_t kVersionMajor = 0;
-inline constexpr uint32_t kVersionMinor = 5;
+inline constexpr uint32_t kVersionMajor = 1;
+inline constexpr uint32_t kVersionMinor = 0;
 inline constexpr uint32_t kVersionPatch = 0;
-inline constexpr const char kVersionString[] = "0.5.0";
+inline constexpr const char kVersionString[] = "1.0.0";
 inline constexpr uint32_t kMinCxxStandard = 17;
 
 inline constexpr const char* versionString() { return kVersionString; }

@@ -1,9 +1,23 @@
 # Changelog
 
 All notable changes to Velox are documented here. The project follows
-[Semantic Versioning](https://semver.org/) while the major version is zero:
-breaking changes are allowed, but must be recorded in this file and follow the
-deprecation policy where practical.
+[Semantic Versioning](https://semver.org/). As of 1.0.0, the public API is
+frozen for backward compatibility. Breaking changes require a major version bump.
+
+## [1.0.0] - 2026-07-22
+
+### Added
+
+- **Persistent contact manifold infrastructure** with Sutherland-Hodgman clipping
+  for stable resting contacts and feature-keyed warm starting.
+- `Vec2` type added to `math.h` for 2D operations.
+- `Manifold`, `ManifoldPoint`, and `ContactFeature` types for advanced collision handling.
+
+### Changed
+
+- **Version 1.0.0**: Public API is now frozen. Future breaking changes require
+  a major version bump per semantic versioning.
+- README updated to reflect production-ready status with 35-test suite.
 
 ## [0.5.0] - 2026-07-21
 
