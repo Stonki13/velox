@@ -69,7 +69,7 @@ void addJoints(World& world, std::vector<BodyId>& tracked) {
 
 int main() {
     World world(velox::BackendType::Cpu);
-    world.setWorkerCount(0);
+    world.setWorkerCount(1);
     world.gravity = {0, -9.81f, 0};
     addTerrain(world);
     addStructures(world);

@@ -270,7 +270,17 @@ struct alignas(64) Body {
         }
         bool anisotropic = invInertia.x != invInertia.y ||
                            invInertia.y != invInertia.z;
-        if (isDynamic() && anisotropic) {
+        const float minInverseInertia =
+            vmin(invInertia.x, vmin(invInertia.y, invInertia.z));
+        const float maxInverseInertia =
+            vmax(invInertia.x, vmax(invInertia.y, invInertia.z));
+        // The implicit free-rotation solve becomes numerically ill-conditioned
+        // once the principal inertia ratio is extreme. Preserve the supplied
+        // angular velocity in that case; it is a stable approximation and
+        // avoids manufacturing energy from round-off.
+        const bool stableGyroscopicSolve = minInverseInertia > 0.0f &&
+            maxInverseInertia / minInverseInertia <= 1.0e6f;
+        if (isDynamic() && anisotropic && stableGyroscopicSolve) {
             Vec3 angularMomentum = worldAngularMomentum();
             Quat start = orientation;
             Vec3 startVelocity = angularVelocity;

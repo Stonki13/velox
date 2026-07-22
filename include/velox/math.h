@@ -1,4 +1,5 @@
 #pragma once
+#include <cfloat>
 #include <cmath>
 
 // Every math/geometry function is compiled for both host and device so the
@@ -85,10 +86,28 @@ VELOX_HD inline Quat mul(const Quat& a, const Quat& b) {
 }
 
 VELOX_HD inline Quat normalize(const Quat& q) {
-    float len = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    if (len < 1e-8f) return {};
-    float inv = 1.0f / len;
-    return {q.x * inv, q.y * inv, q.z * inv, q.w * inv};
+    const float lengthSquared = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    // Preserve the ordinary path exactly so existing CPU/CUDA trajectories
+    // retain their canonical rounding. Only rescale when a valid, extreme
+    // intermediate would overflow the direct length calculation.
+    if (lengthSquared >= 1e-16f && lengthSquared <= FLT_MAX) {
+        const float inv = 1.0f / sqrtf(lengthSquared);
+        return {q.x * inv, q.y * inv, q.z * inv, q.w * inv};
+    }
+    // Scale before squaring so a valid, high-angular-velocity intermediate
+    // cannot overflow its length calculation to infinity and collapse to a
+    // zero quaternion. This remains host/device compatible.
+    const float scale = vmax(vmax(fabsf(q.x), fabsf(q.y)),
+                             vmax(fabsf(q.z), fabsf(q.w)));
+    if (!(scale >= 1e-8f)) return {};
+    const float x = q.x / scale;
+    const float y = q.y / scale;
+    const float z = q.z / scale;
+    const float w = q.w / scale;
+    const float length = sqrtf(x * x + y * y + z * z + w * w);
+    if (!(length >= 1e-8f)) return {};
+    const float inv = 1.0f / length;
+    return {x * inv, y * inv, z * inv, w * inv};
 }
 
 VELOX_HD inline Vec3 rotate(const Quat& q, const Vec3& v) {

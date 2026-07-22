@@ -142,6 +142,17 @@ TEST_CASE("Quat normalize") {
     CHECK(len == doctest::Approx(1.0f).epsilon(1e-6f));
 }
 
+TEST_CASE("Quat normalize handles finite overflow-scale inputs") {
+    Quat q{1.0e30f, -2.0e30f, 3.0e30f, -4.0e30f};
+    Quat n = normalize(q);
+    const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z + n.w * n.w);
+    CHECK(std::isfinite(n.x));
+    CHECK(std::isfinite(n.y));
+    CHECK(std::isfinite(n.z));
+    CHECK(std::isfinite(n.w));
+    CHECK(len == doctest::Approx(1.0f).epsilon(1e-6f));
+}
+
 TEST_CASE("Quat integrate preserves norm") {
     Quat q = fromAxisAngle({0, 1, 0}, 0.5f);
     Vec3 omega{0, 2, 0};
