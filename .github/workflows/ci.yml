@@ -87,7 +87,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
-            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev
       - name: Configure shared full-feature build
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
