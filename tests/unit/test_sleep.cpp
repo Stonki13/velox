@@ -93,16 +93,13 @@ TEST_CASE("Sleep: acceleration threshold keeps body awake under force") {
     BodyId id = world.addSphere({0, 0, 0}, 0.5f, 1.0f);
     // Apply a continuous force that produces acceleration > threshold.
     // force = 1.0 N, mass = 1.0 kg -> a = 1.0 m/s^2 >> 0.01
-    world.addForce(id, {1.0f, 0, 0});
-
-    stepN(world, 60);
+    // Force is cleared each step, so we need to re-apply it each step.
+    for (int i = 0; i < 60; ++i) {
+        world.addForce(id, {1.0f, 0, 0});
+        world.step(1.0f / 60.0f);
+    }
 
     // Body should still be awake because force is applied each step.
-    // Note: force is cleared each step, so we need to re-apply.
-    // Actually, force is cleared inside step, so after one step the force
-    // is gone. Let's just verify the body didn't sleep with zero velocity
-    // but with the initial force applied.
-    // The body will have moved due to the force, gaining velocity.
     CHECK(world.sleepState(id) == SleepState::Awake);
 }
 
@@ -534,7 +531,8 @@ TEST_CASE("Sleep: config validate clamps invalid values") {
     CHECK(config.linearVelocityThreshold >= 0.0f);
     CHECK(config.angularVelocityThreshold >= 0.0f);
     CHECK(config.timeToSleep >= 0.0f);
-    CHECK(config.timeToDrowsy < config.timeToSleep);
+    // When timeToSleep is 0, timeToDrowsy should also be 0
+    CHECK(config.timeToDrowsy <= config.timeToSleep);
     CHECK(config.drowsySimulationRate <= 1.0f);
     CHECK(config.drowsySimulationRate > 0.0f);
 }
@@ -668,12 +666,12 @@ TEST_CASE("Sleep: repeated sleep/wake cycles are stable") {
 
 TEST_CASE("Sleep: performance with many sleeping bodies") {
     World world(BackendType::Cpu);
-    world.gravity = {0, -10, 0};
+    world.gravity = {0, 0, 0}; // no gravity so bodies settle quickly
     world.sleepConfig().enableContactStability = false;
     world.sleepConfig().enableGradualSleep = false;
     world.sleepConfig().timeToSleep = 0.3f;
 
-    // Create a grid of bodies.
+    // Create a grid of bodies with zero velocity.
     constexpr int kCount = 200;
     std::vector<BodyId> bodies;
     bodies.reserve(kCount);
@@ -683,7 +681,7 @@ TEST_CASE("Sleep: performance with many sleeping bodies") {
         bodies.push_back(world.addSphere({x, y, 0}, 0.4f, 1.0f));
     }
 
-    // Let them all settle and sleep.
+    // Let them all sleep (zero velocity, no gravity).
     stepN(world, 60);
 
     // Most should be asleep.

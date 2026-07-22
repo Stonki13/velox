@@ -145,8 +145,11 @@ struct SleepConfig {
         if (accelerationThreshold < 0.0f) accelerationThreshold = 0.0f;
         if (timeToSleep < 0.0f) timeToSleep = 0.0f;
         if (timeToDrowsy < 0.0f) timeToDrowsy = 0.0f;
-        if (timeToDrowsy >= timeToSleep && timeToSleep > 0.0f)
+        // Ensure timeToDrowsy < timeToSleep when both are positive
+        if (timeToSleep > 0.0f && timeToDrowsy >= timeToSleep)
             timeToDrowsy = timeToSleep * 0.5f;
+        // If timeToSleep is 0, timeToDrowsy should also be 0
+        if (timeToSleep == 0.0f) timeToDrowsy = 0.0f;
         if (drowsySimulationRate <= 0.0f) drowsySimulationRate = 0.01f;
         if (drowsySimulationRate > 1.0f) drowsySimulationRate = 1.0f;
         if (contactStabilityThreshold < 0.0f) contactStabilityThreshold = 0.0f;
