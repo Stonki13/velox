@@ -65,7 +65,10 @@ TEST_CASE("ArenaAllocator alignment") {
         for (size_t alignment : {1u, 2u, 4u, 8u, 16u, 32u, 64u, 128u}) {
             void* ptr = arena.allocate(16, alignment);
             REQUIRE(ptr != nullptr);
-            CHECK(reinterpret_cast<uintptr_t>(ptr) % alignment == 0);
+            uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+            uintptr_t remainder = addr % alignment;
+            INFO("alignment=" << alignment << " ptr=" << ptr << " addr=" << addr << " remainder=" << remainder);
+            CHECK(remainder == 0);
         }
     }
 
