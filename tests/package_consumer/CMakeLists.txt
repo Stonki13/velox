@@ -9,5 +9,12 @@ target_compile_features(velox_package_consumer PRIVATE cxx_std_17)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_test(NAME velox.package_consumer COMMAND velox_package_consumer)
+    if(WIN32)
+        add_test(NAME velox.package_consumer
+            COMMAND ${CMAKE_COMMAND} -E env
+                "PATH=$<TARGET_FILE_DIR:velox::velox>;$ENV{PATH}"
+                $<TARGET_FILE:velox_package_consumer>)
+    else()
+        add_test(NAME velox.package_consumer COMMAND velox_package_consumer)
+    endif()
 endif()

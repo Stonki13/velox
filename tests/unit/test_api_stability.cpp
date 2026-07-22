@@ -269,7 +269,17 @@ TEST_CASE("velox_Api vtable function pointers match direct C API") {
     velox_Api api;
     velox_Api_Init(&api);
 
-    // Verify that the vtable pointers are the same as the direct symbols.
+    // Static builds expose the direct implementation addresses. On Windows,
+    // a shared-library import uses executable-local thunks, so pointer
+    // identity is not part of the DLL ABI; the following end-to-end test
+    // verifies those imported vtable entries are callable.
+#if defined(VELOX_USING_SHARED) && defined(_WIN32)
+    CHECK(api.World_Create != nullptr);
+    CHECK(api.World_Destroy != nullptr);
+    CHECK(api.World_Step != nullptr);
+    CHECK(api.Body_GetPosition != nullptr);
+    CHECK(api.World_Raycast != nullptr);
+#else
     CHECK(reinterpret_cast<void*>(api.World_Create) ==
           reinterpret_cast<void*>(velox_World_Create));
     CHECK(reinterpret_cast<void*>(api.World_Destroy) ==
@@ -280,6 +290,7 @@ TEST_CASE("velox_Api vtable function pointers match direct C API") {
           reinterpret_cast<void*>(velox_Body_GetPosition));
     CHECK(reinterpret_cast<void*>(api.World_Raycast) ==
           reinterpret_cast<void*>(velox_World_Raycast));
+#endif
 }
 
 TEST_CASE("velox_Api vtable is functional end-to-end") {

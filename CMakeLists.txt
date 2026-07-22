@@ -11,11 +11,19 @@ find_package(Threads REQUIRED)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Keep Windows shared-library executables beside velox.dll. This makes CTest
+# and direct example launches work without requiring callers to modify PATH.
+if(WIN32 AND BUILD_SHARED_LIBS)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+endif()
+
 option(VELOX_BUILD_EXAMPLES "Build example programs" ON)
 option(VELOX_BUILD_BENCHMARKS "Build the performance benchmark suite" ON)
 option(VELOX_BUILD_SANDBOX "Build the optional GLFW/Vulkan interactive sandbox" OFF)
 option(VELOX_BUILD_DIFFTEST "Build differential tests against Jolt Physics" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
+set(VELOX_CUDA_ARCHITECTURES "native" CACHE STRING
+    "CUDA architectures passed to CMake when the CUDA backend is enabled")
 option(VELOX_STRICT_FLOATING_POINT
        "Build the CPU reference path with reproducible floating-point semantics" OFF)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
@@ -37,6 +45,12 @@ add_library(velox
     src/manifold.cpp
     src/sleep.cpp
 )
+if(WIN32 AND BUILD_SHARED_LIBS)
+    # The C++ API is header-declared rather than individually annotated with
+    # VELOX_API. Generate the import library from its public implementation
+    # symbols so installed shared packages link correctly on Windows.
+    set_target_properties(velox PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -49,7 +63,7 @@ if(VELOX_ENABLE_CUDA)
     if(CMAKE_CUDA_COMPILER)
         enable_language(CUDA)
         set(CMAKE_CUDA_STANDARD 17)
-        set_property(TARGET velox PROPERTY CUDA_ARCHITECTURES native)
+        set_property(TARGET velox PROPERTY CUDA_ARCHITECTURES ${VELOX_CUDA_ARCHITECTURES})
         target_sources(velox PRIVATE src/backend_cuda.cu)
         set(VELOX_HAS_CUDA 1)
         find_package(CUDAToolkit REQUIRED)
@@ -73,10 +87,10 @@ target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
 # resolved target type, so static builds (the default for Conan and for static
 # vcpkg triplets) are unaffected and the same install rules serve both package
 # managers and both library types.
-target_compile_definitions(velox PRIVATE
-    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:VELOX_BUILDING_SHARED>")
-target_compile_definitions(velox INTERFACE
-    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:VELOX_USING_SHARED>")
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(velox PRIVATE VELOX_BUILDING_SHARED)
+    target_compile_definitions(velox INTERFACE VELOX_USING_SHARED)
+endif()
 
 include(cmake/determinism.cmake)
 velox_configure_floating_point(velox ${VELOX_STRICT_FLOATING_POINT})

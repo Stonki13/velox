@@ -72,9 +72,31 @@ jobs:
           -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
       - name: Build thread-safety regression
-        run: cmake --build build --target thread_safety_demo --parallel
+        run: cmake --build build --target test_thread_safety --parallel
       - name: Run eight-worker access test
-        run: ctest --test-dir build -R "^velox.thread_safety$" --output-on-failure
+        run: ctest --test-dir build -R "^velox.unit.test_thread_safety$" --output-on-failure
+
+  full-integration:
+    name: Linux / full optional-feature integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure shared full-feature build
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_SHARED_LIBS=ON -DVELOX_ENABLE_CUDA=OFF
+          -DVELOX_BUILD_SANDBOX=ON -DVELOX_BUILD_DIFFTEST=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Run complete integration suite
+        run: ctest --test-dir build --output-on-failure
+      - name: Install shared package
+        run: cmake --install build --prefix install
+      - name: Run installed gameplay consumer
+        run: |
+          cmake -S tests/package_consumer -B package-consumer -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/install"
+          cmake --build package-consumer --parallel
+          ctest --test-dir package-consumer --output-on-failure
 
   strict-cpu:
     name: Strict CPU / ${{ matrix.name }}

@@ -1,0 +1,34 @@
+name: CUDA hardware validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_architectures:
+        description: CMake CUDA architectures (for example 120 or native)
+        required: false
+        default: native
+
+jobs:
+  cuda:
+    name: CUDA / self-hosted GPU
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record CUDA environment
+        run: |
+          nvidia-smi
+          nvcc --version
+      - name: Configure CUDA build
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=ON
+          -DVELOX_CUDA_ARCHITECTURES=${{ inputs.cuda_architectures }}
+          -DVELOX_BUILD_SANDBOX=OFF -DVELOX_BUILD_DIFFTEST=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Require CUDA execution and CPU/CUDA parity
+        run: |
+          ctest --test-dir build -R "^velox.cuda_smoke$" --output-on-failure
+          build/examples/stress_demo
+          build/examples/proto_manifold

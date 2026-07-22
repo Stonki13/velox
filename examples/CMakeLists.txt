@@ -77,6 +77,11 @@ target_link_libraries(runtime_mutation_demo PRIVATE velox)
 add_executable(cuda_recovery_demo cuda_recovery_demo.cpp)
 target_link_libraries(cuda_recovery_demo PRIVATE velox)
 
+if(VELOX_HAS_CUDA)
+    add_executable(cuda_smoke cuda_smoke.cpp)
+    target_link_libraries(cuda_smoke PRIVATE velox)
+endif()
+
 add_executable(release_gate release_gate.cpp)
 target_link_libraries(release_gate PRIVATE velox)
 
@@ -95,6 +100,10 @@ if(BUILD_TESTING)
     add_test(NAME velox.batched_queries COMMAND batched_queries_demo)
     add_test(NAME velox.runtime_mutation COMMAND runtime_mutation_demo)
     add_test(NAME velox.cuda_recovery COMMAND cuda_recovery_demo)
+    if(VELOX_HAS_CUDA)
+        add_test(NAME velox.cuda_smoke COMMAND cuda_smoke)
+        set_tests_properties(velox.cuda_smoke PROPERTIES TIMEOUT 180)
+    endif()
     set_tests_properties(velox.determinism PROPERTIES TIMEOUT 180)
 endif()
 

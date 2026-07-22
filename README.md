@@ -263,6 +263,8 @@ ctest --test-dir build -C Release --output-on-failure
   compatibility requirements, and how to report a reproducible physics issue.
 - [Real-workload release gate](docs/release-gate.md) defines the game-like
   CTest workload used to catch cross-subsystem regressions.
+- [Production readiness](docs/production-readiness.md) lists the required
+  hosted CI, CUDA hardware, packaging, performance, and release gates.
 - [C API reference](include/velox/velox_c.h) provides FFI-compatible bindings
   for integration with C, Rust, Python, and other languages.
 - `doxygen docs/Doxyfile` generates API reference HTML in `docs/api-reference`.
