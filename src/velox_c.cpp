@@ -31,7 +31,12 @@ void velox_World_Destroy(velox_World* world) {
 }
 
 void velox_World_Step(velox_World* world, float dt) {
-    reinterpret_cast<World*>(world)->step(dt);
+    try {
+        reinterpret_cast<World*>(world)->step(dt);
+    } catch (...) {
+        // C API cannot propagate exceptions - swallow them
+        // Callers should use the C++ API for error handling
+    }
 }
 
 void velox_World_SetGravity(velox_World* world, velox_Vec3 gravity) {
@@ -44,31 +49,59 @@ void velox_World_SetSubsteps(velox_World* world, int substeps) {
 
 // Body creation
 velox_BodyId velox_World_AddSphere(velox_World* world, velox_Vec3 position, float radius, float mass) {
-    return fromBodyId(reinterpret_cast<World*>(world)->addSphere(toVec3(position), radius, mass));
+    try {
+        return fromBodyId(reinterpret_cast<World*>(world)->addSphere(toVec3(position), radius, mass));
+    } catch (...) {
+        return velox_BodyId{0};
+    }
 }
 
 velox_BodyId velox_World_AddBox(velox_World* world, velox_Vec3 position, velox_Vec3 halfExtents, float mass) {
-    return fromBodyId(reinterpret_cast<World*>(world)->addBox(toVec3(position), toVec3(halfExtents), mass));
+    try {
+        return fromBodyId(reinterpret_cast<World*>(world)->addBox(toVec3(position), toVec3(halfExtents), mass));
+    } catch (...) {
+        return velox_BodyId{0};
+    }
 }
 
 velox_BodyId velox_World_AddCapsule(velox_World* world, velox_Vec3 position, float radius, float halfHeight, float mass) {
-    return fromBodyId(reinterpret_cast<World*>(world)->addCapsule(toVec3(position), radius, halfHeight, mass));
+    try {
+        return fromBodyId(reinterpret_cast<World*>(world)->addCapsule(toVec3(position), radius, halfHeight, mass));
+    } catch (...) {
+        return velox_BodyId{0};
+    }
 }
 
 velox_BodyId velox_World_AddCylinder(velox_World* world, velox_Vec3 position, float radius, float halfHeight, float mass) {
-    return fromBodyId(reinterpret_cast<World*>(world)->addCylinder(toVec3(position), radius, halfHeight, mass));
+    try {
+        return fromBodyId(reinterpret_cast<World*>(world)->addCylinder(toVec3(position), radius, halfHeight, mass));
+    } catch (...) {
+        return velox_BodyId{0};
+    }
 }
 
 velox_BodyId velox_World_AddCone(velox_World* world, velox_Vec3 position, float radius, float height, float mass) {
-    return fromBodyId(reinterpret_cast<World*>(world)->addCone(toVec3(position), radius, height, mass));
+    try {
+        return fromBodyId(reinterpret_cast<World*>(world)->addCone(toVec3(position), radius, height, mass));
+    } catch (...) {
+        return velox_BodyId{0};
+    }
 }
 
 velox_BodyId velox_World_AddStaticPlane(velox_World* world, velox_Vec3 normal, float offset) {
-    return fromBodyId(reinterpret_cast<World*>(world)->addStaticPlane(toVec3(normal), offset));
+    try {
+        return fromBodyId(reinterpret_cast<World*>(world)->addStaticPlane(toVec3(normal), offset));
+    } catch (...) {
+        return velox_BodyId{0};
+    }
 }
 
 void velox_World_RemoveBody(velox_World* world, velox_BodyId body) {
-    reinterpret_cast<World*>(world)->removeBody(toBodyId(body));
+    try {
+        reinterpret_cast<World*>(world)->removeBody(toBodyId(body));
+    } catch (...) {
+        // Ignore errors in C API
+    }
 }
 
 // Body property access

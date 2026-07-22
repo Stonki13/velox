@@ -512,7 +512,10 @@ VELOX_HD inline void solveWheel(Joint& joint, Body& a, Body& b,
         float omega = tau * joint.suspensionFrequencyHz;
         float stiffness = mass * omega * omega;
         float damping = 2.0f * mass * joint.suspensionDampingRatio * omega;
-        float softness = 1.0f / (dt * (damping + dt * stiffness));
+        // Guard against division by zero when suspensionFrequencyHz is 0
+        float softness = (damping + dt * stiffness) > 1e-10f
+            ? 1.0f / (dt * (damping + dt * stiffness))
+            : 0.0f;
         float bias = displacement * dt * stiffness * softness;
         float lambda = -(axisSpeed + bias +
                          softness * joint.springImpulse) / (kAxis + softness);

@@ -480,6 +480,14 @@ private:
         islandSizes_ = arena_.allocateArray<size_t>(bodyCount);
         islandContacts_ = arena_.allocateArray<uint32_t>(contactCount);
         islandRanges_ = arena_.allocateArray<IslandRange>(bodyCount);
+        
+        // Check for allocation failure (arena exhausted)
+        if (!islandParent_ || !islandIdOfRoot_ || !islandOfContact_ ||
+            !islandSizes_ || !islandContacts_ || !islandRanges_) {
+            // Fall back to single-island solving
+            lastIslandCount_ = 1;
+            return;
+        }
         islandContactCount_ = contactCount;
 
         for (uint32_t i = 0; i < bodyCount; ++i) islandParent_[i] = i;
@@ -539,6 +547,12 @@ private:
 
         solverBatches_ = arena_.allocateArray<SolverBatch>(contactCount + 1);
         solverBodyStamp_ = arena_.allocateArray<uint32_t>(bodyCount);
+        
+        // Check for allocation failure (arena exhausted)
+        if (!solverBatches_ || !solverBodyStamp_) {
+            // Fall back to sequential solving
+            return;
+        }
         solverBatchCount_ = 0;
 
         std::memset(solverBodyStamp_, 0, bodyCount * sizeof(uint32_t));
