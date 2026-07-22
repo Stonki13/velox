@@ -156,8 +156,13 @@ float velox_Body_GetMass(velox_World* world, velox_BodyId body) {
 }
 
 void velox_Body_SetMass(velox_World* world, velox_BodyId body, float mass) {
-    Body& b = reinterpret_cast<World*>(world)->body(toBodyId(body));
-    b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    try {
+        Body& b = reinterpret_cast<World*>(world)->body(toBodyId(body));
+        b.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+        // Note: inertia is not refreshed here - use setMassProperties for full control
+    } catch (...) {
+        // Ignore errors in C API
+    }
 }
 
 velox_ShapeType velox_Body_GetShapeType(velox_World* world, velox_BodyId body) {

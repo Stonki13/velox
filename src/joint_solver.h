@@ -459,7 +459,9 @@ VELOX_HD inline void solveWeld(Joint& joint, Body& a, Body& b,
                              dot({1,0,0}, b.invInertiaMul({1,0,0})) + 1e-12f);
         float stiffness = mass * omega * omega;
         float damping = 2.0f * mass * joint.weldDampingRatio * omega;
-        float softness = 1.0f / (dt * (damping + dt * stiffness));
+        // Guard against underflow with zero damping + tiny dt
+        float denom = vmax(dt * (damping + dt * stiffness), 1e-12f);
+        float softness = 1.0f / denom;
         Vec3 angularBias = rotation * (dt * stiffness * softness);
         Vec3 lambda = mul(inverse(angK),
                           -(relativeW + angularBias +
