@@ -86,6 +86,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DBUILD_SHARED_LIBS=ON -DVELOX_ENABLE_CUDA=OFF
           -DVELOX_BUILD_SANDBOX=ON -DVELOX_BUILD_DIFFTEST=ON
+          -DGLFW_BUILD_WAYLAND=OFF
       - name: Build
         run: cmake --build build --parallel
       - name: Run complete integration suite
