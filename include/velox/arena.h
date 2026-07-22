@@ -31,11 +31,15 @@ public:
         : capacity_(capacityBytes), offset_(0) {
         if (capacityBytes == 0)
             throw std::invalid_argument("velox: arena capacity must be > 0");
-        // Allocate with extra space for alignment, then align the block pointer.
-        size_t allocSize = capacityBytes + 128; // extra for 64-byte alignment
+        // The allocator promises power-of-two alignments up to 128 bytes.
+        // Align the backing block itself so the first allocation can satisfy
+        // every supported alignment.
+        constexpr size_t kBlockAlignment = 128;
+        size_t allocSize = capacityBytes + kBlockAlignment - 1;
         void* raw = ::operator new(allocSize);
         uintptr_t rawAddr = reinterpret_cast<uintptr_t>(raw);
-        uintptr_t alignedAddr = (rawAddr + 63) & ~uintptr_t(63);
+        uintptr_t alignedAddr = (rawAddr + kBlockAlignment - 1) &
+                               ~uintptr_t(kBlockAlignment - 1);
         block_ = reinterpret_cast<uint8_t*>(alignedAddr);
         rawBlock_ = raw;
     }

@@ -1755,7 +1755,7 @@ void World::setAngularVelocity(BodyId id, Vec3 velocity) {
     requireFiniteVec(velocity, "velox: angular velocity must be finite");
     Body& b = body(id);
     if (b.isStatic()) throw std::invalid_argument("velox: static bodies cannot have velocity");
-    if (b.isLocked()) {
+    if (b.isRotationLocked()) {
         b.angularVelocity = {};
         return;
     }
@@ -1939,7 +1939,10 @@ void World::sleepBody(BodyId id) {
 void World::explode(Vec3 origin, float radius, float impulse) {
     AccessGuard guard(*this, AccessKind::Mutation, "explode");
     requireFiniteVec(origin, "velox: explosion origin must be finite");
-    requirePositive(radius, "velox: explosion radius must be positive");
+    if (!finiteFloat(radius))
+        throw std::invalid_argument("velox: explosion radius must be finite");
+    if (radius < 0.0f)
+        throw std::invalid_argument("velox: explosion radius must be non-negative");
     if (radius <= 0.0f || impulse <= 0.0f) return;
     float invRadius = 1.0f / radius;
     for (Body& b : bodies_) {
@@ -3729,8 +3732,9 @@ void World::stepImpl(float dt) {
     pendingBodyEvents_.clear();
     if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
     if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
-#ifndef NDEBUG
-    // Full validation only in debug builds - release builds skip this for performance
+    // Validate mutable public state on every build. Bodies and joints are
+    // intentionally editable through the public API, so malformed values
+    // must never enter the solver in a Release build.
     for (Body& body : bodies_) {
         validateRuntimeBody(body);
         switch (body.shape) {
@@ -3879,7 +3883,6 @@ void World::stepImpl(float dt) {
             joint.breakForce < 0.0f || joint.breakTorque < 0.0f)
             throw std::invalid_argument("velox: joint contains invalid break thresholds");
     }
-#endif // NDEBUG
     const int nSub = substeps > 0 ? substeps : 1;
     const float h = dt / nSub;
 
@@ -3993,10 +3996,12 @@ void World::stepImpl(float dt) {
         auto moving = [](const Body& x) {
             return lengthSq(x.velocity) + lengthSq(x.angularVelocity) > 1e-3f;
         };
-        if (a.asleep && !b.isStatic() && !isFullyAsleep(b.asleep) && (impact || moving(b))) {
+        if (isFullyAsleep(a.asleep) && !b.isStatic() && !isFullyAsleep(b.asleep) &&
+            (impact || moving(b))) {
             a.asleep = 0; a.sleepTimer = 0.0f;
         }
-        if (b.asleep && !a.isStatic() && !isFullyAsleep(a.asleep) && (impact || moving(a))) {
+        if (isFullyAsleep(b.asleep) && !a.isStatic() && !isFullyAsleep(a.asleep) &&
+            (impact || moving(a))) {
             b.asleep = 0; b.sleepTimer = 0.0f;
         }
     }
@@ -4318,7 +4323,9 @@ void World::stepImpl(float dt) {
                     representativeSet = true;
                     ev.impulse = c.normalImpulse;
                     ev.point = c.point;
-                    ev.normal = c.a == lo ? c.normal : -c.normal;
+                    // Narrow phase normals point from B toward A; events use
+                    // the canonical low-handle to high-handle direction.
+                    ev.normal = c.a == lo ? -c.normal : c.normal;
                 }
             }
             pairKeys_.push_back(key);
@@ -4329,10 +4336,30 @@ void World::stepImpl(float dt) {
             BodyIndex lo = (BodyIndex)(key >> 32);
             BodyIndex hi = (BodyIndex)key;
             if (lo >= bodies_.size() || hi >= bodies_.size()) continue;
+            const Body& a = bodies_[lo];
+            const Body& b = bodies_[hi];
+            if ((a.isStatic() || isFullyAsleep(a.asleep)) &&
+                (b.isStatic() || isFullyAsleep(b.asleep))) {
+                ContactEvent persisted{bodyHandle(lo), bodyHandle(hi), {}, {}, 0.0f,
+                                       ContactEventType::Persist,
+                                       a.isSensor() || b.isSensor()};
+                for (const Contact& c : prevContacts_) {
+                    if (canonicalKey(c.a, c.b) != key) continue;
+                    persisted.point = c.point;
+                    persisted.normal = c.a == lo ? -c.normal : c.normal;
+                    persisted.impulse = c.normalImpulse;
+                    break;
+                }
+                pairKeys_.push_back(key);
+                events_.push_back(persisted);
+                continue;
+            }
             events_.push_back({bodyHandle(lo), bodyHandle(hi), {}, {}, 0.0f,
                                ContactEventType::End,
                                bodies_[lo].isSensor() || bodies_[hi].isSensor()});
         }
+        std::sort(pairKeys_.begin(), pairKeys_.end());
+        pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
         prevPairKeys_ = pairKeys_;
     }
 
@@ -4342,7 +4369,27 @@ void World::stepImpl(float dt) {
         body.force = {};
         body.torque = {};
     }
-    prevContacts_ = contacts_;
+    std::vector<Contact> nextPreviousContacts = contacts_;
+    for (const Contact& previousContact : prevContacts_) {
+        const uint64_t key = (uint64_t)(previousContact.a < previousContact.b
+                                            ? previousContact.a : previousContact.b)
+                           << 32 |
+                             (previousContact.a < previousContact.b
+                                  ? previousContact.b : previousContact.a);
+        if (!std::binary_search(pairKeys_.begin(), pairKeys_.end(), key)) continue;
+        const Body& a = bodies_[previousContact.a];
+        const Body& b = bodies_[previousContact.b];
+        if (!((a.isStatic() || isFullyAsleep(a.asleep)) &&
+              (b.isStatic() || isFullyAsleep(b.asleep)))) continue;
+        const bool alreadyCached = std::any_of(
+            nextPreviousContacts.begin(), nextPreviousContacts.end(),
+            [&](const Contact& contact) {
+                return ((uint64_t)(contact.a < contact.b ? contact.a : contact.b) << 32 |
+                        (contact.a < contact.b ? contact.b : contact.a)) == key;
+            });
+        if (!alreadyCached) nextPreviousContacts.push_back(previousContact);
+    }
+    prevContacts_ = std::move(nextPreviousContacts);
     std::sort(prevContacts_.begin(), prevContacts_.end(),
               [](const Contact& x, const Contact& y) {
                   return ((uint64_t)x.a << 32 | x.b) < ((uint64_t)y.a << 32 | y.b);

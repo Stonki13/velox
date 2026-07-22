@@ -415,7 +415,12 @@ void deserializeWorldV2(World& world, const ArchiveV2& archive) {
     if (!bodiesSec)
         throw std::runtime_error("velox v2: archive missing Bodies section");
 
-    std::vector<uint8_t> blob = decodeSection(*bodiesSec);
+    std::vector<uint8_t> blob;
+    for (const ArchiveSection& section : archive.sections) {
+        if (section.type != SectionType::Bodies) continue;
+        std::vector<uint8_t> chunk = decodeSection(section);
+        blob.insert(blob.end(), chunk.begin(), chunk.end());
+    }
 
     // Reconstruct a V1 SerializedScene and use the proven V1 decoder.
     SerializedScene v1;

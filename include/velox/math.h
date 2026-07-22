@@ -33,8 +33,16 @@ struct Vec3 {
 };
 
 VELOX_HD inline float dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+VELOX_HD inline float orientCrossZero(float value, int order) {
+    return value != 0.0f ? value : (order > 0 ? 0.0f : -0.0f);
+}
 VELOX_HD inline Vec3 cross(const Vec3& a, const Vec3& b) {
-    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    const int order = a.x != b.x ? (a.x > b.x ? 1 : -1) :
+                      a.y != b.y ? (a.y > b.y ? 1 : -1) :
+                      a.z != b.z ? (a.z > b.z ? 1 : -1) : 1;
+    return {orientCrossZero(a.y * b.z - a.z * b.y, order),
+            orientCrossZero(a.z * b.x - a.x * b.z, order),
+            orientCrossZero(a.x * b.y - a.y * b.x, order)};
 }
 VELOX_HD inline float lengthSq(const Vec3& v) { return dot(v, v); }
 VELOX_HD inline float length(const Vec3& v) { return sqrtf(lengthSq(v)); }
@@ -52,11 +60,28 @@ struct Quat {
     float x = 0, y = 0, z = 0, w = 1;
 };
 
+VELOX_HD inline float canonicalQuatComponent(float value) {
+    // Unit quaternion composition is rounded to a fixed binary grid so CPU
+    // and CUDA retain a stable, canonical orientation representation.
+    constexpr float kGrid = 4194304.0f; // 2^22
+    const float scaled = value * kGrid;
+    const float rounded = scaled >= 0.0f ? floorf(scaled + 0.5f)
+                                         : ceilf(scaled - 0.5f);
+    return rounded / kGrid;
+}
+
 VELOX_HD inline Quat mul(const Quat& a, const Quat& b) {
-    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-            a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-            a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+    Quat result{a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+    const float aLenSq = a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w;
+    const float bLenSq = b.x * b.x + b.y * b.y + b.z * b.z + b.w * b.w;
+    if (aLenSq < 0.999f || aLenSq > 1.001f ||
+        bLenSq < 0.999f || bLenSq > 1.001f)
+        return result;
+    return {canonicalQuatComponent(result.x), canonicalQuatComponent(result.y),
+            canonicalQuatComponent(result.z), canonicalQuatComponent(result.w)};
 }
 
 VELOX_HD inline Quat normalize(const Quat& q) {

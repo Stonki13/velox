@@ -266,7 +266,7 @@ int runSoak(int steps) {
                             s, b.position.y);
                 return 1;
             }
-            if (w.isAwake(id)) allAsleep = false;
+            if (!velox::isFullyAsleep(b.asleep)) allAsleep = false;
         }
         if (s % 1000 == 999 && firstAllAsleep < 0) {
             int awake = 0;

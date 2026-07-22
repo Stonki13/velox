@@ -578,13 +578,10 @@ private:
 // per thread), each ThreadLocal<T> object hands every thread its own T, so you
 // can have many independent per-thread scratch buffers.
 //
-// Implementation note: portability is favored over raw speed. A mutex guards a
-// map from thread id to value; the common "same thread as last time" case is
-// served from a lock-free cache so the steady-state cost is a single atomic
-// load. This is well suited to per-thread scratch that is touched a modest
-// number of times per frame; it is NOT intended for the innermost loop of a
-// solver. For that, capture a reference from getOrCreate() once per frame and
-// reuse it.
+// Implementation note: a mutex guards the map from thread id to value. This
+// is intended for per-thread scratch that is touched a modest number of times
+// per frame; it is NOT intended for the innermost loop of a solver. For that,
+// capture a reference from getOrCreate() once per frame and reuse it.
 template <typename T>
 class ThreadLocal {
 public:
@@ -596,21 +593,12 @@ public:
     // Get this thread's value, default-constructing (or copying the initial
     // value) on first access. Never returns null.
     T& getOrCreate() {
-        const std::thread::id id = std::this_thread::get_id();
-        // Fast path: same thread as the previous access.
-        if (cacheId_.load(std::memory_order_relaxed) == id) {
-            T* cached = cachePtr_.load(std::memory_order_acquire);
-            if (cached) return *cached;
-        }
-        return resolveSlow(id);
+        return resolveSlow(std::this_thread::get_id());
     }
 
     // Get this thread's value, or nullptr if it has never been created.
     T* get() {
         const std::thread::id id = std::this_thread::get_id();
-        if (cacheId_.load(std::memory_order_relaxed) == id) {
-            return cachePtr_.load(std::memory_order_acquire);
-        }
         std::lock_guard<std::mutex> guard(mutex_);
         auto it = values_.find(id);
         return it == values_.end() ? nullptr : it->second.get();
@@ -643,14 +631,9 @@ private:
             std::unique_ptr<T> created =
                 hasInitial_ ? std::make_unique<T>(initial_)
                             : std::make_unique<T>();
-            T* raw = created.get();
             values_.emplace(id, std::move(created));
-            cachePtr_.store(raw, std::memory_order_release);
-            cacheId_.store(id, std::memory_order_relaxed);
-            return *raw;
+            return *values_.find(id)->second;
         }
-        cachePtr_.store(it->second.get(), std::memory_order_release);
-        cacheId_.store(id, std::memory_order_relaxed);
         return *it->second;
     }
 
@@ -658,9 +641,6 @@ private:
     bool hasInitial_ = false;
     mutable std::mutex mutex_;
     std::unordered_map<std::thread::id, std::unique_ptr<T>> values_;
-    // Single-slot cache of the most recent (thread id -> value) resolution.
-    std::atomic<std::thread::id> cacheId_{};
-    std::atomic<T*> cachePtr_{nullptr};
 };
 
 // ---------------------------------------------------------------------------

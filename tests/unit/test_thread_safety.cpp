@@ -380,12 +380,20 @@ TEST_CASE("Queries do not deadlock against a stepping owner thread") {
     constexpr int kQueryThreads = 4;
     constexpr int kSteps = 120;
     std::atomic<bool> done{false};
+    std::atomic<bool> beginQueries{false};
     AtomicCounter<int> queriesCompleted;
+    AtomicCounter<int> workersReady;
+    AtomicCounter<int> queriesStarted;
 
     Joiner joiner;
     for (int t = 0; t < kQueryThreads; ++t) {
         joiner.threads.emplace_back([&] {
+            workersReady.increment();
+            while (!beginQueries.load(std::memory_order_acquire)) {
+                Backoff::cpuRelax();
+            }
             while (!done.load(std::memory_order_acquire)) {
+                queriesStarted.increment();
                 // These calls overlap step() and must wait for it rather than
                 // deadlock; the world lock is reentrant on the owner side only.
                 std::vector<BodyId> out;
@@ -397,6 +405,9 @@ TEST_CASE("Queries do not deadlock against a stepping owner thread") {
     }
 
     // Owner thread steps; workers query concurrently the whole time.
+    while (workersReady.load() != kQueryThreads) Backoff::cpuRelax();
+    beginQueries.store(true, std::memory_order_release);
+    while (queriesStarted.load() < kQueryThreads) Backoff::cpuRelax();
     for (int s = 0; s < kSteps; ++s) {
         world.step(1.0f / 60.0f);
     }
@@ -413,7 +424,10 @@ TEST_CASE("Async queries from many threads resolve without deadlock") {
     // the fuller path where the owner may also be queried/mutated.
     world.setThreadSafetyPolicy(ThreadSafetyPolicy::Concurrent);
 
+    // The test exercises async handoff, so the query target must remain valid
+    // while worker scheduling and owner-thread stepping interleave.
     BodyId target = world.addSphere({5.0f, 0.0f, 0.0f}, 1.0f, 1.0f);
+    world.setMotionType(target, MotionType::Static);
 
     constexpr int kThreads = 8;
     std::atomic<int> resolved{0};

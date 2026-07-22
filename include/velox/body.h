@@ -1,4 +1,5 @@
 #pragma once
+#include <cfloat>
 #include "ccd.h"
 #include "math.h"
 #include <cstdint>
@@ -178,6 +179,10 @@ struct alignas(64) Body {
     VELOX_HD bool isLocked() const {
         return ccdTuning.quality == MotionQuality::Locked;
     }
+    /// True when orientation and angular motion are constrained.
+    VELOX_HD bool isRotationLocked() const {
+        return isLocked() || fixedRotation != 0;
+    }
     /**
      * @brief Test the group + category/mask collision filter against another body.
      *
@@ -214,7 +219,7 @@ struct alignas(64) Body {
 
     /// World-space inverse-inertia multiply: I⁻¹_world * v = R (I⁻¹_body (Rᵀ v)).
     VELOX_HD Vec3 invInertiaMulAt(const Vec3& v, const Quat& at) const {
-        if (!isDynamic() || isLocked()) return {};
+        if (!isDynamic() || isRotationLocked()) return {};
         Quat frame = inertiaFrameAt(at);
         Vec3 local = rotateInv(frame, v);
         return rotate(frame, {local.x * invInertia.x,
@@ -229,7 +234,7 @@ struct alignas(64) Body {
 
     /// Inertia (not inverse) multiply at the body's current orientation.
     VELOX_HD Vec3 inertiaMul(const Vec3& v) const {
-        if (isLocked()) return {};
+        if (isRotationLocked()) return {};
         Quat frame = inertiaFrameAt(orientation);
         Vec3 local = rotateInv(frame, v);
         Vec3 weighted{
@@ -259,7 +264,10 @@ struct alignas(64) Body {
      * @param dt Timestep in seconds.
      */
     VELOX_HD void advanceOrientation(float dt) {
-        if (isLocked()) return;
+        if (isRotationLocked()) {
+            angularVelocity = {};
+            return;
+        }
         bool anisotropic = invInertia.x != invInertia.y ||
                            invInertia.y != invInertia.z;
         if (isDynamic() && anisotropic) {
@@ -287,7 +295,18 @@ struct alignas(64) Body {
      */
     VELOX_HD void advanceTransform(float dt) {
         if (isLocked()) return;
-        position += velocity * dt;
+        const Vec3 previous = position;
+        const Vec3 delta = velocity * dt;
+        position += delta;
+        // At large world coordinates a valid substep displacement can be
+        // smaller than one float ULP. Preserve forward progress instead of
+        // silently freezing a moving body until an origin shift occurs.
+        if (delta.x != 0.0f && position.x == previous.x)
+            position.x = nextafterf(previous.x, delta.x > 0.0f ? FLT_MAX : -FLT_MAX);
+        if (delta.y != 0.0f && position.y == previous.y)
+            position.y = nextafterf(previous.y, delta.y > 0.0f ? FLT_MAX : -FLT_MAX);
+        if (delta.z != 0.0f && position.z == previous.z)
+            position.z = nextafterf(previous.z, delta.z > 0.0f ? FLT_MAX : -FLT_MAX);
         advanceOrientation(dt);
     }
 

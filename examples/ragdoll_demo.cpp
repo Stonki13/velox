@@ -18,7 +18,7 @@ bool finite(Vec3 value) {
 bool throwsInvalidArgument(const std::function<void()>& function) {
     try {
         function();
-    } catch (const std::invalid_argument&) {
+    } catch (const VeloxInvalidArgument&) {
         return true;
     }
     return false;
