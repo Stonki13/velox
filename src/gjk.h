@@ -1,5 +1,6 @@
 #pragma once
 #include "velox/backend.h"
+#include "velox/simd.h"
 
 // Header-only, VELOX_HD: the exact same GJK runs on CPU and on the GPU.
 
@@ -10,7 +11,7 @@ namespace velox {
 // GJK cores from ever overlapping in practice; boxes and triangles have
 // radius 0.
 struct Convex {
-    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull, Cylinder, Cone } kind;
+    enum Kind : uint8_t { Point, Segment, Box, Triangle, Hull, Cylinder, Cone, RoundedBox, Ellipsoid } kind;
     Vec3 position;      // world transform
     Quat orientation;
     Vec3 halfExtents;   // Box
@@ -41,13 +42,28 @@ struct Convex {
             return best;
         }
         case Box: {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            Vec3 d = simd::simdRotateInv(orientation, dir);
+#else
             Vec3 d = rotateInv(orientation, dir);
+#endif
             Vec3 local{d.x >= 0 ? halfExtents.x : -halfExtents.x,
                        d.y >= 0 ? halfExtents.y : -halfExtents.y,
                        d.z >= 0 ? halfExtents.z : -halfExtents.z};
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            return simd::simdRotate(orientation, local);
+#else
             return rotate(orientation, local);
+#endif
         }
         case Hull: {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            Vec3 d = simd::simdRotateInv(orientation, dir);
+            // SIMD batch: 4-wide (SSE2/NEON) or 8-wide (AVX2) dot products
+            // per iteration instead of one scalar dot at a time.
+            uint32_t best = simd::hullSupportIndex(d, hullPts, hullCount);
+            return simd::simdRotate(orientation, hullPts[best]);
+#else
             Vec3 d = rotateInv(orientation, dir);
             uint32_t best = 0;
             float bestDot = dot(d, hullPts[0]);
@@ -56,17 +72,30 @@ struct Convex {
                 if (t > bestDot) { bestDot = t; best = i; }
             }
             return rotate(orientation, hullPts[best]);
+#endif
         }
         case Cylinder: {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            Vec3 d = simd::simdRotateInv(orientation, dir);
+#else
             Vec3 d = rotateInv(orientation, dir);
+#endif
             float radial = sqrtf(d.x * d.x + d.z * d.z);
             Vec3 local{radial > 1e-9f ? geomRadius * d.x / radial : 0.0f,
                        d.y >= 0.0f ? halfExtents.y : -halfExtents.y,
                        radial > 1e-9f ? geomRadius * d.z / radial : 0.0f};
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            return simd::simdRotate(orientation, local);
+#else
             return rotate(orientation, local);
+#endif
         }
         case Cone: {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            Vec3 d = simd::simdRotateInv(orientation, dir);
+#else
             Vec3 d = rotateInv(orientation, dir);
+#endif
             float radial = sqrtf(d.x * d.x + d.z * d.z);
             float halfHeight = halfExtents.y;
             Vec3 base{radial > 1e-9f ? geomRadius * d.x / radial : 0.0f,
@@ -74,7 +103,44 @@ struct Convex {
                       radial > 1e-9f ? geomRadius * d.z / radial : 0.0f};
             Vec3 tip{0, 1.5f * halfHeight, 0};
             Vec3 local = dot(d, tip) > dot(d, base) ? tip : base;
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            return simd::simdRotate(orientation, local);
+#else
             return rotate(orientation, local);
+#endif
+        }
+        case RoundedBox: {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            Vec3 d = simd::simdRotateInv(orientation, dir);
+#else
+            Vec3 d = rotateInv(orientation, dir);
+#endif
+            Vec3 core{d.x >= 0 ? halfExtents.x : -halfExtents.x,
+                      d.y >= 0 ? halfExtents.y : -halfExtents.y,
+                      d.z >= 0 ? halfExtents.z : -halfExtents.z};
+            Vec3 n = normalize(d);
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            return simd::simdRotate(orientation, core + n * radius);
+#else
+            return rotate(orientation, core + n * radius);
+#endif
+        }
+        case Ellipsoid: {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            Vec3 d = simd::simdRotateInv(orientation, dir);
+#else
+            Vec3 d = rotateInv(orientation, dir);
+#endif
+            Vec3 scaled{halfExtents.x * halfExtents.x * d.x,
+                        halfExtents.y * halfExtents.y * d.y,
+                        halfExtents.z * halfExtents.z * d.z};
+            float len = length(scaled);
+            Vec3 local = len > 1e-9f ? scaled * (1.0f / len) : Vec3{};
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+            return simd::simdRotate(orientation, local);
+#else
+            return rotate(orientation, local);
+#endif
         }
         }
         return {};
@@ -138,6 +204,18 @@ VELOX_HD inline Convex makeConvex(const Body& b, const MeshSoupView& soup) {
         c.boundingRadius = vmax(1.5f * b.capsuleHalfHeight,
                                 sqrtf(b.radius * b.radius +
                                       0.25f * b.capsuleHalfHeight * b.capsuleHalfHeight));
+        break;
+    case ShapeType::RoundedBox:
+        c.kind = Convex::RoundedBox;
+        c.halfExtents = b.halfExtents;
+        c.radius = b.radius;
+        c.boundingRadius = length(b.halfExtents) + b.radius;
+        break;
+    case ShapeType::Ellipsoid:
+        c.kind = Convex::Ellipsoid;
+        c.halfExtents = b.halfExtents;
+        c.radius = 0.0f;
+        c.boundingRadius = vmax(b.halfExtents.x, vmax(b.halfExtents.y, b.halfExtents.z));
         break;
     default: // Plane/Mesh are not convex volumes; callers handle them separately
         c.kind = Convex::Point;

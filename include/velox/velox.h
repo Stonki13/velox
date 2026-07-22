@@ -1,10 +1,23 @@
 #pragma once
 // Velox — a fast, tunneling-proof 3D physics engine.
 // Single include for the public API.
+#include "version.h"
+#include "platform.h"
+#include "error.h"
+#include "thread_safety.h"
 #include "math.h"
+#include "arena.h"
+#include "memory_pool.h"
+#include "ccd.h"
 #include "body.h"
+#include "collision_filter.h"
 #include "joint.h"
+#include "solver.h"
+#include "queries.h"
+#include "sleep.h"
 #include "world.h"
 #include "character.h"
+#include "ragdoll.h"
 #include "vehicle.h"
 #include "serialization.h"
+#include "serialization_v2.h"

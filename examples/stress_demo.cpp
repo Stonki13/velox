@@ -1500,25 +1500,30 @@ static void testStepStats() {
     check(ok, "step diagnostics (workload counters and phase timings)");
 }
 
-// 39. Torque-free asymmetric bodies conserve world angular momentum while
-// their body-space inertia rotates, including CPU/CUDA trajectory parity.
+// 39. A torque-free T-handle conserves world angular momentum while its
+// body-space inertia rotates, including CPU/CUDA trajectory parity.
 static void testGyroscopicIntegration() {
     velox::World cpu(velox::BackendType::Cpu);
     velox::World accelerated;
     cpu.gravity = accelerated.gravity = {0, 0, 0};
-    auto cpuBox = cpu.addBox({}, {0.25f, 0.75f, 1.25f}, 2.0f);
-    auto acceleratedBox = accelerated.addBox(
-        {}, {0.25f, 0.75f, 1.25f}, 2.0f);
-    cpu.setAngularVelocity(cpuBox, {3, 5, 7});
-    accelerated.setAngularVelocity(acceleratedBox, {3, 5, 7});
-    velox::Vec3 initialMomentum = cpu.body(cpuBox).worldAngularMomentum();
-    float initialEnergy = cpu.body(cpuBox).rotationalKineticEnergy();
+    const std::vector<velox::CompoundShape> tHandle = {
+        {velox::ShapeType::Box, {0.0f, -0.2f, 0.0f}, {}, 0.5f,
+         {0.12f, 0.6f, 0.12f}},
+        {velox::ShapeType::Box, {0.0f, 0.5f, 0.0f}, {}, 0.5f,
+         {0.75f, 0.1f, 0.16f}},
+    };
+    auto cpuHandle = cpu.addCompound({}, tHandle, 2.0f);
+    auto acceleratedHandle = accelerated.addCompound({}, tHandle, 2.0f);
+    cpu.setAngularVelocity(cpuHandle, {3, 5, 7});
+    accelerated.setAngularVelocity(acceleratedHandle, {3, 5, 7});
+    velox::Vec3 initialMomentum = cpu.body(cpuHandle).worldAngularMomentum();
+    float initialEnergy = cpu.body(cpuHandle).rotationalKineticEnergy();
     for (int i = 0; i < 600; ++i) {
         cpu.step(1.0f / 240.0f);
         accelerated.step(1.0f / 240.0f);
     }
-    const velox::Body& expected = cpu.body(cpuBox);
-    const velox::Body& actual = accelerated.body(acceleratedBox);
+    const velox::Body& expected = cpu.body(cpuHandle);
+    const velox::Body& actual = accelerated.body(acceleratedHandle);
     float momentumError = velox::length(
         expected.worldAngularMomentum() - initialMomentum) /
         velox::length(initialMomentum);
@@ -2067,6 +2072,197 @@ static void testClosestPoints() {
     check(ok, "closestPoints (witnesses, plane, overlap sign)");
 }
 
+// Multi-TOI query ordering and the CCD configuration data are tested before
+// the event-processing pass consumes these candidates during stepping.
+static void testCcdConfigurationAndMultiToiQuery() {
+    velox::World w(velox::BackendType::Cpu);
+    w.gravity = {0, 0, 0};
+    velox::WorldCcdDefaults defaults;
+    defaults.defaultQuality = velox::MotionQuality::High;
+    defaults.defaultCollisionMargin = 0.02f;
+    defaults.defaultSpeculativeDistance = 0.03f;
+    defaults.defaultMinVelocityForCCD = 0.0f;
+    w.setCcdDefaults(defaults);
+    const auto bullet = w.addSphere({0, 0, 0}, 0.05f, 1.0f);
+    w.setLinearVelocity(bullet, {1000, 0, 0});
+    w.addStaticPlane({-1, 0, 0}, -2.0f);
+    w.addStaticPlane({-1, 0, 0}, -4.0f);
+    w.addStaticPlane({-1, 0, 0}, -6.0f);
+
+    velox::WorldMultiToiSettings settings = w.multiToiSettings();
+    settings.defaultConfig.maxToiEventsPerBody = 3;
+    settings.defaultConfig.toiVelocityFloor = 0.0f;
+    settings.defaultConfig.toiPenetrationBias = 1e-4f;
+    settings.maxTotalEventsPerStep = 3;
+    w.setMultiToiSettings(settings);
+    const std::vector<velox::MultiToiHit> hits = w.queryMultiToi(bullet, 0.01f);
+
+    bool ordered = hits.size() == 3;
+    for (size_t i = 1; i < hits.size(); ++i)
+        ordered &= hits[i - 1].toi < hits[i].toi &&
+                   hits[i - 1].body.value < UINT64_MAX &&
+                   hits[i].normal.x < -0.99f;
+    ordered &= hits.empty() || (std::fabs(hits[0].toi - 0.00195f) < 2e-4f &&
+                                std::fabs(hits[2].toi - 0.00595f) < 2e-4f);
+
+    settings.defaultConfig.maxToiEventsPerBody = 2;
+    w.setMultiToiSettings(settings);
+    const bool capped = w.queryMultiToi(bullet, 0.01f).size() == 2;
+
+    w.step(0.01f);
+    const velox::Body bulletAfterImpact = w.bodyState(bullet);
+    const bool steppedImpact = bulletAfterImpact.position.x < 2.0f &&
+                               bulletAfterImpact.velocity.x < 0.0f;
+
+    velox::World multi(velox::BackendType::Cpu);
+    multi.gravity = {0, 0, 0};
+    multi.setCcdDefaults(defaults);
+    velox::WorldMultiToiSettings multiSettings = multi.multiToiSettings();
+    multiSettings.defaultConfig.maxToiEventsPerBody = 4;
+    multiSettings.defaultConfig.toiVelocityFloor = 0.0f;
+    multiSettings.defaultConfig.toiPenetrationBias = 1e-4f;
+    multiSettings.maxTotalEventsPerStep = 4;
+    multi.setMultiToiSettings(multiSettings);
+    const auto ricochet = multi.addSphere({0, 0, 0}, 0.05f, 1.0f);
+    multi.body(ricochet).restitution = 1.0f;
+    multi.setLinearVelocity(ricochet, {1000, 0, 500});
+    const auto positiveX = multi.addStaticPlane({-1, 0, 0}, -2.0f);
+    const auto negativeX = multi.addStaticPlane({1, 0, 0}, -2.0f);
+    const auto positiveZ = multi.addStaticPlane({0, 0, -1}, -4.0f);
+    multi.body(positiveX).restitution = 1.0f;
+    multi.body(negativeX).restitution = 1.0f;
+    multi.body(positiveZ).restitution = 1.0f;
+    multi.step(0.01f);
+    const velox::Body ricochetAfter = multi.bodyState(ricochet);
+    const float ricochetSpeedBefore = velox::length(velox::Vec3{1000, 0, 500});
+    const bool sequentialImpacts = multi.lastStepStats().multiToiEvents == 4 &&
+                                   ricochetAfter.position.x > 1.6f &&
+                                   ricochetAfter.velocity.x < -100.0f &&
+                                   ricochetAfter.velocity.z < -100.0f &&
+                                   std::fabs(velox::length(ricochetAfter.velocity) -
+                                             ricochetSpeedBefore) < 1e-3f;
+
+    velox::World cappedReplay(velox::BackendType::Cpu);
+    cappedReplay.gravity = {0, 0, 0};
+    cappedReplay.setCcdDefaults(defaults);
+    velox::WorldMultiToiSettings cappedSettings = multiSettings;
+    cappedSettings.defaultConfig.maxToiEventsPerBody = 2;
+    cappedSettings.maxTotalEventsPerStep = 2;
+    cappedReplay.setMultiToiSettings(cappedSettings);
+    const auto cappedBullet = cappedReplay.addSphere({0, 0, 0}, 0.05f, 1.0f);
+    cappedReplay.body(cappedBullet).restitution = 1.0f;
+    cappedReplay.setLinearVelocity(cappedBullet, {1000, 0, 500});
+    const auto cappedPositiveX = cappedReplay.addStaticPlane({-1, 0, 0}, -2.0f);
+    const auto cappedNegativeX = cappedReplay.addStaticPlane({1, 0, 0}, -2.0f);
+    const auto cappedPositiveZ = cappedReplay.addStaticPlane({0, 0, -1}, -4.0f);
+    cappedReplay.body(cappedPositiveX).restitution = 1.0f;
+    cappedReplay.body(cappedNegativeX).restitution = 1.0f;
+    cappedReplay.body(cappedPositiveZ).restitution = 1.0f;
+    cappedReplay.step(0.01f);
+    const bool eventCap = cappedReplay.lastStepStats().multiToiEvents == 2;
+
+    velox::World dynamicPair(velox::BackendType::Cpu);
+    dynamicPair.gravity = {0, 0, 0};
+    dynamicPair.setCcdDefaults(defaults);
+    dynamicPair.setMultiToiSettings(multiSettings);
+    const auto left = dynamicPair.addSphere({-5, 0, 0}, 0.1f, 1.0f);
+    const auto right = dynamicPair.addSphere({5, 0, 0}, 0.1f, 1.0f);
+    dynamicPair.body(left).restitution = 1.0f;
+    dynamicPair.body(right).restitution = 1.0f;
+    dynamicPair.setLinearVelocity(left, {1000, 0, 0});
+    dynamicPair.setLinearVelocity(right, {-1000, 0, 0});
+    dynamicPair.step(0.01f);
+    const velox::Body leftAfter = dynamicPair.bodyState(left);
+    const velox::Body rightAfter = dynamicPair.bodyState(right);
+    const bool dynamicImpact = dynamicPair.lastStepStats().multiToiEvents == 1 &&
+                               leftAfter.velocity.x < -900.0f &&
+                               rightAfter.velocity.x > 900.0f &&
+                               std::fabs(leftAfter.position.x + rightAfter.position.x) < 1e-3f;
+
+    // The second collision is not present at frame start. It becomes the next
+    // chronological event only after the first body transfers its momentum to
+    // the middle body, exercising the dynamic rescheduling loop.
+    struct HighChainResult {
+        size_t eventCount = 0;
+        velox::Vec3 leftVelocity{};
+        velox::Vec3 middleVelocity{};
+        velox::Vec3 rightVelocity{};
+    };
+    const auto runHighChain = [&](velox::BackendType backend) {
+        velox::World dynamicChain(backend);
+        dynamicChain.gravity = {0, 0, 0};
+        dynamicChain.setCcdDefaults(defaults);
+        dynamicChain.setMultiToiSettings(multiSettings);
+        const auto chainLeft = dynamicChain.addSphere({-5, 0, 0}, 0.1f, 1.0f);
+        const auto chainMiddle = dynamicChain.addSphere({0, 0, 0}, 0.1f, 1.0f);
+        const auto chainRight = dynamicChain.addSphere({5, 0, 0}, 0.1f, 1.0f);
+        for (const velox::BodyId id : {chainLeft, chainMiddle, chainRight})
+            dynamicChain.body(id).restitution = 1.0f;
+        dynamicChain.setLinearVelocity(chainLeft, {2000, 0, 0});
+        dynamicChain.step(0.01f);
+        return HighChainResult{dynamicChain.lastStepStats().multiToiEvents,
+                               dynamicChain.bodyState(chainLeft).velocity,
+                               dynamicChain.bodyState(chainMiddle).velocity,
+                               dynamicChain.bodyState(chainRight).velocity};
+    };
+    const auto chainMatchesExpected = [](const HighChainResult& result) {
+        return result.eventCount == 2 && std::fabs(result.leftVelocity.x) < 1e-2f &&
+               std::fabs(result.middleVelocity.x) < 1e-2f && result.rightVelocity.x > 1900.0f;
+    };
+    const bool dynamicChainImpact = chainMatchesExpected(runHighChain(velox::BackendType::Cpu));
+    velox::World autoProbe(velox::BackendType::Auto);
+    const bool cudaHighChainImpact = std::string(autoProbe.backendName()) != "cuda" ||
+                                     chainMatchesExpected(runHighChain(velox::BackendType::Auto));
+
+    velox::World staircase(velox::BackendType::Cpu);
+    staircase.gravity = {0, 0, 0};
+    staircase.setCcdDefaults(defaults);
+    velox::WorldMultiToiSettings stairSettings = multiSettings;
+    stairSettings.defaultConfig.maxToiEventsPerBody = 16;
+    stairSettings.maxTotalEventsPerStep = 64;
+    staircase.setMultiToiSettings(stairSettings);
+    for (int step = 0; step < 10; ++step) {
+        const float x = static_cast<float>(step) * 0.1f;
+        const float y = static_cast<float>(10 - step) * 0.1f;
+        staircase.addBox({x, y - 1.0f, 0}, {0.05f, 1.0f, 1.0f}, 0.0f);
+        staircase.addBox({x + 0.05f, y - 0.05f, 0}, {0.05f, 0.05f, 1.0f}, 0.0f);
+    }
+    const auto stairBox = staircase.addBox({0.02f, 1.2f, 0}, {0.04f, 0.04f, 0.04f},
+                                           1.0f);
+    staircase.body(stairBox).restitution = 0.0f;
+    staircase.setLinearVelocity(stairBox, {100, -1000, 0});
+    staircase.step(0.01f);
+    const velox::Body stairBoxAfter = staircase.bodyState(stairBox);
+    const bool stairGrazing = staircase.lastStepStats().multiToiEvents >= 8 &&
+                              stairBoxAfter.position.x > 0.95f &&
+                              stairBoxAfter.position.y > 0.15f;
+
+    const auto frozen = w.addSphere({-3, 2, 0}, 0.5f, 1.0f);
+    velox::BodyCcdTuning locked = w.ccdTuning(frozen);
+    locked.quality = velox::MotionQuality::Locked;
+    w.setCcdTuning(frozen, locked);
+    w.setLinearVelocity(frozen, {20, 0, 0});
+    w.addForce(frozen, {100, 0, 0});
+    const velox::Vec3 before = w.bodyState(frozen).position;
+    w.step(0.25f);
+    const bool immobile = velox::length(w.bodyState(frozen).position - before) < 1e-6f;
+
+    const velox::WorldSnapshot snapshot = w.saveSnapshot();
+    velox::WorldCcdDefaults changed = w.ccdDefaults();
+    changed.defaultQuality = velox::MotionQuality::Low;
+    w.setCcdDefaults(changed);
+    w.restoreSnapshot(snapshot);
+    const bool restoredSettings = w.ccdDefaults().defaultQuality ==
+                                      velox::MotionQuality::High &&
+                                  w.multiToiSettings().defaultConfig.maxToiEventsPerBody == 2;
+    const bool inherited = w.ccdTuning(bullet).quality == velox::MotionQuality::High &&
+                           std::fabs(w.ccdTuning(bullet).collisionMargin - 0.02f) < 1e-6f;
+    check(ordered && capped && steppedImpact && sequentialImpacts && eventCap && dynamicImpact &&
+              dynamicChainImpact && cudaHighChainImpact && stairGrazing &&
+              immobile && inherited && restoredSettings,
+          "CCD tuning, locked body, and ordered multi-TOI query");
+}
+
 int main() {
     testBullet();
     testGrazing();
@@ -2116,6 +2312,7 @@ int main() {
     testBroadPhaseTree();
     testRayCastAll();
     testClosestPoints();
+    testCcdConfigurationAndMultiToiQuery();
     std::printf("\n%s\n", failures == 0 ? "All stress tests passed."
                                         : "STRESS TESTS FAILED");
     return failures;

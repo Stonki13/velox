@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <stdexcept>
+#include "velox/error.h"
 
 namespace velox {
 
@@ -24,7 +26,16 @@ namespace {
     std::snprintf(message, sizeof(message),
                   "velox CUDA failure: %s (%s) at %s:%d",
                   cudaGetErrorString(error), expression, file, line);
-    throw std::runtime_error(message);
+    if (error == cudaErrorMemoryAllocation)
+        throw BackendFailure(BackendFailureKind::MemoryAllocation, message);
+    // A launch fault or missing context leaves the CUDA context unreliable.
+    // Retrying individual calls is unsafe; World instead restores its pre-step
+    // snapshot and continues on the CPU backend when configured to do so.
+    if (error == cudaErrorDevicesUnavailable || error == cudaErrorDeviceUninitialized ||
+        error == cudaErrorLaunchFailure || error == cudaErrorLaunchTimeout ||
+        error == cudaErrorUnknown)
+        throw BackendFailure(BackendFailureKind::DeviceLost, message);
+    VELOX_THROW(VeloxRuntimeError, ErrorCode::BackendUnavailable, message);
 }
 
 #define VELOX_CUDA_CHECK(expr)                                                \
@@ -36,11 +47,40 @@ namespace {
 
 #define VELOX_CUDA_LAUNCH_CHECK() VELOX_CUDA_CHECK(cudaGetLastError())
 
+void checkedCudaMalloc(void** pointer, size_t bytes, const char* expression,
+                       const char* file, int line) {
+    size_t available = 0, total = 0;
+    cudaError_t info = cudaMemGetInfo(&available, &total);
+    if (info != cudaSuccess) throwCudaError(info, "cudaMemGetInfo", file, line);
+    // WDDM can transiently report zero available bytes while the active CUDA
+    // context can still satisfy an allocation. Treat that as advisory and let
+    // cudaMalloc make the authoritative decision; otherwise reject only a
+    // request that exceeds reported free memory by more than ten percent.
+    if (available != 0 && bytes > available && bytes - available > available / 10)
+        throwCudaError(cudaErrorMemoryAllocation, expression, file, line);
+    cudaError_t allocation = cudaMalloc(pointer, bytes);
+    if (allocation != cudaSuccess) throwCudaError(allocation, expression, file, line);
+}
+
+#define VELOX_CUDA_MALLOC(pointer, bytes)                                            \
+    checkedCudaMalloc(reinterpret_cast<void**>(pointer), bytes, #pointer, __FILE__, __LINE__)
+
+void injectCudaFailureForTesting() {
+    const char* mode = std::getenv("VELOX_CUDA_TEST_FAIL");
+    if (!mode || mode[0] == '\0') return;
+    if (std::strcmp(mode, "oom") == 0)
+        throw BackendFailure(BackendFailureKind::MemoryAllocation,
+                             "velox CUDA test injection: allocation failure");
+    if (std::strcmp(mode, "device-loss") == 0)
+        throw BackendFailure(BackendFailureKind::DeviceLost,
+                             "velox CUDA test injection: device loss");
+}
+
 __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (!b.isDynamic() || b.asleep) return;
+    if (!b.isDynamic() || b.isLocked() || b.asleep) return;
     b.velocity += (gravity * b.gravityScale + b.force * b.solverInvMass()) * dt;
     b.angularVelocity += b.invInertiaMul(b.torque) * dt;
     b.velocity *= 1.0f / (1.0f + b.linearDamping * dt);
@@ -51,7 +91,7 @@ __global__ void integrateTransformsKernel(Body* bodies, int n, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (b.isStatic() || b.asleep) return;
+    if (b.isStatic() || b.isLocked() || b.asleep) return;
     b.advanceTransform(dt);
 }
 
@@ -257,12 +297,13 @@ __global__ void allPairsContactsKernel(const Body* bodies, const Aabb* aabbs,
 // Solves every contact of one color in parallel: within a color no two
 // contacts share a dynamic body, so the writes cannot conflict.
 __global__ void solveColorKernel(Body* bodies, Contact* contacts,
-                                 int first, int count, float dt) {
+                                 int first, int count, float dt,
+                                 SolverOptions options) {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= count) return;
     Contact& c = contacts[first + k];
     if (bodies[c.a].isSensor() || bodies[c.b].isSensor()) return;
-    solveContact(bodies[c.a], bodies[c.b], c, dt);
+    solveContact(bodies[c.a], bodies[c.b], c, dt, options);
 }
 
 __global__ void warmStartColorKernel(Body* bodies, Contact* contacts,
@@ -343,8 +384,10 @@ public:
     }
 
     const char* name() const override { return "cuda"; }
+    uint32_t lastVelocityIterations() const override { return lastVelocityIterations_; }
 
     void integrate(std::vector<Body>& bodies, const Vec3& gravity, float dt) override {
+        injectCudaFailureForTesting();
         int n = static_cast<int>(bodies.size());
         if (n == 0) return;
         uploadBodies(bodies);
@@ -384,7 +427,7 @@ public:
         if (residentContacts > size_t(cap))
             cap = static_cast<int>(residentContacts);
         ensureContactCapacity(cap);
-        if (!dCount_) VELOX_CUDA_CHECK(cudaMalloc(&dCount_, sizeof(int)));
+        if (!dCount_) VELOX_CUDA_MALLOC(&dCount_, sizeof(int));
 
         if ((size_t)n * sizeof(Aabb) > aabbCap_) {
             release(dAabbs_);
@@ -392,14 +435,14 @@ public:
             release(dSortedIndices_);
             release(dCellKeys_);
             release(dOversize_);
-            VELOX_CUDA_CHECK(cudaMalloc(&dAabbs_, n * sizeof(Aabb)));
-            VELOX_CUDA_CHECK(cudaMalloc(&dSortKeys_, n * sizeof(float)));
-            VELOX_CUDA_CHECK(cudaMalloc(&dSortedIndices_, n * sizeof(BodyIndex)));
-            VELOX_CUDA_CHECK(cudaMalloc(&dCellKeys_, n * sizeof(uint64_t)));
-            VELOX_CUDA_CHECK(cudaMalloc(&dOversize_, n * sizeof(int)));
+            VELOX_CUDA_MALLOC(&dAabbs_, n * sizeof(Aabb));
+            VELOX_CUDA_MALLOC(&dSortKeys_, n * sizeof(float));
+            VELOX_CUDA_MALLOC(&dSortedIndices_, n * sizeof(BodyIndex));
+            VELOX_CUDA_MALLOC(&dCellKeys_, n * sizeof(uint64_t));
+            VELOX_CUDA_MALLOC(&dOversize_, n * sizeof(int));
             aabbCap_ = n * sizeof(Aabb);
         }
-        if (!dCellSize_) VELOX_CUDA_CHECK(cudaMalloc(&dCellSize_, sizeof(float)));
+        if (!dCellSize_) VELOX_CUDA_MALLOC(&dCellSize_, sizeof(float));
         stamp("aabbKernel", [&] {
             VELOX_CUDA_CHECK(cudaMemset(dCellSize_, 0, sizeof(float)));
             aabbKernel<<<(n + 255) / 256, 256>>>(dBodies_, dMeshes_, n, dt,
@@ -418,7 +461,7 @@ public:
                 VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int),
                                             cudaMemcpyDeviceToHost));
                 if (count < 0)
-                    throw std::length_error("velox: CUDA contact count overflow");
+                    VELOX_THROW(VeloxCapacityExceeded, ErrorCode::ContactCountOverflow, "CUDA contact count overflow");
                 if (count <= cap) break;
                 cap = count;
                 ensureContactCapacity(cap);
@@ -476,7 +519,7 @@ public:
         int candidateCap = static_cast<int>(pairCap_ / sizeof(uint64_t));
         if (candidateCap == 0) {
             candidateCap = n * 128 + 1024;
-            VELOX_CUDA_CHECK(cudaMalloc(&dPairs_, candidateCap * sizeof(uint64_t)));
+            VELOX_CUDA_MALLOC(&dPairs_, candidateCap * sizeof(uint64_t));
             pairCap_ = candidateCap * sizeof(uint64_t);
         }
         int candidateCount = 0;
@@ -501,7 +544,7 @@ public:
         if (candidateCount > candidateCap) {
             release(dPairs_);
             candidateCap = candidateCount;
-            VELOX_CUDA_CHECK(cudaMalloc(&dPairs_, candidateCap * sizeof(uint64_t)));
+            VELOX_CUDA_MALLOC(&dPairs_, candidateCap * sizeof(uint64_t));
             pairCap_ = candidateCap * sizeof(uint64_t);
             launchBroadPhase(candidateCap);
         }
@@ -521,7 +564,9 @@ public:
 
     void solveVelocities(std::vector<Body>& bodies,
                          std::vector<Contact>& contacts, float dt,
-                         bool warmStart) override {
+                         bool warmStart,
+                         const SolverOptions& options) override {
+        lastVelocityIterations_ = 0;
         int n = static_cast<int>(bodies.size());
         int m = static_cast<int>(contacts.size());
         if (m == 0) return;
@@ -592,7 +637,7 @@ public:
 
             if ((size_t)m * sizeof(Contact) > solveCap_) {
                 release(dSolve_);
-                VELOX_CUDA_CHECK(cudaMalloc(&dSolve_, m * sizeof(Contact)));
+                VELOX_CUDA_MALLOC(&dSolve_, m * sizeof(Contact));
                 solveCap_ = m * sizeof(Contact);
             }
             VELOX_CUDA_CHECK(cudaMemcpy(dSolve_, contacts.data(), m * sizeof(Contact),
@@ -616,14 +661,15 @@ public:
             // Colored order converges slower per sweep than sequential order
             // (color 0 solves one contact of every pair Jacobi-style), so run
             // twice the sweeps — with the graph replay they are nearly free.
-            constexpr int kGpuIterations = 2 * kVelocityIterations;
+            const int gpuIterations = 2 * options.velocityIterations;
+            lastVelocityIterations_ = static_cast<uint32_t>(gpuIterations);
             cudaGraph_t graph;
             VELOX_CUDA_CHECK(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal));
-            for (int iter = 0; iter < kGpuIterations; ++iter)
+            for (int iter = 0; iter < gpuIterations; ++iter)
                 for (int c = 0; c < numColors_; ++c) {
                     int first = colorStart_[c], count = colorStart_[c + 1] - first;
                     solveColorKernel<<<(count + 127) / 128, 128, 0, stream_>>>(
-                        dBodies_, dSolve_, first, count, dt);
+                        dBodies_, dSolve_, first, count, dt, options);
                     VELOX_CUDA_LAUNCH_CHECK();
                 }
             VELOX_CUDA_CHECK(cudaStreamEndCapture(stream_, &graph));
@@ -642,7 +688,7 @@ public:
                          std::vector<Contact>& contacts,
                          std::vector<Joint>& joints,
                          const Vec3& gravity, float dt,
-                         int substeps) override {
+                         int substeps, const SolverOptions& options) override {
         // Graph construction dominates small constraint sets; the CPU path is
         // lower latency until enough independent rows amortize the capture.
         constexpr size_t kDeviceJointThreshold = 64;
@@ -658,7 +704,12 @@ public:
         }
 
         bool hasContacts = !contacts.empty();
-        solveVelocities(bodies, contacts, dt, true);
+        // Adaptive early-out requires an ordered reduction over contact
+        // impulses. Keep its contract exact by routing that policy through
+        // the CPU backend rather than silently running fixed GPU sweeps.
+        if (options.iterationPolicy == IterationPolicy::Adaptive)
+            return false;
+        solveVelocities(bodies, contacts, dt, true, options);
         if (bodies.empty()) return true;
 
         int n = static_cast<int>(bodies.size());
@@ -694,6 +745,7 @@ public:
                 joints[jointOrder_[i]] = jointSorted_[i];
         }
         bodiesDirty_ = true;
+        lastVelocityIterations_ *= static_cast<uint32_t>(substeps);
         return true;
     }
 
@@ -728,7 +780,7 @@ private:
         size_t bytes = bodies.size() * sizeof(Body);
         if (bytes > bodyCap_) {
             release(dBodies_);
-            VELOX_CUDA_CHECK(cudaMalloc(&dBodies_, bytes));
+            VELOX_CUDA_MALLOC(&dBodies_, bytes);
             bodyCap_ = bytes;
         }
         VELOX_CUDA_CHECK(cudaMemcpy(dBodies_, bodies.data(), bytes, cudaMemcpyHostToDevice));
@@ -787,7 +839,7 @@ private:
         size_t bytes = joints.size() * sizeof(Joint);
         if (bytes > jointCap_) {
             release(dJoints_);
-            VELOX_CUDA_CHECK(cudaMalloc(&dJoints_, bytes));
+            VELOX_CUDA_MALLOC(&dJoints_, bytes);
             jointCap_ = bytes;
         }
         VELOX_CUDA_CHECK(cudaMemcpy(dJoints_, jointSorted_.data(), bytes,
@@ -852,7 +904,7 @@ private:
     void upload(T*& dst, const std::vector<T>& src) {
         release(dst);
         if (src.empty()) return;
-        VELOX_CUDA_CHECK(cudaMalloc(&dst, src.size() * sizeof(T)));
+        VELOX_CUDA_MALLOC(&dst, src.size() * sizeof(T));
         VELOX_CUDA_CHECK(cudaMemcpy(dst, src.data(), src.size() * sizeof(T),
                                     cudaMemcpyHostToDevice));
     }
@@ -861,7 +913,7 @@ private:
         size_t bytes = size_t(count) * sizeof(Contact);
         if (bytes <= contactCap_) return;
         release(dContacts_);
-        VELOX_CUDA_CHECK(cudaMalloc(&dContacts_, bytes));
+        VELOX_CUDA_MALLOC(&dContacts_, bytes);
         contactCap_ = bytes;
     }
 
@@ -880,8 +932,12 @@ private:
         size_t capacity = 0;
         char* allocate(std::ptrdiff_t bytes) {
             if ((size_t)bytes > capacity) {
-                if (buffer) cudaFree(buffer);
-                VELOX_CUDA_CHECK(cudaMalloc(&buffer, bytes));
+                if (buffer) {
+                    cudaFree(buffer);
+                    buffer = nullptr;
+                }
+                capacity = 0;
+                VELOX_CUDA_MALLOC(&buffer, bytes);
                 capacity = (size_t)bytes;
             }
             return buffer;
@@ -930,6 +986,7 @@ private:
     size_t jointCap_ = 0;
     size_t meshVerts_ = ~size_t(0), meshNodes_ = ~size_t(0);
     bool bodiesDirty_ = true;
+    uint32_t lastVelocityIterations_ = 0;
     int jointNumColors_ = 0;
     std::vector<int> jointNextColor_, jointColorOf_, jointColorStart_,
                      jointFill_, jointOrder_;

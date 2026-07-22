@@ -61,6 +61,25 @@ inline GeometryDiagnostics diagnostics(const Body& body, const MeshSoup& soup) {
         includeEdge(out, body.capsuleHalfHeight * 2.0f);
         out.volume = kPi * body.radius * body.radius * body.capsuleHalfHeight * 2.0f / 3.0f;
         break;
+    case ShapeType::RoundedBox: {
+        Vec3 e = body.halfExtents * 2.0f;
+        includeEdge(out, e.x);
+        includeEdge(out, e.y);
+        includeEdge(out, e.z);
+        out.volume = e.x * e.y * e.z +
+            kPi * body.radius * (e.x * e.y + e.y * e.z + e.x * e.z) +
+            2.0f * kPi * body.radius * body.radius * (e.x + e.y + e.z) +
+            4.0f * kPi * body.radius * body.radius * body.radius / 3.0f;
+        break;
+    }
+    case ShapeType::Ellipsoid: {
+        float a = body.halfExtents.x, b = body.halfExtents.y, c = body.halfExtents.z;
+        includeEdge(out, a * 2.0f);
+        includeEdge(out, b * 2.0f);
+        includeEdge(out, c * 2.0f);
+        out.volume = 4.0f * kPi * a * b * c / 3.0f;
+        break;
+    }
     case ShapeType::Hull: {
         if (body.hullFaceCount == 0 || body.hullFirst + body.hullCount > soup.hullPoints.size() ||
             body.hullFaceFirst + body.hullFaceCount * 3 > soup.hullFaceIndices.size())

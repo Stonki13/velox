@@ -14,7 +14,7 @@
 
 namespace velox {
 
-inline constexpr uint32_t kSerializationVersion = 1;
+inline constexpr uint32_t kSerializationVersion = 2;
 
 // LZ4/ZSTD are reserved for builds that link the external codecs; the core
 // library ships dependency-free and always supports None.

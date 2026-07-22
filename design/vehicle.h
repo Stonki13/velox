@@ -1,6 +1,10 @@
 // vehicle.h — Design sketch for raycast vehicle model with suspension and drivetrain.
 // Self-contained: includes only what's needed for compilation in isolation.
 // TODO: integrate with velox::World, velox::BodyId, velox::Vec3, velox::Quat.
+//
+// NOTE: This design sketch has been superseded by the production implementation
+// in include/velox/vehicle.h and src/vehicle.cpp. This file is retained
+// only as a historical reference.
 
 #pragma once
 

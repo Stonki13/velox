@@ -1,0 +1,27 @@
+You are working in the Velox physics engine repo (C++17, optional CUDA), currently on branch proto/manifolds. Do NOT push, merge, rebase, or force-anything; commit locally on this branch only. Never weaken, disable, or delete an existing test to make it pass.
+
+CONTEXT
+Velox is a rigid-body physics engine with GJK/EPA narrowphase, a TGS-style solver with speculative contacts (Predictive Contact Sweeping), a dynamic AABB-tree broad phase, and a CUDA backend. Roadmap item 01 (docs/roadmap/01-persistent-contact-manifolds.md) — persistent contact manifolds via face clipping with stable feature ids and warm starting — has been partially implemented by a local model on this branch. Its notes are in docs/roadmap/PROTO01_NOTES.md. The work is UNREVIEWED and may contain bugs.
+
+Key files on this branch:
+- src/manifold.h (new, untracked): face-clipping manifold generation
+- examples/proto_manifold.cpp (new, untracked): isolated prototype/test harness
+- src/narrowphase.h (modified): manifold integration, contact anchors, live gaps, two-axis friction, feature-id warm starting
+- src/gjk.h, src/solver.cpp, src/world.cpp, include/velox/world.h (modified)
+
+YOUR TASK
+1. Read docs/roadmap/01-persistent-contact-manifolds.md (the spec) and PROTO01_NOTES.md, then audit the implementation on this branch against the spec. Look especially for: wrong contact normals or winding in Sutherland-Hodgman clipping, unstable feature ids (ids that change frame-to-frame under sliding/rolling, which silently kills warm starting), incorrect penetration depths for clipped points, manifold point reduction that drops the deepest point, and warm-start impulses applied with stale anchors.
+2. Build with CMake (Release) and run the full test suite: ctest must pass (velox.stress, velox.fuzz, velox.soak). Also run the proto_manifold executable and examples/stress_demo directly.
+3. Run the fuzzer with extra iterations as an acceptance gate: fuzz_demo 80 must pass twice in a row.
+4. Fix every defect you find. Prefer minimal, surgical fixes; keep the existing code style (headers-only src/, VELOX_HD host/device annotations must be preserved on anything the CUDA path touches).
+5. Acceptance criterion from the spec: a box resting on the ground must reach a stable 4-point manifold whose feature ids persist across frames, and warm starting must let the stack scene converge in <=3 solver iterations without visible jitter. Verify this empirically (proto_manifold.cpp should demonstrate it; extend it if it doesn't).
+6. Check for performance regressions: run examples/benchmark before and after your fixes and report the numbers for the rain and terrain scenes. A regression >10% on CPU needs justification or fixing.
+7. Update docs/roadmap/PROTO01_NOTES.md with what you audited, what you fixed, and current status.
+8. Stage and commit everything on proto/manifolds with a clear message. Do NOT add any Co-Authored-By trailer. Do NOT push.
+
+ENVIRONMENT NOTES
+- Windows 11, PowerShell. Build dir convention: cmake -S . -B build && cmake --build build --config Release
+- CUDA toolkit is installed (RTX 5080) but CPU-only verification is acceptable if CUDA build is slow; do not break the CUDA build though — at minimum ensure it compiles.
+- The repo root path contains a space ("PHYSIC PLACEHOLDER") — always quote paths.
+
+Finish with a summary: defects found, fixes applied, test results, benchmark deltas, and whether the branch is ready to merge to main.

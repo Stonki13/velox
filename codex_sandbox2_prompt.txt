@@ -1,0 +1,35 @@
+You are working in the Velox physics engine repo (C++17, optional CUDA). Create and work on a new branch: git checkout -b proto/sandbox2 from main. Do NOT push, merge, rebase, or force-anything; commit locally on proto/sandbox2 only. Never weaken, disable, or delete an existing test to make it pass.
+
+CONTEXT
+Velox is a rigid-body physics engine. main contains the v1 sandbox you built (examples/sandbox/, GLFW 3.4 + OpenGL 3.3 debug-line renderer, gated behind VELOX_BUILD_SANDBOX=OFF). This task upgrades it to sandbox v2. The window/input/renderer abstraction from v1 stays; the renderer backend and interaction model change substantially.
+
+YOUR TASK: sandbox v2 — Vulkan renderer, solid shaded colored shapes, natural sky, mouse dragging, and full shape-spawning palette.
+
+REQUIREMENTS
+1. Vulkan rendering pipeline (replaces OpenGL):
+   - Target Vulkan 1.2. Fetch Vulkan-Headers via CMake FetchContent (pinned tag) and load the loader (vulkan-1.dll / libvulkan) dynamically at runtime — do NOT require the LunarG SDK to build. GLFW stays for windowing/surface creation (glfwCreateWindowSurface).
+   - Precompile shaders to SPIR-V and embed the SPIR-V words as uint32_t arrays in generated/committed headers, so no runtime shader compiler (no shaderc/glslang dependency) is needed. Commit the .vert/.frag GLSL sources alongside for reference.
+   - Standard swapchain with depth buffer, MSAA x4 if supported, vsync present mode, robust swapchain recreation on resize/minimize.
+   - If Vulkan initialization fails at runtime, print a clear error and exit gracefully (no crash).
+2. Solid shaded shape rendering with colors (replaces lines-only):
+   - Render bodies as instanced solid meshes: unit cube, unit sphere (icosphere 2 subdivisions), capsule, cylinder, cone, and plane/ground grid — scaled per body from its shape params. Hull and Mesh bodies render their actual triangles (build a GPU mesh once per unique hull/mesh, cache it).
+   - Simple pleasant lighting: one directional sun light, lambert diffuse + small ambient + subtle fresnel rim; per-body color. Assign colors from a curated palette on spawn (stable per body id, so colors do not flicker); sleeping bodies desaturate slightly so islands going to sleep is visible.
+   - Keep the debug-line pass (contacts/joints/AABBs) as a toggle on key L, rendered over the solid pass.
+3. Sky: a natural blue sky that looks good — fullscreen skydome/sky pass with a physically-plausible gradient (deep blue zenith to warm pale horizon), a visible sun disc with soft halo positioned consistently with the directional light, and a subtle ground-haze blend at the horizon. No textures needed; do it procedurally in the fragment shader. Ground plane should be a pleasant light gray-green with a fine grid line pattern fading with distance.
+4. Mouse dragging of bodies:
+   - Left-click on a body picks it (World::rayCast from camera through cursor). While held, drag the body: each frame compute a target point on the camera-facing plane through the grab point at the grabbed distance (scroll wheel moves it nearer/farther), and drive the body toward it with a critically-damped velocity spring (set linearVelocity toward target with damping; do not teleport positions). Grabbed anchor should be the clicked local point on the body, applying torque naturally when grabbing off-center. Release drops it with its current velocity (throwing works).
+   - Dragged body must not sleep while held; hovering/dragging must not fight the character of the simulation (no explosion when dragging into a stack).
+5. Spawning palette: number keys select the spawn shape: 1 sphere, 2 box, 3 capsule, 4 cylinder, 5 cone, 6 random convex hull (8-16 random points on an ellipsoid), 7 compound/complex mesh preset (pick 2-3 interesting ones: e.g. a torus-like hull ring, an L-shaped compound, a low-poly bunny-ish blob defined as a hardcoded small triangle mesh converted to a hull). Space spawns the selected shape at the cursor raycast point (rate-limited as in v1). Show the current selection in the overlay.
+6. Keep from v1: WASD/QE fly camera + RMB mouse-look, R reset, P pause, +/- substeps, F1-F4 presets, stats overlay (bitmap font path must be ported to Vulkan), scenes.json, and the --selftest headless mode. --selftest must NOT initialize Vulkan or create a window; extend it to also construct each spawnable shape type, step 120 frames, and verify finiteness/contacts.
+7. Build: still gated behind VELOX_BUILD_SANDBOX (default OFF). Default OFF configure must not fetch Vulkan-Headers or GLFW. ctest velox.sandbox registration as in v1.
+8. Full gate before you finish: configure -DVELOX_BUILD_SANDBOX=ON, build Release, ALL ctest tests pass (stress, fuzz, soak, geometry_fuzz, character, sandbox); fuzz_demo 80 passes; sandbox-OFF default build stays clean; launch the windowed sandbox to confirm the sky renders, shapes are colored and lit, and dragging works.
+9. Write docs/roadmap/PROTO26B_NOTES.md (same style as previous notes): renderer architecture, shader embedding approach, drag-spring math, verification results, controls list, merge recommendation.
+10. Commit on proto/sandbox2 with a clear message. NO Co-Authored-By trailer. Do NOT push. Do not commit build artifacts or _deps; extend .gitignore if needed. Committing the generated SPIR-V headers IS wanted (so builds need no shader toolchain).
+
+ENVIRONMENT NOTES
+- Windows 11, PowerShell. NVIDIA RTX 5080 with current drivers (Vulkan 1.3 capable; vulkan-1.dll present).
+- Build: cmake -S . -B build -DVELOX_BUILD_SANDBOX=ON && cmake --build build --config Release
+- The repo root path contains a space ("PHYSIC PLACEHOLDER") — always quote paths.
+- To compile GLSL to SPIR-V locally you may use glslangValidator if available, or any equivalent; only the embedded SPIR-V headers must end up in the repo. If no shader compiler is available on the machine, fetch glslang via FetchContent as a build-time tool behind the sandbox option.
+
+Finish with a summary: design decisions, test results, any deviations, and whether the branch is ready to merge.

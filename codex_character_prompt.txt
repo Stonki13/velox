@@ -1,0 +1,30 @@
+You are working in the Velox physics engine repo (C++17, optional CUDA). Create and work on a new branch: git checkout -b proto/character from main. Do NOT push, merge, rebase, or force-anything; commit locally on proto/character only. Never weaken, disable, or delete an existing test to make it pass.
+
+CONTEXT
+Velox is a rigid-body physics engine with GJK/EPA narrowphase, persistent clipped contact manifolds, a TGS-style solver with speculative contacts, a dynamic AABB-tree broad phase, shape/ray query APIs, and a CUDA backend. You previously implemented and verified roadmap items 01 and 02 on this repo (now merged to main).
+
+YOUR TASK: roadmap item 11 — capsule character controller.
+The spec is docs/roadmap/11-character-controller.md. Read it first. There is also a rough design sketch at design/character_controller.h written by a weaker model — treat it as a non-binding idea dump, NOT as code to reuse (it has known defects like forward-declared Vec3 used by value). The roadmap doc is authoritative; where they conflict, follow the roadmap doc.
+
+IMPLEMENTATION NOTES
+1. The controller is a pure query layer: it owns no Body and must not mutate the World. Build it on the existing public query APIs in include/velox/world.h (shape casts, raycasts, overlaps — inspect what exists, e.g. castShape/rayCast/rayCastAll/overlapShape, and use those; add a missing query overload only if genuinely required).
+2. New files: include/velox/character.h and src/character.cpp, added to the velox library target in CMakeLists.txt. CPU-only code — no VELOX_HD needed, but do not break the CUDA build.
+3. Algorithm per the spec: downward ground probe, slope-limited grounding with displacement projected onto the ground plane, up to 4 sweep-and-slide iterations with tangential velocity reflection, and step climbing up to stepMaxHeight by lift-recast-drop. Handle the ghostPadding skin consistently so the capsule neither jitters on flat ground nor floats visibly.
+4. Determinism: given the same World snapshot and displacement, Move() must return bitwise-identical results. No RNG, no time-dependent state.
+5. Robustness cases to get right (these are where character controllers usually break):
+   - walking into a corner formed by two walls must not jitter or gain energy; after 4 iterations, clamp remaining displacement to zero
+   - sliding along a wall while grounded must stay grounded
+   - stepping must not allow climbing walls (a "step" is only valid if the recast from the lifted position lands on a walkable slope)
+   - a ceiling above the capsule must block the step lift
+   - moving with zero displacement must be a stable no-op that still reports grounded correctly
+6. Tests: create examples/character_demo.cpp registered in examples/CMakeLists.txt as ctest velox.character. Implement at minimum the 4 spec tests (flat walk, 0.25 m step climb, 45-degree wall slide, 50-degree slope slip) plus the robustness cases above; assert with clear failure messages and exit nonzero on failure.
+7. Full gate before you finish: build Release, ctest must pass ALL tests (velox.stress, velox.fuzz, velox.soak, velox.geometry_fuzz, velox.character), and fuzz_demo 80 must pass. Run proto_manifold.exe too — your changes must not disturb it.
+8. Write docs/roadmap/PROTO11_NOTES.md in the same style as PROTO01_NOTES.md: audit/design decisions, spec deviations if any, verification results, merge recommendation.
+9. Commit everything on proto/character with a clear message. NO Co-Authored-By trailer. Do NOT push.
+
+ENVIRONMENT NOTES
+- Windows 11, PowerShell. Build: cmake -S . -B build && cmake --build build --config Release
+- The repo root path contains a space ("PHYSIC PLACEHOLDER") — always quote paths.
+- CUDA toolkit installed (RTX 5080); ensure the CUDA build still compiles.
+
+Finish with a summary: design decisions, test results, any spec deviations, and whether the branch is ready to merge.

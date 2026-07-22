@@ -1,6 +1,10 @@
 #pragma once
 #include "joint.h"
+#include "solver.h"
+#include "task_system.h"
 #include <functional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace velox {
@@ -56,7 +60,7 @@ VELOX_HD inline Body compoundChildBody(const Body& parent,
 // the relative motion could close the gap within the step. gap > 0 means
 // "not yet touching"; the solver only removes approach velocity in excess of
 // gap/dt, so grazing bodies are never artificially stopped.
-struct Contact {
+struct alignas(64) Contact {
     BodyIndex a, b;
     uint64_t featureKey;  // stable shape-feature pair; 0 when unavailable
     Vec3 normal;          // from b towards a
@@ -81,6 +85,21 @@ struct Contact {
 // Cpu is portable across supported Intel and AMD processor hosts. Cuda is an
 // NVIDIA-only accelerator backend; Auto falls back to Cpu when CUDA is absent.
 enum class BackendType { Auto, Cpu, Cuda };
+
+// Recoverable accelerator failures are reported separately from invalid scene
+// data and programming errors so World can retry the same frame on CPU.
+enum class BackendFailureKind : uint8_t { MemoryAllocation, DeviceLost };
+
+class BackendFailure : public std::runtime_error {
+public:
+    BackendFailure(BackendFailureKind kind, const std::string& message)
+        : std::runtime_error(message), kind_(kind) {}
+
+    BackendFailureKind kind() const noexcept { return kind_; }
+
+private:
+    BackendFailureKind kind_;
+};
 
 // Compute backend interface. The CPU reference backend lives in solver.cpp;
 // the CUDA backend (backend_cuda.cu) runs the same integration and narrow
@@ -107,12 +126,14 @@ public:
     // impulses already live in the velocities on later substeps.
     virtual void solveVelocities(std::vector<Body>& bodies,
                                  std::vector<Contact>& contacts, float dt,
-                                 bool warmStart) = 0;
+                                 bool warmStart,
+                                 const SolverOptions& options) = 0;
     // Optional fast path after the first velocity integration/contact find.
     // Returns true when all solver substeps and transform integration were
     // completed. CPU and backends requiring host-side constraints return false.
     virtual bool advanceSubsteps(std::vector<Body>&, std::vector<Contact>&,
-                                 std::vector<Joint>&, const Vec3&, float, int) {
+                                 std::vector<Joint>&, const Vec3&, float, int,
+                                 const SolverOptions&) {
         return false;
     }
     // Called once after the last substep: backends holding impulses in
@@ -128,6 +149,13 @@ public:
     // Bitwise identical to sequential solving because islands share no
     // dynamic bodies. GPU backends ignore it (graph coloring instead).
     virtual void setParallelIslands(bool) {}
+    // Inject an external task system for parallel work distribution.
+    // Pass nullptr to use the internal worker pool.
+    virtual void setTaskSystem(TaskSystem*) {}
+    // Number of velocity sweeps performed by the latest solve call. This is
+    // reported through StepStats so adaptive policies are observable.
+    virtual uint32_t lastVelocityIterations() const { return 0; }
+    virtual size_t lastIslandCount() const { return 0; }
     // Runs chunk callbacks on the backend's host worker pool (read-only
     // fan-out work like broad-phase queries). Default: serial.
     virtual void parallelChunks(size_t items, size_t /*minPerChunk*/,

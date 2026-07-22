@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(velox VERSION 0.1.0 LANGUAGES CXX)
+include(cmake/version.cmake)
+velox_read_version("${CMAKE_CURRENT_SOURCE_DIR}/include/velox/version.h" VELOX_VERSION)
+project(velox VERSION ${VELOX_VERSION} LANGUAGES CXX)
 
 include(CTest)
 include(GNUInstallDirs)
@@ -10,9 +12,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(VELOX_BUILD_EXAMPLES "Build example programs" ON)
+option(VELOX_BUILD_BENCHMARKS "Build the performance benchmark suite" ON)
 option(VELOX_BUILD_SANDBOX "Build the optional GLFW/Vulkan interactive sandbox" OFF)
 option(VELOX_BUILD_DIFFTEST "Build differential tests against Jolt Physics" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
+option(VELOX_STRICT_FLOATING_POINT
+       "Build the CPU reference path with reproducible floating-point semantics" OFF)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
 set(VELOX_HAS_CUDA 0)
 
@@ -22,8 +27,15 @@ add_library(velox
     src/queries.cpp
     src/debug.cpp
     src/character.cpp
+    src/ragdoll.cpp
     src/vehicle.cpp
     src/serialization.cpp
+    src/serialization_v2.cpp
+    src/benchmark.cpp
+    src/velox_c.cpp
+    src/stable_api.cpp
+    src/manifold.cpp
+    src/sleep.cpp
 )
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -54,27 +66,38 @@ endif()
 # conceal an accidental CUDA-only dependency.
 target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
 
-if(MSVC)
-    target_compile_options(velox PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:/W4 /fp:fast>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang|IntelLLVM")
-    # NOT -ffast-math: it implies -ffinite-math-only, which folds
-    # std::isfinite to a constant and silently deletes every NaN/Inf
-    # validation path (three stress tests fail under Clang with it). Keep this
-    # free of -march/-mtune so one CPU build runs on both Intel and AMD hosts.
-    target_compile_options(velox PRIVATE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -fno-math-errno -ffp-contract=fast>)
-else()
-    message(STATUS "velox: no compiler-specific floating-point flags for ${CMAKE_CXX_COMPILER_ID}")
-endif()
+# Symbol export/import for shared builds (see include/velox/version.h). The
+# library itself is compiled with VELOX_BUILDING_SHARED so its public symbols
+# are exported; consumers linking the installed shared package receive
+# VELOX_USING_SHARED so the headers switch to dllimport. Both are gated on the
+# resolved target type, so static builds (the default for Conan and for static
+# vcpkg triplets) are unaffected and the same install rules serve both package
+# managers and both library types.
+target_compile_definitions(velox PRIVATE
+    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:VELOX_BUILDING_SHARED>")
+target_compile_definitions(velox INTERFACE
+    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:VELOX_USING_SHARED>")
+
+include(cmake/determinism.cmake)
+velox_configure_floating_point(velox ${VELOX_STRICT_FLOATING_POINT})
+include(cmake/platform.cmake)
+velox_configure_platform(velox)
 
 if(VELOX_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+if(VELOX_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 if(VELOX_BUILD_SANDBOX)
     add_subdirectory(examples/sandbox)
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests/unit)
+    add_subdirectory(tests/cross_platform)
 endif()
 
 if(VELOX_BUILD_DIFFTEST)

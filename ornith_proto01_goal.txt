@@ -1,0 +1,40 @@
+GOAL: Build a PROTOTYPE implementation of persistent contact manifolds with Sutherland-Hodgman face clipping for the Velox physics engine, following the design in docs/roadmap/01-persistent-contact-manifolds.md. This is a prototype in isolation: it must compile and pass its own standalone tests, but it must NOT be wired into the engine pipeline — a senior engineer integrates and hardens it afterwards.
+
+=== HARD RULES ===
+1. RELATIVE paths only (src/manifold.h, examples/proto_manifold.cpp). Never write an absolute path.
+2. You may CREATE these new files only:
+   - src/manifold.h            (the prototype: header-only, all functions VELOX_HD inline)
+   - examples/proto_manifold.cpp (standalone test driver with its own main())
+3. You may MODIFY exactly one existing file: examples/CMakeLists.txt — append only these two lines at the end:
+   add_executable(proto_manifold proto_manifold.cpp)
+   target_link_libraries(proto_manifold PRIVATE velox)
+4. Do NOT touch any other existing file. Especially not src/narrowphase.h, src/world.cpp, src/gjk.h, include/velox/.
+5. You may run bash to build and test:  cmake --build build --config Release --target proto_manifold  and then run  ./build/examples/Release/proto_manifold.exe
+6. If a tool call fails twice in a row, write what happened to docs/roadmap/PROTO01_NOTES.md and continue with the next step. Never stall.
+
+=== WHAT TO BUILD (src/manifold.h) ===
+Read docs/roadmap/01-persistent-contact-manifolds.md first — it is your spec. Then read src/gjk.h to learn the existing Convex type, makeConvex, GjkResult, and the VELOX_HD macro conventions. Implement, header-only, in namespace velox:
+
+1. struct ClipVertex { Vec3 position; uint32_t featureA; uint32_t featureB; };
+2. struct ManifoldPoint { Vec3 point; float gap; uint32_t featureA, featureB; };
+3. struct FaceManifold { Vec3 normal; ManifoldPoint points[8]; int pointCount; };
+4. A polygon extraction helper: given a Convex (Box or Hull) and a direction, return the face polygon most anti-parallel to that direction (up to 16 vertices, ordered, with per-vertex feature ids). For a Box this is one of the 6 faces; for a Hull, gather hull points within an angular tolerance of the supporting plane and sort them by angle around the face centroid.
+5. clipFaceManifold(const Convex& a, const Convex& b, Vec3 normal) -> FaceManifold:
+   - reference face = face of B most anti-parallel to the normal; incident face = face of A most parallel.
+   - Sutherland-Hodgman: clip the incident polygon against the side planes of the reference face.
+   - keep clipped vertices at or below the reference plane, compute each vertex's gap along the normal.
+   - reduce to at most 8 points, keeping the deepest point and maximizing polygon area (simple heuristic is fine: deepest + farthest + two maximizing area).
+   - feature ids: combine the source vertex/edge indices so the same geometric feature yields the same id across calls.
+6. Everything deterministic: no unordered containers, fixed iteration order, no randomness.
+
+=== WHAT TO BUILD (examples/proto_manifold.cpp) ===
+A standalone main() with check(bool, const char*) like the stress suite, testing at least:
+1. Two unit boxes stacked face-to-face: clipFaceManifold returns exactly 4 points, all gaps within 1e-4 of each other, and calling it twice returns identical feature ids.
+2. Box rotated 45 degrees resting edge-on-face: 2 points.
+3. Box overlapping a larger box face partially (offset half a width): 4 points whose polygon area is about half the full face area.
+4. A convex hull (cube built from 8 points via addConvexHull-style local points fed directly into a Convex with kind Hull): face-to-face with a box gives >= 3 points.
+5. Determinism: run every case 3 times; all outputs bitwise identical.
+Print PASS/FAIL per case, return the number of failures from main().
+
+=== FINISH CONDITION ===
+The build succeeds and ./build/examples/Release/proto_manifold.exe prints all PASS. Then write a short summary (what works, what is unfinished, known weaknesses) to docs/roadmap/PROTO01_NOTES.md and stop.

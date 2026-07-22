@@ -1,6 +1,10 @@
 // character_controller.h — Design sketch for capsule sweep-and-slide character controller.
 // Self-contained: includes only what's needed for compilation in isolation.
 // TODO: integrate with velox::World, velox::BodyId, velox::Vec3, velox::Quat.
+//
+// NOTE: This design sketch has been superseded by the production implementation
+// in include/velox/character.h and src/character.cpp. This file is retained
+// only as a historical reference.
 
 #pragma once
 

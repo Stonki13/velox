@@ -1,6 +1,10 @@
 // serialization.h — Design sketch for versioned scene serialization and replay.
 // Self-contained: includes only what's needed for compilation in isolation.
 // TODO: integrate with velox::World, velox::BodyId, velox::JointId, velox::Vec3, velox::Quat.
+//
+// NOTE: This design sketch has been superseded by the production implementation
+// in include/velox/serialization.h and src/serialization.cpp. This file is retained
+// only as a historical reference.
 
 #pragma once
 

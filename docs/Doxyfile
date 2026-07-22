@@ -1,0 +1,120 @@
+# ---------------------------------------------------------------------------
+# Velox Doxygen configuration
+#
+# Generate the API reference from the project root with:
+#     doxygen docs/Doxyfile
+# Output is written to docs/api-reference/html (start at index.html).
+# Paths below are relative to the directory doxygen is invoked from (the
+# project root), matching the existing build scripts.
+# ---------------------------------------------------------------------------
+
+# --- Project metadata ------------------------------------------------------
+PROJECT_NAME           = Velox
+PROJECT_BRIEF          = "Rigid-body physics for games"
+PROJECT_NUMBER         = 1.0.0
+PROJECT_LOGO           =
+
+# --- Input -----------------------------------------------------------------
+# Public headers plus the Markdown guides, which become browsable pages.
+OUTPUT_DIRECTORY       = docs/api-reference
+INPUT                  = include/velox \
+                         docs \
+                         README.md
+INPUT_ENCODING         = UTF-8
+FILE_PATTERNS          = *.h *.md
+RECURSIVE              = YES
+
+# Never feed generated output (or build trees) back in as input.
+EXCLUDE                = docs/api-reference
+EXCLUDE_PATTERNS       = */build* */.git* */__pycache__*
+
+# Use the API guide as the documentation landing page.
+USE_MDFILE_AS_MAINPAGE = docs/api-guide.md
+
+# --- Extraction policy -----------------------------------------------------
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+HIDE_FRIEND_COMPOUNDS  = YES
+BRIEF_MEMBER_DESC      = YES
+REPEAT_BRIEF           = YES
+ALWAYS_DETAILED_SEC    = YES
+INLINE_INHERITED_MEMB  = YES
+FULL_PATH_NAMES        = YES
+STRIP_FROM_PATH        = .
+JAVADOC_AUTOBRIEF      = YES
+INHERIT_DOCS           = YES
+DISTRIBUTE_GROUP_DOC   = NO
+GROUP_NESTED_COMPOUNDS = YES
+SORT_MEMBER_DOCS       = YES
+SORT_BRIEF_DOCS        = YES
+SORT_MEMBERS_CTORS_1ST = YES
+BUILTIN_STL_SUPPORT    = YES
+OPTIMIZE_OUTPUT_FOR_C  = NO
+
+# --- Macro handling --------------------------------------------------------
+# Expand only the platform/thread-safety annotation macros to nothing so the
+# reference shows clean signatures instead of VELOX_HD / VELOX_GUARDED_BY(...).
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = VELOX_HD= \
+                         VELOX_API= \
+                         VELOX_DEPRECATED(x)= \
+                         VELOX_CAPABILITY(x)= \
+                         VELOX_SCOPED_CAPABILITY= \
+                         VELOX_GUARDED_BY(x)= \
+                         VELOX_PT_GUARDED_BY(x)= \
+                         VELOX_ACQUIRE(...)= \
+                         VELOX_ACQUIRE_SHARED(...)= \
+                         VELOX_RELEASE(...)= \
+                         VELOX_RELEASE_SHARED(...)= \
+                         VELOX_REQUIRES(...)= \
+                         VELOX_REQUIRES_SHARED(...)= \
+                         VELOX_ACQUIRED_BEFORE(...)= \
+                         VELOX_ACQUIRED_AFTER(...)= \
+                         VELOX_EXCLUDES(...)= \
+                         VELOX_ASSERT_CAPABILITY(x)= \
+                         VELOX_NO_THREAD_SAFETY_ANALYSIS=
+
+# --- HTML output -----------------------------------------------------------
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+HTML_TIMESTAMP         = YES
+HTML_DYNAMIC_MENUS     = YES
+HTML_DYNAMIC_SECTIONS  = YES
+GENERATE_TREEVIEW      = YES
+TREEVIEW_WIDTH         = 260
+DISABLE_INDEX          = NO
+SEARCHENGINE           = YES
+
+# --- Other formats ---------------------------------------------------------
+GENERATE_LATEX         = NO
+
+# --- Source browsing -------------------------------------------------------
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = YES
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# --- Cross-reference tagfile (lets other projects link into this reference) -
+GENERATE_TAGFILE       = docs/api-reference/velox.tag
+
+# --- Diagrams --------------------------------------------------------------
+# Use Doxygen's built-in class diagrams; do not require Graphviz.
+HAVE_DOT               = NO
+CLASS_DIAGRAMS         = YES
+
+# --- Diagnostics -----------------------------------------------------------
+# Now that the public headers are documented, surface remaining gaps as
+# warnings (kept non-fatal so generation always succeeds).
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_IF_INCOMPLETE_DOC = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO

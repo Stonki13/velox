@@ -340,8 +340,9 @@ private:
         addCompoundWithRender(position, shapes, 1.4f);
     }
 
-    void addCompoundWithRender(Vec3 position, const std::vector<velox::CompoundShape>& shapes,
-                               float mass) {
+    BodyId addCompoundWithRender(Vec3 position,
+                                 const std::vector<velox::CompoundShape>& shapes,
+                                 float mass) {
         const BodyId id = world_->addCompound(position, shapes, mass);
         world_->body(id).friction = 0.7f;
         dynamicBodies_.push_back(id);
@@ -384,6 +385,7 @@ private:
             body.pieces.push_back(std::move(piece));
         }
         renderBodies_.push_back(std::move(body));
+        return id;
     }
 
     BodyId sphere(Vec3 position, float radius = 0.2f, float mass = 1.0f) {
@@ -489,27 +491,31 @@ private:
         // detailed wheels) in buildBatches instead of one flat box.
     }
 
-    // Gyroscopic showcase: three long boxes floating in zero gravity, spun
-    // about their three principal axes. The middle one spins about the
-    // UNSTABLE intermediate axis and periodically somersaults (Dzhanibekov
-    // effect) — dynamics validated against Jolt in tests/difftest.
+    // Gyroscopic showcase: three torque-free T-handles floating in zero
+    // gravity, each spun about a different body axis.
     void buildGyro() {
         world_->gravity = {0.0f, 0.0f, 0.0f};
         ground(); // visual reference; nothing falls onto it
-        // Big flat slabs read much better in motion than thin sticks.
-        const Vec3 half{0.35f, 1.1f, 0.12f};
+        std::vector<velox::CompoundShape> tHandle;
+        velox::CompoundShape grip;
+        grip.shape = velox::ShapeType::Box;
+        grip.localPosition = {0.0f, -0.2f, 0.0f};
+        grip.halfExtents = {0.12f, 0.6f, 0.12f};
+        tHandle.push_back(grip);
+        velox::CompoundShape crossbar;
+        crossbar.shape = velox::ShapeType::Box;
+        crossbar.localPosition = {0.0f, 0.5f, 0.0f};
+        crossbar.halfExtents = {0.75f, 0.1f, 0.16f};
+        tHandle.push_back(crossbar);
         const Vec3 spins[3] = {
-            {0.0f, 8.0f, 0.05f},  // minor axis: fast stable spin + precession
-            {5.0f, 0.05f, 0.0f},  // intermediate axis: Dzhanibekov flips
-            {0.05f, 0.0f, 4.5f},  // major axis: stable
+            {0.0f, 8.0f, 0.05f},
+            {5.0f, 0.05f, 0.0f},
+            {0.05f, 0.0f, 4.5f},
         };
         for (int i = 0; i < 3; ++i) {
             const Vec3 position{-3.5f + 3.5f * static_cast<float>(i), 3.5f, 0.0f};
-            const BodyId id = world_->addBox(position, half, 1.0f);
-            world_->body(id).friction = 0.6f;
+            const BodyId id = addCompoundWithRender(position, tHandle, 1.0f);
             world_->setAngularVelocity(id, spins[i]);
-            dynamicBodies_.push_back(id);
-            pieceBox(id, half);
         }
     }
 

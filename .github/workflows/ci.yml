@@ -3,13 +3,24 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: '17 3 * * *'
 
 jobs:
   cpu:
+    name: CPU / ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: windows-latest
+            name: Windows x86_64
+          - os: macos-13
+            name: macOS Intel x86_64
+          - os: macos-14
+            name: macOS Apple Silicon ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +32,11 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Install package
         run: cmake --install build --config Release --prefix install
+      - name: Verify installed package
+        run: |
+          cmake -S tests/package_consumer -B package-consumer -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+          cmake --build package-consumer --config Release --parallel
+          ctest --test-dir package-consumer -C Release --output-on-failure
 
   sanitizers:
     name: Linux / Clang + ASan + UBSan
@@ -42,3 +58,192 @@ jobs:
         run: build/examples/fuzz_demo 15
       - name: Soak (sanitized, reduced)
         run: build/examples/fuzz_demo soak 3000
+
+  thread-sanitizer:
+    name: Linux / Clang + ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++ -DVELOX_ENABLE_CUDA=OFF
+          -DVELOX_BUILD_EXAMPLES=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build thread-safety regression
+        run: cmake --build build --target thread_safety_demo --parallel
+      - name: Run eight-worker access test
+        run: ctest --test-dir build -R "^velox.thread_safety$" --output-on-failure
+
+  strict-cpu:
+    name: Strict CPU / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: windows-latest
+            name: Windows x86_64
+          - os: macos-13
+            name: macOS Intel x86_64
+          - os: macos-14
+            name: macOS Apple Silicon ARM64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure strict reference build
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=ON
+          -DVELOX_STRICT_FLOATING_POINT=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Strict replay test
+        run: ctest --test-dir build -C Release -R "^velox.determinism$" --output-on-failure
+      - name: Produce strict trace
+        shell: bash
+        run: |
+          executable=build/examples/determinism_demo
+          if [ "$RUNNER_OS" = Windows ]; then
+            executable=build/examples/Release/determinism_demo.exe
+          fi
+          "$executable" --trace | grep '^VELOX_STRICT_TRACE' > strict-trace-${{ matrix.os }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strict-trace-${{ matrix.os }}
+          path: strict-trace-${{ matrix.os }}.txt
+          if-no-files-found: error
+
+  strict-parity:
+    name: Strict CPU cross-platform parity
+    needs: strict-cpu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: strict-trace-*
+          path: traces
+          merge-multiple: true
+      - name: Require identical 1000-frame traces
+        shell: bash
+        run: |
+          tr -d '\r' < <(cat traces/strict-trace-*.txt) | sort -u > distinct-traces.txt
+          test "$(wc -l < distinct-traces.txt)" -eq 1
+          cat distinct-traces.txt
+
+  documentation:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Doxygen
+        run: sudo apt-get update && sudo apt-get install --yes doxygen
+      - name: Build API reference
+        run: doxygen docs/Doxyfile
+      - name: Require generated index
+        run: test -f docs/api-reference/html/index.html
+
+  cross-platform:
+    name: Cross-platform / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
+          - os: windows-latest
+            name: Windows x86_64
+          - os: macos-13
+            name: macOS Intel x86_64
+          - os: macos-14
+            name: macOS Apple Silicon ARM64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with strict FP
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=OFF
+          -DVELOX_STRICT_FLOATING_POINT=ON -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Run cross-platform tests
+        run: ctest --test-dir build -C Release -R "velox\.xplatform\." --output-on-failure
+      - name: Extract determinism trace
+        shell: bash
+        run: |
+          exe=build/tests/cross_platform/test_determinism
+          if [ "$RUNNER_OS" = Windows ]; then
+            exe=build/tests/cross_platform/Release/test_determinism.exe
+          fi
+          "$exe" | grep '^VELOX_XPLATFORM_TRACE' > xplatform-trace-${{ matrix.os }}.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xplatform-trace-${{ matrix.os }}
+          path: xplatform-trace-${{ matrix.os }}.txt
+          if-no-files-found: warn
+
+  cross-platform-parity:
+    name: Cross-platform determinism parity
+    needs: cross-platform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: xplatform-trace-*
+          path: traces
+          merge-multiple: true
+      - name: Compare traces across platforms
+        shell: bash
+        run: |
+          echo "=== Trace files ==="
+          ls -la traces/
+          echo ""
+          # Normalize line endings and extract unique traces.
+          for f in traces/xplatform-trace-*.txt; do
+            tr -d '\r' < "$f"
+          done | sort -u > distinct-xplatform-traces.txt
+          count=$(wc -l < distinct-xplatform-traces.txt)
+          echo "Distinct traces: $count"
+          cat distinct-xplatform-traces.txt
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Cross-platform determinism failure: $count distinct traces found (expected 1)"
+            exit 1
+          fi
+          echo "All platforms produce identical determinism traces."
+      - name: Generate compatibility report
+        shell: bash
+        run: |
+          python3 scripts/cross_platform_test.py \
+            --compare-only \
+            --trace-dir traces \
+            --output-dir reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-platform-report
+          path: reports/
+          if-no-files-found: warn
+
+  nightly-reliability:
+    name: Nightly reliability
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CPU release build
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Extended fuzz corpus
+        run: build/examples/fuzz_demo 1000
+      - name: Extended geometry metamorphics
+        run: build/examples/geometry_fuzz 20000
+      - name: Long-duration soak
+        run: build/examples/fuzz_demo soak 60000
