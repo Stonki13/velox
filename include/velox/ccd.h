@@ -282,8 +282,16 @@ inline ToiResult conservativeAdvancement(DistanceOracle oracle,
     uint32_t iter = 0;
 
     for (; iter < maxAdv && t < dt; ++iter) {
-        float advance = (gap - distTol) / relativeSpeed;
-        if (advance < timeTol) break;
+        // Advance by gap/speed to reach the contact plane
+        float advance = gap / relativeSpeed;
+        if (advance < timeTol) {
+            // Check if we're already at contact
+            if (gap <= distTol) {
+                upper = t;
+                break;
+            }
+            break;
+        }
         t = vmin(dt, t + advance);
         gap = oracle(ctx, t, normal, point);
         if (gap <= distTol) {

@@ -31,10 +31,16 @@ public:
         : capacity_(capacityBytes), offset_(0) {
         if (capacityBytes == 0)
             throw std::invalid_argument("velox: arena capacity must be > 0");
-        block_ = static_cast<uint8_t*>(::operator new(capacityBytes));
+        // Allocate with extra space for alignment, then align the block pointer.
+        size_t allocSize = capacityBytes + 128; // extra for 64-byte alignment
+        void* raw = ::operator new(allocSize);
+        uintptr_t rawAddr = reinterpret_cast<uintptr_t>(raw);
+        uintptr_t alignedAddr = (rawAddr + 63) & ~uintptr_t(63);
+        block_ = reinterpret_cast<uint8_t*>(alignedAddr);
+        rawBlock_ = raw;
     }
 
-    ~ArenaAllocator() { ::operator delete(block_); }
+    ~ArenaAllocator() { ::operator delete(rawBlock_); }
 
     // Non-copyable — the block is uniquely owned.
     ArenaAllocator(const ArenaAllocator&) = delete;
@@ -43,21 +49,25 @@ public:
     // Movable.
     ArenaAllocator(ArenaAllocator&& other) noexcept
         : block_(other.block_),
+          rawBlock_(other.rawBlock_),
           capacity_(other.capacity_),
           offset_(other.offset_.load(std::memory_order_relaxed)) {
         other.block_ = nullptr;
+        other.rawBlock_ = nullptr;
         other.capacity_ = 0;
         other.offset_.store(0, std::memory_order_relaxed);
     }
 
     ArenaAllocator& operator=(ArenaAllocator&& other) noexcept {
         if (this != &other) {
-            ::operator delete(block_);
+            ::operator delete(rawBlock_);
             block_ = other.block_;
+            rawBlock_ = other.rawBlock_;
             capacity_ = other.capacity_;
             offset_.store(other.offset_.load(std::memory_order_relaxed),
                           std::memory_order_relaxed);
             other.block_ = nullptr;
+            other.rawBlock_ = nullptr;
             other.capacity_ = 0;
             other.offset_.store(0, std::memory_order_relaxed);
         }
@@ -101,6 +111,7 @@ public:
 
 private:
     uint8_t* block_;
+    void* rawBlock_; // original allocation for deallocation
     size_t capacity_;
     std::atomic<size_t> offset_; // bump pointer; atomic for thread safety
 };

@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include "mass_properties.h"
+#include "velox/error.h"
 #include <cmath>
 
 using namespace velox;
@@ -95,10 +96,10 @@ TEST_CASE("shiftedToCenter reverses addAtOffset for center shift") {
 
 TEST_CASE("collinear points throw") {
     std::vector<Vec3> pts = {{0, 0, 0}, {1, 0, 0}, {2, 0, 0}};
-    CHECK_THROWS_AS(convexTriangles(pts), std::invalid_argument);
+    CHECK_THROWS_AS(convexTriangles(pts), VeloxInvalidArgument);
 }
 
 TEST_CASE("coplanar points throw") {
     std::vector<Vec3> pts = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}};
-    CHECK_THROWS_AS(convexTriangles(pts), std::invalid_argument);
+    CHECK_THROWS_AS(convexTriangles(pts), VeloxInvalidArgument);
 }
