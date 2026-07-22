@@ -105,6 +105,104 @@ struct Writer {
         writeRaw(canonical);
     }
 
+    void pod(const Contact& value) {
+        Contact canonical{};
+        std::memset(&canonical, 0, sizeof(canonical));
+        canonical.a = value.a;
+        canonical.b = value.b;
+        canonical.featureKey = value.featureKey;
+        canonical.normal = value.normal;
+        canonical.point = value.point;
+        canonical.localAnchorA = value.localAnchorA;
+        canonical.localAnchorB = value.localAnchorB;
+        canonical.gap = value.gap;
+        canonical.bias0 = value.bias0;
+        canonical.vn0 = value.vn0;
+        canonical.restitution = value.restitution;
+        canonical.friction1 = value.friction1;
+        canonical.friction2 = value.friction2;
+        canonical.rollingFriction = value.rollingFriction;
+        canonical.spinningFriction = value.spinningFriction;
+        canonical.normalImpulse = value.normalImpulse;
+        canonical.tangentImpulse1 = value.tangentImpulse1;
+        canonical.tangentImpulse2 = value.tangentImpulse2;
+        canonical.rollingImpulse1 = value.rollingImpulse1;
+        canonical.rollingImpulse2 = value.rollingImpulse2;
+        canonical.spinningImpulse = value.spinningImpulse;
+        writeRaw(canonical);
+    }
+
+    void pod(const Joint& value) {
+        Joint canonical{};
+        std::memset(&canonical, 0, sizeof(canonical));
+        canonical.type = value.type;
+        canonical.a = value.a;
+        canonical.b = value.b;
+        canonical.localAnchorA = value.localAnchorA;
+        canonical.localAnchorB = value.localAnchorB;
+        canonical.localAxisA = value.localAxisA;
+        canonical.localAxisB = value.localAxisB;
+        canonical.localRefA = value.localRefA;
+        canonical.localRefB = value.localRefB;
+        canonical.restLength = value.restLength;
+        canonical.collideConnected = value.collideConnected;
+        canonical.enableSpring = value.enableSpring;
+        canonical.springFrequencyHz = value.springFrequencyHz;
+        canonical.springDampingRatio = value.springDampingRatio;
+        canonical.breakForce = value.breakForce;
+        canonical.breakTorque = value.breakTorque;
+        canonical.enableMotor = value.enableMotor;
+        canonical.motorSpeed = value.motorSpeed;
+        canonical.maxMotorTorque = value.maxMotorTorque;
+        canonical.maxMotorForce = value.maxMotorForce;
+        canonical.enableLimit = value.enableLimit;
+        canonical.lowerLimit = value.lowerLimit;
+        canonical.upperLimit = value.upperLimit;
+        canonical.enableSwingLimit = value.enableSwingLimit;
+        canonical.swingLimit = value.swingLimit;
+        canonical.enableTwistLimit = value.enableTwistLimit;
+        canonical.lowerTwistLimit = value.lowerTwistLimit;
+        canonical.upperTwistLimit = value.upperTwistLimit;
+        canonical.linearLimitMask = value.linearLimitMask;
+        canonical.angularLimitMask = value.angularLimitMask;
+        canonical.linearMotorMask = value.linearMotorMask;
+        canonical.angularMotorMask = value.angularMotorMask;
+        canonical.lowerLinearLimit = value.lowerLinearLimit;
+        canonical.upperLinearLimit = value.upperLinearLimit;
+        canonical.lowerAngularLimit = value.lowerAngularLimit;
+        canonical.upperAngularLimit = value.upperAngularLimit;
+        canonical.linearMotorSpeed = value.linearMotorSpeed;
+        canonical.angularMotorSpeed = value.angularMotorSpeed;
+        canonical.maxLinearMotorForce = value.maxLinearMotorForce;
+        canonical.maxAngularMotorTorque = value.maxAngularMotorTorque;
+        canonical.weldFrequencyHz = value.weldFrequencyHz;
+        canonical.weldDampingRatio = value.weldDampingRatio;
+        canonical.suspensionFrequencyHz = value.suspensionFrequencyHz;
+        canonical.suspensionDampingRatio = value.suspensionDampingRatio;
+        canonical.wheelRadius = value.wheelRadius;
+        canonical.enableSteering = value.enableSteering;
+        canonical.steeringAngle = value.steeringAngle;
+        canonical.maxSteeringAngle = value.maxSteeringAngle;
+        canonical.maxLength = value.maxLength;
+        canonical.pulleyAnchorA = value.pulleyAnchorA;
+        canonical.pulleyAnchorB = value.pulleyAnchorB;
+        canonical.pulleyRatio = value.pulleyRatio;
+        canonical.gearRatio = value.gearRatio;
+        canonical.motorImpulse = value.motorImpulse;
+        canonical.limitImpulse = value.limitImpulse;
+        canonical.swingImpulse = value.swingImpulse;
+        canonical.twistImpulse = value.twistImpulse;
+        canonical.springImpulse = value.springImpulse;
+        canonical.linearMotorImpulse = value.linearMotorImpulse;
+        canonical.angularMotorImpulse = value.angularMotorImpulse;
+        canonical.linearLimitImpulse = value.linearLimitImpulse;
+        canonical.angularLimitImpulse = value.angularLimitImpulse;
+        canonical.reactionLinearImpulse = value.reactionLinearImpulse;
+        canonical.reactionAngularImpulse = value.reactionAngularImpulse;
+        canonical.broken = value.broken;
+        writeRaw(canonical);
+    }
+
     template <typename T>
     void vec(const std::vector<T>& values) {
         static_assert(std::is_trivially_copyable<T>::value, "POD only");
