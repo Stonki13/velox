@@ -436,6 +436,244 @@ VELOX_HD inline void solveConeTwist(Joint& joint, Body& a, Body& b,
     if (lambda != 0.0f) applyAngular(joint, a, b, axisA * lambda);
 }
 
+VELOX_HD inline void solveWeld(Joint& joint, Body& a, Body& b,
+                               const Vec3& ra, const Vec3& rb,
+                               const Vec3& pa, const Vec3& pb, float dt) {
+    // Linear: lock the anchor points together.
+    Vec3 velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    Vec3 bias = clampPositionBias((pa - pb) * (kBeta / dt));
+    Vec3 impulse = mul(inverse(pointMass(a, b, ra, rb)),
+                       -(velocity + bias));
+    applyLinear(joint, a, b, ra, rb, impulse, 1.0f);
+
+    // Angular: lock relative orientation, optionally soft.
+    if (joint.weldFrequencyHz > 0.0f) {
+        // Soft angular constraint using spring-damper.
+        Vec3 rotation = rotationVector(joint, a, b);
+        Vec3 relativeW = a.angularVelocity - b.angularVelocity;
+        constexpr float tau = 6.28318530718f;
+        float omega = tau * joint.weldFrequencyHz;
+        Mat3 angK = angularMass(a, b);
+        // Soft constraint: lambda = -(Cdot + bias + softness * accumulated) / (K + softness)
+        float mass = 1.0f / (dot({1,0,0}, a.invInertiaMul({1,0,0})) +
+                             dot({1,0,0}, b.invInertiaMul({1,0,0})) + 1e-12f);
+        float stiffness = mass * omega * omega;
+        float damping = 2.0f * mass * joint.weldDampingRatio * omega;
+        float softness = 1.0f / (dt * (damping + dt * stiffness));
+        Vec3 angularBias = rotation * (dt * stiffness * softness);
+        Vec3 lambda = mul(inverse(angK),
+                          -(relativeW + angularBias +
+                            joint.angularMotorImpulse * softness));
+        joint.angularMotorImpulse += lambda;
+        applyAngular(joint, a, b, lambda);
+    } else {
+        solveAngularFrame(joint, a, b, kBeta / dt);
+    }
+}
+
+VELOX_HD inline void solveWheel(Joint& joint, Body& a, Body& b,
+                                const Vec3& ra, const Vec3& rb,
+                                const Vec3& pa, const Vec3& pb, float dt) {
+    // The wheel joint constrains body B (the wheel) to stay on a line defined
+    // by localAxisA (suspension axis) through the anchor on body A (chassis).
+    // Rotation about the axle (localAxisA) is free (the wheel spins).
+    // A spring acts along the suspension axis.
+    Vec3 axisA = normalize(rotate(a.orientation, joint.localAxisA));
+
+    // Constrain the two lateral directions (perpendicular to suspension axis).
+    Vec3 ref = rotate(a.orientation, joint.localRefA);
+    Vec3 t1 = normalize(ref - axisA * dot(ref, axisA));
+    if (lengthSq(t1) < 1e-12f) {
+        ref = fabsf(axisA.x) < 0.9f ? Vec3{1,0,0} : Vec3{0,1,0};
+        t1 = normalize(cross(axisA, ref));
+    }
+    Vec3 tangents[2] = {t1, cross(axisA, t1)};
+    Mat3 pointK = pointMass(a, b, ra, rb);
+    Vec3 error = pa - pb;
+    Vec3 vel = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    for (int i = 0; i < 2; ++i) {
+        Vec3 tangent = tangents[i];
+        float k = dot(tangent, mul(pointK, tangent));
+        if (k <= 0.0f) continue;
+        float lambda = -(dot(vel, tangent) +
+                         dot(error, tangent) * (kBeta / dt)) / k;
+        applyLinear(joint, a, b, ra, rb, tangent * lambda, 1.0f);
+        vel = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    }
+
+    // Suspension spring along the axis.
+    float kAxis = dot(axisA, mul(pointK, axisA));
+    if (kAxis > 0.0f) {
+        float axisSpeed = dot(anchorVelocity(b, rb) -
+                              anchorVelocity(a, ra), axisA);
+        float displacement = dot(pb - pa, axisA);
+        constexpr float tau = 6.28318530718f;
+        float mass = 1.0f / kAxis;
+        float omega = tau * joint.suspensionFrequencyHz;
+        float stiffness = mass * omega * omega;
+        float damping = 2.0f * mass * joint.suspensionDampingRatio * omega;
+        float softness = 1.0f / (dt * (damping + dt * stiffness));
+        float bias = displacement * dt * stiffness * softness;
+        float lambda = -(axisSpeed + bias +
+                         softness * joint.springImpulse) / (kAxis + softness);
+        joint.springImpulse += lambda;
+        applyLinear(joint, a, b, ra, rb, axisA * lambda, -1.0f);
+    }
+
+    // Constrain angular DOF except rotation about the axle.
+    // Lock the two tangential angular axes; leave the axle free.
+    Vec3 relativeW = a.angularVelocity - b.angularVelocity;
+    for (int i = 0; i < 2; ++i) {
+        Vec3 tangent = tangents[i];
+        float k = dot(tangent, a.invInertiaMul(tangent)) +
+                  dot(tangent, b.invInertiaMul(tangent));
+        if (k <= 0.0f) continue;
+        // Also align the frame reference to prevent drift.
+        Vec3 refA = rotate(a.orientation, joint.localRefA);
+        Vec3 refB = rotate(b.orientation, joint.localRefB);
+        Vec3 frameError = cross(refB, refA);
+        float lambda = -(dot(relativeW, tangent) +
+                         dot(frameError, tangent) * (kBeta / dt)) / k;
+        applyAngular(joint, a, b, tangent * lambda);
+        relativeW = a.angularVelocity - b.angularVelocity;
+    }
+
+    // Steering: rotate the wheel's steering axis.
+    if (joint.enableSteering) {
+        // Apply a corrective angular impulse to reach the target steering angle
+        // about the up axis (localRefA projected perpendicular to axle).
+        Vec3 steerAxis = normalize(rotate(a.orientation, joint.localRefA));
+        float kSteer = dot(steerAxis, a.invInertiaMul(steerAxis)) +
+                       dot(steerAxis, b.invInertiaMul(steerAxis));
+        if (kSteer > 0.0f) {
+            Vec3 refA = rotate(a.orientation, joint.localRefA);
+            Vec3 refB = rotate(b.orientation, joint.localRefB);
+            // Project refs perpendicular to steer axis.
+            Vec3 axle = axisA;
+            Vec3 pA = normalize(refA - axle * dot(refA, axle));
+            Vec3 pB = normalize(refB - axle * dot(refB, axle));
+            float currentAngle = atan2f(dot(cross(pA, pB), steerAxis),
+                                        dot(pA, pB));
+            float angleError = joint.steeringAngle - currentAngle;
+            float wSteer = dot(b.angularVelocity - a.angularVelocity, steerAxis);
+            float lambda = (wSteer - angleError * (kBeta / dt)) / kSteer;
+            applyAngular(joint, a, b, steerAxis * lambda);
+        }
+    }
+
+    // Axle motor (drives wheel spin).
+    if (joint.enableMotor) {
+        float kAxle = dot(axisA, a.invInertiaMul(axisA)) +
+                      dot(axisA, b.invInertiaMul(axisA));
+        if (kAxle > 0.0f) {
+            float wAxle = dot(b.angularVelocity - a.angularVelocity, axisA);
+            float lambda = (wAxle - joint.motorSpeed) / kAxle;
+            float maxImpulse = joint.maxMotorTorque * dt;
+            float old = joint.motorImpulse;
+            joint.motorImpulse = vclamp(old + lambda, -maxImpulse, maxImpulse);
+            lambda = joint.motorImpulse - old;
+            applyAngular(joint, a, b, axisA * lambda);
+        }
+    }
+}
+
+VELOX_HD inline void solveRope(Joint& joint, Body& a, Body& b,
+                               const Vec3& ra, const Vec3& rb,
+                               const Vec3& pa, const Vec3& pb, float dt) {
+    // Rope: only resists stretching beyond maxLength. Slack is free.
+    Vec3 d = pa - pb;
+    float len = length(d);
+    if (len < 1e-8f || len <= joint.maxLength) return; // slack — no constraint
+    Vec3 n = d * (1.0f / len);
+    Vec3 velocity = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+    Vec3 raxn = cross(ra, n), rbxn = cross(rb, n);
+    float k = a.solverInvMass() + b.solverInvMass() +
+              dot(raxn, a.invInertiaMul(raxn)) +
+              dot(rbxn, b.invInertiaMul(rbxn));
+    if (k <= 0.0f) return;
+    float overshoot = len - joint.maxLength;
+    float bias = overshoot * (kBeta / dt);
+    float lambda = -(dot(velocity, n) + bias) / k;
+    // Only pull (positive lambda along n means pulling bodies together).
+    float old = joint.limitImpulse;
+    joint.limitImpulse = vmin(0.0f, old + lambda);
+    lambda = joint.limitImpulse - old;
+    applyLinear(joint, a, b, ra, rb, n * lambda, 1.0f);
+}
+
+VELOX_HD inline void solvePulley(Joint& joint, Body& a, Body& b,
+                                 const Vec3& ra, const Vec3& rb,
+                                 const Vec3& pa, const Vec3& pb, float dt) {
+    // Pulley: lengthA + ratio * lengthB = restTotal (constant).
+    // lengthA = distance from pulleyAnchorA to anchorA on body A.
+    // lengthB = distance from pulleyAnchorB to anchorB on body B.
+    Vec3 dA = pa - joint.pulleyAnchorA;
+    Vec3 dB = pb - joint.pulleyAnchorB;
+    float lenA = length(dA);
+    float lenB = length(dB);
+    if (lenA < 1e-8f || lenB < 1e-8f) return;
+    Vec3 nA = dA * (1.0f / lenA);
+    Vec3 nB = dB * (1.0f / lenB);
+
+    // Effective mass along the pulley constraint.
+    Vec3 raxnA = cross(ra, nA);
+    Vec3 rbxnB = cross(rb, nB);
+    float kA = a.solverInvMass() + dot(raxnA, a.invInertiaMul(raxnA));
+    float kB = b.solverInvMass() + dot(rbxnB, b.invInertiaMul(rbxnB));
+    float ratio = joint.pulleyRatio;
+    float k = kA + ratio * ratio * kB;
+    if (k <= 0.0f) return;
+
+    // Constraint: C = lenA + ratio * lenB - restTotal
+    float restTotal = joint.restLength; // stored at creation
+    float C = lenA + ratio * lenB - restTotal;
+    float bias = C * (kBeta / dt);
+
+    // Velocity along the constraint.
+    float speedA = dot(anchorVelocity(a, ra), nA);
+    float speedB = dot(anchorVelocity(b, rb), nB);
+    float cdot = speedA + ratio * speedB;
+
+    float lambda = -(cdot + bias) / k;
+    float old = joint.limitImpulse;
+    joint.limitImpulse += lambda;
+    lambda = joint.limitImpulse - old;
+
+    // Apply impulses: A along nA, B along nB * ratio.
+    applyImpulse(a, ra, nA * lambda, 1.0f);
+    applyImpulse(b, rb, nB * (lambda * ratio), 1.0f);
+    joint.reactionLinearImpulse += nA * lambda;
+}
+
+VELOX_HD inline void solveGear(Joint& joint, Body& a, Body& b, float dt) {
+    // Gear: couples angular velocity about each body's local axis.
+    // wB_dot_axisB = -gearRatio * wA_dot_axisA
+    Vec3 axisA = normalize(rotate(a.orientation, joint.localAxisA));
+    Vec3 axisB = normalize(rotate(b.orientation, joint.localAxisB));
+    float ratio = joint.gearRatio;
+
+    float kA = dot(axisA, a.invInertiaMul(axisA));
+    float kB = dot(axisB, b.invInertiaMul(axisB));
+    float k = kA + ratio * ratio * kB;
+    if (k <= 0.0f) return;
+
+    float wA = dot(a.angularVelocity, axisA);
+    float wB = dot(b.angularVelocity, axisB);
+    // Constraint: wA + ratio * wB = 0
+    float cdot = wA + ratio * wB;
+    float lambda = -cdot / k;
+    float old = joint.motorImpulse;
+    joint.motorImpulse += lambda;
+    lambda = joint.motorImpulse - old;
+
+    // Apply angular impulses.
+    if (a.isDynamic() && !a.isLocked())
+        a.angularVelocity += a.invInertiaMul(axisA * lambda);
+    if (b.isDynamic() && !b.isLocked())
+        b.angularVelocity += b.invInertiaMul(axisB * (lambda * ratio));
+    joint.reactionAngularImpulse += axisA * lambda;
+}
+
 VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
     Vec3 ra = rotate(a.orientation, joint.localAnchorA);
     Vec3 rb = rotate(b.orientation, joint.localAnchorB);
@@ -499,6 +737,21 @@ VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
         solveAngularFrame(joint, a, b, kBeta / dt);
         break;
     }
+    case JointType::Weld:
+        solveWeld(joint, a, b, ra, rb, pa, pb, dt);
+        break;
+    case JointType::Wheel:
+        solveWheel(joint, a, b, ra, rb, pa, pb, dt);
+        break;
+    case JointType::Rope:
+        solveRope(joint, a, b, ra, rb, pa, pb, dt);
+        break;
+    case JointType::Pulley:
+        solvePulley(joint, a, b, ra, rb, pa, pb, dt);
+        break;
+    case JointType::Gear:
+        solveGear(joint, a, b, dt);
+        break;
     case JointType::SixDof:
         solveSixDof(joint, a, b, ra, rb, pa, pb, dt);
         break;
@@ -517,7 +770,7 @@ VELOX_HD inline void solve(Joint& joint, Body& a, Body& b, float dt) {
 }
 
 inline bool supported(const Joint& joint) {
-    return (uint8_t)joint.type <= (uint8_t)JointType::Motor;
+    return (uint8_t)joint.type <= (uint8_t)JointType::Gear;
 }
 
 } // namespace velox::joint_solver

@@ -2,8 +2,9 @@
 
 #include <cmath>
 #include <mutex>
-#include <stdexcept>
 #include <unordered_map>
+
+#include "velox/error.h"
 
 namespace velox {
 namespace {
@@ -47,7 +48,7 @@ void applyAuthoredMass(World& world, const RagdollBone& bone) {
     if (!state.isDynamic()) return;
     if (state.invMass <= 0.0f || state.invInertia.x <= 0.0f ||
         state.invInertia.y <= 0.0f || state.invInertia.z <= 0.0f)
-        throw std::invalid_argument("velox: ragdoll dynamic bone has invalid mass properties");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidBone, "ragdoll dynamic bone has invalid mass properties");
     const float sourceMass = 1.0f / state.invMass;
     const float scale = bone.mass / sourceMass;
     const Vec3 sourceInertia{1.0f / state.invInertia.x,
@@ -62,9 +63,9 @@ void applyAuthoredMass(World& world, const RagdollBone& bone) {
 BodyId RagdollBuilder::Build(World& world, const std::vector<RagdollBone>& bones,
                              const std::vector<RagdollJoint>& links) {
     if (bones.empty())
-        throw std::invalid_argument("velox: ragdoll requires at least one bone");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidGraph, "ragdoll requires at least one bone");
     if (links.size() + 1 != bones.size())
-        throw std::invalid_argument("velox: ragdoll graph must contain bones - 1 links");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidGraph, "ragdoll graph must contain bones - 1 links");
 
     std::unordered_map<uint64_t, size_t> boneIndex;
     boneIndex.reserve(bones.size());
@@ -75,7 +76,7 @@ BodyId RagdollBuilder::Build(World& world, const std::vector<RagdollBone>& bones
         if (!world.isValid(bone.body) || !finite(bone.localCenterOfMass) ||
             !finite(bone.mass) || bone.mass <= 0.0f ||
             !boneIndex.emplace(bone.body.value, index).second)
-            throw std::invalid_argument("velox: ragdoll contains an invalid or duplicate bone");
+            VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidBone, "ragdoll contains an invalid or duplicate bone");
     }
     for (const RagdollJoint& link : links) {
         const auto parent = boneIndex.find(link.parent.value);
@@ -88,9 +89,9 @@ BodyId RagdollBuilder::Build(World& world, const std::vector<RagdollBone>& bones
             link.twistLimit < 0.0f || link.twistLimit > 3.14159265f ||
             !finite(link.motorSpeed) || !finite(link.maxMotorTorque) ||
             link.maxMotorTorque < 0.0f)
-            throw std::invalid_argument("velox: ragdoll contains an invalid link");
+            VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidGraph, "ragdoll contains an invalid link");
         if (++parentCount[child->second] != 1)
-            throw std::invalid_argument("velox: ragdoll child has multiple parents");
+            VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidGraph, "ragdoll child has multiple parents");
         children[parent->second].push_back(child->second);
     }
 
@@ -98,24 +99,24 @@ BodyId RagdollBuilder::Build(World& world, const std::vector<RagdollBone>& bones
     for (size_t index = 0; index < parentCount.size(); ++index)
         if (parentCount[index] == 0) {
             if (rootIndex != bones.size())
-                throw std::invalid_argument("velox: ragdoll graph is disconnected");
+                VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollDisconnected, "ragdoll graph is disconnected");
             rootIndex = index;
         }
     if (rootIndex == bones.size())
-        throw std::invalid_argument("velox: ragdoll graph contains a cycle");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollCycle, "ragdoll graph contains a cycle");
 
     std::vector<uint8_t> visited(bones.size(), 0);
     std::vector<size_t> queue{rootIndex};
     for (size_t cursor = 0; cursor < queue.size(); ++cursor) {
         const size_t parent = queue[cursor];
         if (visited[parent])
-            throw std::invalid_argument("velox: ragdoll graph contains a cycle");
+            VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollCycle, "ragdoll graph contains a cycle");
         visited[parent] = 1;
         queue.insert(queue.end(), children[parent].begin(), children[parent].end());
     }
     for (uint8_t reached : visited)
         if (!reached)
-            throw std::invalid_argument("velox: ragdoll graph is disconnected");
+            VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollDisconnected, "ragdoll graph is disconnected");
 
     for (const RagdollBone& bone : bones)
         applyAuthoredMass(world, bone);
@@ -154,10 +155,10 @@ BodyId RagdollBuilder::Build(World& world, const std::vector<RagdollBone>& bones
 
 void RagdollBuilder::SetMotorTorque(World& world, JointId id, float torque) {
     if (!finite(torque) || torque < 0.0f)
-        throw std::invalid_argument("velox: ragdoll motor torque must be finite and non-negative");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidMotor, "ragdoll motor torque must be finite and non-negative");
     Joint& joint = world.joint(id);
     if (joint.type != JointType::Hinge)
-        throw std::invalid_argument("velox: ragdoll motor requires a hinge link");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollInvalidMotor, "ragdoll motor requires a hinge link");
     joint.enableMotor = true;
     joint.maxMotorTorque = torque;
 }
@@ -165,7 +166,7 @@ void RagdollBuilder::SetMotorTorque(World& world, JointId id, float torque) {
 void RagdollBuilder::WakeAll(World& world, BodyId root) {
     const RagdollRecord record = lookup(world, root);
     if (record.world == nullptr)
-        throw std::invalid_argument("velox: ragdoll root is not registered with this world");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollUnregisteredRoot, "ragdoll root is not registered with this world");
     for (BodyId body : record.bodies)
         if (world.isValid(body)) world.wake(body);
 }
@@ -173,7 +174,7 @@ void RagdollBuilder::WakeAll(World& world, BodyId root) {
 std::vector<JointId> RagdollBuilder::Joints(World& world, BodyId root) {
     const RagdollRecord record = lookup(world, root);
     if (record.world == nullptr)
-        throw std::invalid_argument("velox: ragdoll root is not registered with this world");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::RagdollUnregisteredRoot, "ragdoll root is not registered with this world");
     std::vector<JointId> valid;
     valid.reserve(record.joints.size());
     for (JointId joint : record.joints)

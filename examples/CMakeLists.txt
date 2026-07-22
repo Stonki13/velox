@@ -106,3 +106,35 @@ target_link_libraries(character_demo PRIVATE velox)
 if(BUILD_TESTING)
     add_test(NAME velox.character COMMAND character_demo)
 endif()
+
+add_executable(profiler_demo profiler_demo.cpp)
+target_link_libraries(profiler_demo PRIVATE velox)
+if(BUILD_TESTING)
+    add_test(NAME velox.profiler COMMAND profiler_demo)
+endif()
+
+# Debug visualization: exercises every debug-draw layer headlessly and verifies
+# each one produces geometry. No third-party dependencies.
+add_executable(debug_visualizer debug_visualizer.cpp)
+target_link_libraries(debug_visualizer PRIVATE velox)
+if(BUILD_TESTING)
+    add_test(NAME velox.debug_visualizer COMMAND debug_visualizer)
+endif()
+
+# Optional Dear ImGui interactive debug overlay. Off by default so the core
+# build never depends on ImGui; enable with -DVELOX_BUILD_IMGUI_EXAMPLE=ON and
+# make ImGui discoverable (e.g. -DCMAKE_PREFIX_PATH=<imgui-install>).
+option(VELOX_BUILD_IMGUI_EXAMPLE "Build the Dear ImGui debug overlay example" OFF)
+if(VELOX_BUILD_IMGUI_EXAMPLE)
+    find_package(imgui CONFIG QUIET)
+    if(imgui_FOUND)
+        add_executable(imgui_debug_example imgui_debug_example.cpp)
+        target_link_libraries(imgui_debug_example PRIVATE velox imgui::imgui)
+    else()
+        message(STATUS
+            "VELOX_BUILD_IMGUI_EXAMPLE is ON but ImGui was not found; "
+            "the example will build as a dependency-free stub.")
+        add_executable(imgui_debug_example imgui_debug_example.cpp)
+        target_link_libraries(imgui_debug_example PRIVATE velox)
+    endif()
+endif()

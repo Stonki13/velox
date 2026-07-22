@@ -1,7 +1,7 @@
 #include "velox/serialization.h"
 
 #include <cstring>
-#include <stdexcept>
+#include "velox/error.h"
 #include <type_traits>
 
 namespace velox {
@@ -41,7 +41,8 @@ struct Reader {
 
     void need(size_t bytes) const {
         if (static_cast<size_t>(end - cursor) < bytes)
-            throw std::runtime_error("velox: truncated serialized scene");
+            VELOX_THROW(VeloxRuntimeError, ErrorCode::SerializedTruncated,
+                        "truncated serialized scene");
     }
 
     template <typename T>
@@ -59,8 +60,8 @@ struct Reader {
         pod(elementSize);
         pod(count);
         if (elementSize != sizeof(T))
-            throw std::runtime_error(
-                "velox: serialized scene layout does not match this build");
+            VELOX_THROW(VeloxRuntimeError, ErrorCode::SerializedLayoutMismatch,
+                        "serialized scene layout does not match this build");
         const size_t bytes = static_cast<size_t>(count) * sizeof(T);
         need(bytes);
         values.resize(static_cast<size_t>(count));
@@ -154,7 +155,8 @@ struct SerializationAccess {
         reader.vec(snapshot.meshes_.compoundChildren);
         reader.pod(snapshot.lastStepStats_);
         if (reader.cursor != reader.end)
-            throw std::runtime_error("velox: trailing bytes in serialized scene");
+            VELOX_THROW(VeloxRuntimeError, ErrorCode::SerializedTrailingBytes,
+                        "trailing bytes in serialized scene");
         // Snapshots bind to their originating world; a deserialized snapshot
         // adopts the target so restoreSnapshot accepts it.
         snapshot.owner_ = &owner;
@@ -199,17 +201,18 @@ SerializedScene serializeWorld(const World& world, std::string metadata) {
 
 void deserializeWorld(World& world, const SerializedScene& scene) {
     if (scene.version != kSerializationVersion)
-        throw std::runtime_error("velox: serialized scene version " +
-                                 std::to_string(scene.version) +
-                                 " is not supported by this build (expected " +
-                                 std::to_string(kSerializationVersion) + ")");
+        VELOX_THROW(VeloxRuntimeError, ErrorCode::SerializedVersionMismatch,
+                    "serialized scene version " +
+                    std::to_string(scene.version) +
+                    " is not supported by this build (expected " +
+                    std::to_string(kSerializationVersion) + ")");
     world.restoreSnapshot(SerializationAccess::decode(scene.data, world));
 }
 
 std::vector<uint8_t> packScene(const SerializedScene& scene, CompressionMode mode) {
     if (mode != CompressionMode::None)
-        throw std::runtime_error(
-            "velox: this build was compiled without LZ4/ZSTD support");
+        VELOX_THROW(VeloxRuntimeError, ErrorCode::Unknown,
+                    "this build was compiled without LZ4/ZSTD support");
     std::vector<uint8_t> bytes;
     Writer writer{bytes};
     writer.pod(kMagic);
@@ -227,19 +230,21 @@ SerializedScene unpackScene(const std::vector<uint8_t>& bytes) {
     uint32_t magic = 0;
     reader.pod(magic);
     if (magic != kMagic)
-        throw std::runtime_error("velox: not a serialized velox scene");
+        VELOX_THROW(VeloxRuntimeError, ErrorCode::SerializedBadMagic,
+                    "not a serialized velox scene");
     SerializedScene scene;
     reader.pod(scene.version);
     if (scene.version != kSerializationVersion)
-        throw std::runtime_error("velox: serialized scene version " +
-                                 std::to_string(scene.version) +
-                                 " is not supported by this build (expected " +
-                                 std::to_string(kSerializationVersion) + ")");
+        VELOX_THROW(VeloxRuntimeError, ErrorCode::SerializedVersionMismatch,
+                    "serialized scene version " +
+                    std::to_string(scene.version) +
+                    " is not supported by this build (expected " +
+                    std::to_string(kSerializationVersion) + ")");
     uint8_t mode = 0;
     reader.pod(mode);
     if (mode != static_cast<uint8_t>(CompressionMode::None))
-        throw std::runtime_error(
-            "velox: this build was compiled without LZ4/ZSTD support");
+        VELOX_THROW(VeloxRuntimeError, ErrorCode::Unknown,
+                    "this build was compiled without LZ4/ZSTD support");
     uint64_t metadataSize = 0;
     reader.pod(metadataSize);
     reader.need(static_cast<size_t>(metadataSize));

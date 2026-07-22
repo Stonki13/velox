@@ -4,7 +4,7 @@
 #include "broadphase.h"
 #include "narrowphase.h"
 #include <algorithm>
-#include <stdexcept>
+#include "velox/error.h"
 
 namespace velox {
 
@@ -21,17 +21,17 @@ bool finiteQueryQuat(const Quat& q) {
 
 float validateQueryHull(const std::vector<Vec3>& points, Quat orientation) {
     if (points.size() < 4 || points.size() > UINT32_MAX)
-        throw std::invalid_argument(
-            "velox: convex hull query requires at least four points");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullTooFewPoints,
+            "convex hull query requires at least four points");
     if (!finiteQueryQuat(orientation))
-        throw std::invalid_argument("velox: convex hull query orientation must be finite");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOrientation, "convex hull query orientation must be finite");
     float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
                orientation.z * orientation.z + orientation.w * orientation.w;
     if (q2 < 1e-12f)
-        throw std::invalid_argument("velox: convex hull query orientation must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOrientation, "convex hull query orientation must be non-zero");
     for (const Vec3& point : points)
         if (!finiteQueryVec(point))
-            throw std::invalid_argument("velox: convex hull query points must be finite");
+            VELOX_THROW(VeloxInvalidArgument, ErrorCode::NonFiniteValue, "convex hull query points must be finite");
 
     const Vec3 p0 = points[0];
     float scale2 = 0.0f;
@@ -41,7 +41,7 @@ float validateQueryHull(const std::vector<Vec3>& points, Quat orientation) {
         if (d2 > scale2) { scale2 = d2; i1 = i; }
     }
     if (scale2 < 1e-12f)
-        throw std::invalid_argument("velox: convex hull query points are coincident");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullCoincidentPoints, "convex hull query points are coincident");
     Vec3 edge = points[i1] - p0;
     float bestArea2 = 0.0f;
     size_t i2 = 0;
@@ -50,7 +50,7 @@ float validateQueryHull(const std::vector<Vec3>& points, Quat orientation) {
         if (area2 > bestArea2) { bestArea2 = area2; i2 = i; }
     }
     if (bestArea2 <= scale2 * scale2 * 1e-12f)
-        throw std::invalid_argument("velox: convex hull query points are collinear");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullCollinearPoints, "convex hull query points are collinear");
     Vec3 normal = cross(edge, points[i2] - p0);
     float planeDistance = 0.0f;
     float radius2 = 0.0f;
@@ -60,7 +60,7 @@ float validateQueryHull(const std::vector<Vec3>& points, Quat orientation) {
     }
     float scale = sqrtf(scale2);
     if (planeDistance <= scale * scale * scale * 1e-6f)
-        throw std::invalid_argument("velox: convex hull query points are coplanar");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullCoplanarPoints, "convex hull query points are coplanar");
     return sqrtf(radius2);
 }
 
@@ -394,6 +394,10 @@ bool World::queryAllows(BodyIndex dense, const QueryFilter& filter) const {
     BodyId handle = bodyHandle(dense);
     if (handle == filter.ignoredBody) return false;
     if (!filter.includeSensors && body.isSensor()) return false;
+    // Group override: when the query carries a non-zero group index and the
+    // body shares it, the sign decides. QueryFilter doesn't carry a group
+    // index today, so we only apply the layer test here. The group index
+    // is honoured by Body::canCollideWith in the broadphase / CCD paths.
     return (filter.maskBits & body.categoryBits) != 0 &&
            (body.maskBits & filter.categoryBits) != 0;
 }
@@ -403,9 +407,9 @@ RayHit World::rayCast(Vec3 origin, Vec3 dir, float maxDist,
     AccessGuard guard(*this, AccessKind::Query, "rayCast");
     if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
-        throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidRayCast, "ray cast inputs must be finite and maxDist non-negative");
     if (lengthSq(dir) < 1e-12f)
-        throw std::invalid_argument("velox: ray direction must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::ZeroVector, "ray direction must be non-zero");
     dir = normalize(dir);
     RayHit best;
     best.t = maxDist;
@@ -438,9 +442,9 @@ void World::rayCastAll(Vec3 origin, Vec3 dir, float maxDist,
     AccessGuard guard(*this, AccessKind::Query, "rayCastAll");
     if (!finiteQueryVec(origin) || !finiteQueryVec(dir) ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
-        throw std::invalid_argument("velox: ray cast inputs must be finite and maxDist non-negative");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidRayCast, "ray cast inputs must be finite and maxDist non-negative");
     if (lengthSq(dir) < 1e-12f)
-        throw std::invalid_argument("velox: ray direction must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::ZeroVector, "ray direction must be non-zero");
     dir = normalize(dir);
     out.clear();
     const MeshSoupView soup = view(meshes_);
@@ -501,14 +505,14 @@ void World::overlapConvexHull(Vec3 center, const std::vector<Vec3>& points,
                               const QueryFilter& filter) const {
     AccessGuard guard(*this, AccessKind::Query, "overlapConvexHull");
     if (!finiteQueryVec(center))
-        throw std::invalid_argument("velox: convex hull query center must be finite");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::NonFiniteValue, "convex hull query center must be finite");
     Body probe;
     probe.shape = ShapeType::Hull;
     probe.position = center;
     probe.orientation = normalize(orientation);
     probe.radius = validateQueryHull(points, orientation);
     if (meshes_.hullPoints.size() > UINT32_MAX - points.size())
-        throw std::length_error("velox: convex hull query point capacity exceeded");
+        VELOX_THROW(VeloxCapacityExceeded, ErrorCode::HullPointCapacityExceeded, "convex hull query point capacity exceeded");
     probe.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
     probe.hullCount = static_cast<uint32_t>(points.size());
     std::vector<Vec3> hullPoints = meshes_.hullPoints;
@@ -522,7 +526,7 @@ void World::overlapSphere(Vec3 center, float radius, std::vector<BodyId>& out,
                           const QueryFilter& filter) const {
     AccessGuard guard(*this, AccessKind::Query, "overlapSphere");
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
-        throw std::invalid_argument("velox: overlap sphere requires a finite center and positive radius");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOverlap, "overlap sphere requires a finite center and positive radius");
     Body probe;
     probe.shape = ShapeType::Sphere;
     probe.position = center;
@@ -536,11 +540,11 @@ void World::overlapBox(Vec3 center, Vec3 halfExtents, Quat orientation,
     if (!finiteQueryVec(center) || !finiteQueryVec(halfExtents) ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f ||
         !finiteQueryQuat(orientation))
-        throw std::invalid_argument("velox: overlap box requires finite positive geometry");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOverlap, "overlap box requires finite positive geometry");
     float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
                orientation.z * orientation.z + orientation.w * orientation.w;
     if (q2 < 1e-12f)
-        throw std::invalid_argument("velox: overlap box orientation must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOverlap, "overlap box orientation must be non-zero");
     Body probe;
     probe.shape = ShapeType::Box;
     probe.position = center;
@@ -556,11 +560,11 @@ void World::overlapCapsule(Vec3 center, float radius, float halfHeight,
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f ||
         !finiteQueryFloat(halfHeight) || halfHeight < 0.0f ||
         !finiteQueryQuat(orientation))
-        throw std::invalid_argument("velox: overlap capsule requires finite positive geometry");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOverlap, "overlap capsule requires finite positive geometry");
     float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
                orientation.z * orientation.z + orientation.w * orientation.w;
     if (q2 < 1e-12f)
-        throw std::invalid_argument("velox: overlap capsule orientation must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidOverlap, "overlap capsule orientation must be non-zero");
     Body probe;
     probe.shape = ShapeType::Capsule;
     probe.position = center;
@@ -581,8 +585,8 @@ ShapeCastHit World::castShapeWithSoup(Body shape, Vec3 direction, float maxDist,
                                       const MeshSoupView& soup) const {
     if (!finiteQueryVec(direction) || lengthSq(direction) < 1e-12f ||
         !finiteQueryFloat(maxDist) || maxDist < 0.0f)
-        throw std::invalid_argument(
-            "velox: shape cast requires a non-zero finite direction and non-negative distance");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidShapeCast,
+            "shape cast requires a non-zero finite direction and non-negative distance");
     direction = normalize(direction);
     Vec3 start = shape.position;
     float bound = shape.radius + length(shape.halfExtents) +
@@ -640,14 +644,14 @@ ShapeCastHit World::convexHullCast(Vec3 center,
                                    const QueryFilter& filter) const {
     AccessGuard guard(*this, AccessKind::Query, "convexHullCast");
     if (!finiteQueryVec(center))
-        throw std::invalid_argument("velox: convex hull cast center must be finite");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::NonFiniteValue, "convex hull cast center must be finite");
     Body shape;
     shape.shape = ShapeType::Hull;
     shape.position = center;
     shape.orientation = normalize(orientation);
     shape.radius = validateQueryHull(points, orientation);
     if (meshes_.hullPoints.size() > UINT32_MAX - points.size())
-        throw std::length_error("velox: convex hull cast point capacity exceeded");
+        VELOX_THROW(VeloxCapacityExceeded, ErrorCode::HullPointCapacityExceeded, "convex hull cast point capacity exceeded");
     shape.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
     shape.hullCount = static_cast<uint32_t>(points.size());
     std::vector<Vec3> hullPoints = meshes_.hullPoints;
@@ -661,7 +665,7 @@ ShapeCastHit World::sphereCast(Vec3 center, float radius, Vec3 direction,
                                float maxDist, const QueryFilter& filter) const {
     AccessGuard guard(*this, AccessKind::Query, "sphereCast");
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f)
-        throw std::invalid_argument("velox: sphere cast requires a finite center and radius");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidShapeCast, "sphere cast requires a finite center and radius");
     Body shape;
     shape.shape = ShapeType::Sphere;
     shape.position = center;
@@ -676,11 +680,11 @@ ShapeCastHit World::boxCast(Vec3 center, Vec3 halfExtents, Quat orientation,
     if (!finiteQueryVec(center) || !finiteQueryVec(halfExtents) ||
         halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f ||
         !finiteQueryQuat(orientation))
-        throw std::invalid_argument("velox: box cast requires finite positive geometry");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidShapeCast, "box cast requires finite positive geometry");
     float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
                orientation.z * orientation.z + orientation.w * orientation.w;
     if (q2 < 1e-12f)
-        throw std::invalid_argument("velox: box cast orientation must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidShapeCast, "box cast orientation must be non-zero");
     Body shape;
     shape.shape = ShapeType::Box;
     shape.position = center;
@@ -696,11 +700,11 @@ ShapeCastHit World::capsuleCast(Vec3 center, float radius, float halfHeight,
     if (!finiteQueryVec(center) || !finiteQueryFloat(radius) || radius <= 0.0f ||
         !finiteQueryFloat(halfHeight) || halfHeight < 0.0f ||
         !finiteQueryQuat(orientation))
-        throw std::invalid_argument("velox: capsule cast requires finite positive geometry");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidShapeCast, "capsule cast requires finite positive geometry");
     float q2 = orientation.x * orientation.x + orientation.y * orientation.y +
                orientation.z * orientation.z + orientation.w * orientation.w;
     if (q2 < 1e-12f)
-        throw std::invalid_argument("velox: capsule cast orientation must be non-zero");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidShapeCast, "capsule cast orientation must be non-zero");
     Body shape;
     shape.shape = ShapeType::Capsule;
     shape.position = center;
@@ -751,7 +755,7 @@ QueryResult World::executeQuery(const QueryDesc& query) const {
                                           query.maxDist, query.filter);
         break;
     default:
-        throw std::invalid_argument("velox: invalid batch query type");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::InvalidBatchQuery, "invalid batch query type");
     }
     result.success = true;
     return result;
@@ -790,10 +794,10 @@ AsyncQueryHandle World::submitAsyncQuery(const QueryDesc& query) {
 
 QueryResult World::getAsyncResult(AsyncQueryHandle handle) {
     if (handle.id == 0)
-        throw std::invalid_argument("velox: invalid async query handle");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::StaleQueryHandle, "invalid async query handle");
     std::unique_lock<std::mutex> lock(asyncQueryMutex_);
     if (asyncQueryResults_.find(handle.id) == asyncQueryResults_.end())
-        throw std::out_of_range("velox: async query handle is unknown or already consumed");
+        VELOX_THROW(VeloxOutOfRange, ErrorCode::StaleQueryHandle, "async query handle is unknown or already consumed");
     asyncQueryReady_.wait(lock, [&] {
         auto it = asyncQueryResults_.find(handle.id);
         return it != asyncQueryResults_.end() && it->second.ready;

@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(VELOX_BUILD_EXAMPLES "Build example programs" ON)
+option(VELOX_BUILD_BENCHMARKS "Build the performance benchmark suite" ON)
 option(VELOX_BUILD_SANDBOX "Build the optional GLFW/Vulkan interactive sandbox" OFF)
 option(VELOX_BUILD_DIFFTEST "Build differential tests against Jolt Physics" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
@@ -29,9 +30,12 @@ add_library(velox
     src/ragdoll.cpp
     src/vehicle.cpp
     src/serialization.cpp
+    src/serialization_v2.cpp
     src/benchmark.cpp
     src/velox_c.cpp
+    src/stable_api.cpp
     src/manifold.cpp
+    src/sleep.cpp
 )
 target_include_directories(velox PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -62,6 +66,18 @@ endif()
 # conceal an accidental CUDA-only dependency.
 target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
 
+# Symbol export/import for shared builds (see include/velox/version.h). The
+# library itself is compiled with VELOX_BUILDING_SHARED so its public symbols
+# are exported; consumers linking the installed shared package receive
+# VELOX_USING_SHARED so the headers switch to dllimport. Both are gated on the
+# resolved target type, so static builds (the default for Conan and for static
+# vcpkg triplets) are unaffected and the same install rules serve both package
+# managers and both library types.
+target_compile_definitions(velox PRIVATE
+    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:VELOX_BUILDING_SHARED>")
+target_compile_definitions(velox INTERFACE
+    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,SHARED_LIBRARY>:VELOX_USING_SHARED>")
+
 include(cmake/determinism.cmake)
 velox_configure_floating_point(velox ${VELOX_STRICT_FLOATING_POINT})
 include(cmake/platform.cmake)
@@ -71,12 +87,17 @@ if(VELOX_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+if(VELOX_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 if(VELOX_BUILD_SANDBOX)
     add_subdirectory(examples/sandbox)
 endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests/unit)
+    add_subdirectory(tests/cross_platform)
 endif()
 
 if(VELOX_BUILD_DIFFTEST)

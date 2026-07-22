@@ -12,7 +12,11 @@ namespace velox {
 constexpr int kMaxContactsPerPair = 12;
 
 VELOX_HD inline Vec3 npPointVelocity(const Body& b, const Vec3& p) {
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+    return b.velocity + simd::simdCross(b.angularVelocity, p - b.position);
+#else
     return b.velocity + cross(b.angularVelocity, p - b.position);
+#endif
 }
 
 VELOX_HD inline Vec3 contactAnchorWorld(const Body& b, const Vec3& localAnchor) {
@@ -36,8 +40,13 @@ VELOX_HD inline void contactTangents(const Vec3& normal, Vec3& tangent1, Vec3& t
     Vec3 reference = an.x < an.y
         ? (an.x < an.z ? Vec3{1, 0, 0} : Vec3{0, 0, 1})
         : (an.y < an.z ? Vec3{0, 1, 0} : Vec3{0, 0, 1});
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+    tangent1 = simd::simdNormalize(simd::simdCross(normal, reference));
+    tangent2 = simd::simdCross(normal, tangent1);
+#else
     tangent1 = normalize(cross(normal, reference));
     tangent2 = cross(normal, tangent1);
+#endif
 }
 
 VELOX_HD inline float combineMaterial(float a, float b,
@@ -84,6 +93,23 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
                           tangent2 * c.rollingImpulse2 +
                           c.normal * c.spinningImpulse;
     // Per-body witness arms, matching solveContact (see the comment there).
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+    simd::InertiaTensor<Body> wsTensorA, wsTensorB;
+    wsTensorA.init(a);
+    wsTensorB.init(b);
+    if (a.isDynamic()) {
+        a.velocity += impulse * a.solverInvMass();
+        simd::Vec4 r1 = wsTensorA.mul(cross(pa - a.position, impulse));
+        simd::Vec4 r2 = wsTensorA.mul(angularImpulse);
+        a.angularVelocity += Vec3{r1.x, r1.y, r1.z} + Vec3{r2.x, r2.y, r2.z};
+    }
+    if (b.isDynamic()) {
+        b.velocity -= impulse * b.solverInvMass();
+        simd::Vec4 r1 = wsTensorB.mul(cross(pb - b.position, impulse));
+        simd::Vec4 r2 = wsTensorB.mul(angularImpulse);
+        b.angularVelocity -= Vec3{r1.x, r1.y, r1.z} + Vec3{r2.x, r2.y, r2.z};
+    }
+#else
     if (a.isDynamic()) {
         a.velocity += impulse * a.solverInvMass();
         a.angularVelocity += a.invInertiaMul(cross(pa - a.position, impulse));
@@ -94,6 +120,7 @@ VELOX_HD inline void warmStartContact(Body& a, Body& b, Contact& c) {
         b.angularVelocity -= b.invInertiaMul(cross(pb - b.position, impulse));
         b.angularVelocity -= b.invInertiaMul(angularImpulse);
     }
+#endif
 }
 
 // One sequential-impulse pass over one contact (normal + friction with
@@ -121,12 +148,33 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
     Vec3 ra = pa - a.position;
     Vec3 rb = pb - b.position;
 
+    // Precompute world-space inverse-inertia tensors once per contact.
+    // The SIMD path replaces two quaternion rotations per invInertiaMul
+    // call with two matrix-vector multiplies (the rotation matrix is
+    // built once here and reused for every torque-arm cross product).
+#if !defined(__CUDACC__) && VELOX_SIMD_AVAILABLE
+    simd::InertiaTensor<Body> tensorA_, tensorB_;
+    tensorA_.init(a);
+    tensorB_.init(b);
+    auto invIA = [&](const Vec3& v) -> Vec3 {
+        simd::Vec4 r = tensorA_.mul(v);
+        return {r.x, r.y, r.z};
+    };
+    auto invIB = [&](const Vec3& v) -> Vec3 {
+        simd::Vec4 r = tensorB_.mul(v);
+        return {r.x, r.y, r.z};
+    };
+#else
+    auto invIA = [&](const Vec3& v) { return a.invInertiaMul(v); };
+    auto invIB = [&](const Vec3& v) { return b.invInertiaMul(v); };
+#endif
+
     // Effective mass along the normal, including rotation.
     Vec3 raxn = cross(ra, c.normal);
     Vec3 rbxn = cross(rb, c.normal);
     float kNormal = a.solverInvMass() + b.solverInvMass() +
-                    dot(raxn, a.invInertiaMul(raxn)) +
-                    dot(rbxn, b.invInertiaMul(rbxn));
+                    dot(raxn, invIA(raxn)) +
+                    dot(rbxn, invIB(rbxn));
     if (kNormal <= 0.0f) return 0.0f;
 
     float vn = dot(npPointVelocity(a, pa) - npPointVelocity(b, pb), c.normal);
@@ -154,14 +202,14 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
     contactTangents(c.normal, tangent1, tangent2);
     Vec3 raxt1 = cross(ra, tangent1), rbxt1 = cross(rb, tangent1);
     Vec3 raxt2 = cross(ra, tangent2), rbxt2 = cross(rb, tangent2);
-    float k1 = a.solverInvMass() + b.solverInvMass() + dot(raxt1, a.invInertiaMul(raxt1)) +
-               dot(rbxt1, b.invInertiaMul(rbxt1));
-    float k2 = a.solverInvMass() + b.solverInvMass() + dot(raxt2, a.invInertiaMul(raxt2)) +
-               dot(rbxt2, b.invInertiaMul(rbxt2));
-    const float kN1 = dot(raxn, a.invInertiaMul(raxt1)) +
-                       dot(rbxn, b.invInertiaMul(rbxt1));
-    const float kN2 = dot(raxn, a.invInertiaMul(raxt2)) +
-                       dot(rbxn, b.invInertiaMul(rbxt2));
+    float k1 = a.solverInvMass() + b.solverInvMass() + dot(raxt1, invIA(raxt1)) +
+               dot(rbxt1, invIB(rbxt1));
+    float k2 = a.solverInvMass() + b.solverInvMass() + dot(raxt2, invIA(raxt2)) +
+               dot(rbxt2, invIB(rbxt2));
+    const float kN1 = dot(raxn, invIA(raxt1)) +
+                       dot(rbxn, invIB(rbxt1));
+    const float kN2 = dot(raxn, invIA(raxt2)) +
+                       dot(rbxn, invIB(rbxt2));
     const bool coneBlock = options.frictionModel == FrictionModel::ConeBlockSolver;
     if (!coneBlock) {
         // Preserve the established scalar-row path bit-for-bit by applying
@@ -173,11 +221,11 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
         Vec3 normalImpulse = c.normal * jn;
         if (a.isDynamic()) {
             a.velocity += normalImpulse * a.solverInvMass();
-            a.angularVelocity += a.invInertiaMul(cross(ra, normalImpulse));
+            a.angularVelocity += invIA(cross(ra, normalImpulse));
         }
         if (b.isDynamic()) {
             b.velocity -= normalImpulse * b.solverInvMass();
-            b.angularVelocity -= b.invInertiaMul(cross(rb, normalImpulse));
+            b.angularVelocity -= invIB(cross(rb, normalImpulse));
         }
         if (k1 > 0.0f && k2 > 0.0f) {
             Vec3 rv = npPointVelocity(a, pa) - npPointVelocity(b, pb);
@@ -202,11 +250,11 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
                                    tangent2 * (next2 - old2);
             if (a.isDynamic()) {
                 a.velocity += frictionImpulse * a.solverInvMass();
-                a.angularVelocity += a.invInertiaMul(cross(ra, frictionImpulse));
+                a.angularVelocity += invIA(cross(ra, frictionImpulse));
             }
             if (b.isDynamic()) {
                 b.velocity -= frictionImpulse * b.solverInvMass();
-                b.angularVelocity -= b.invInertiaMul(cross(rb, frictionImpulse));
+                b.angularVelocity -= invIB(cross(rb, frictionImpulse));
             }
         }
     } else {
@@ -216,8 +264,8 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
         if (k1 > 0.0f && k2 > 0.0f) {
             // Solve the 3x3 normal/tangent effective-mass block, then project
             // the accumulated impulse into its anisotropic Coulomb cone.
-            const float k12 = dot(raxt1, a.invInertiaMul(raxt2)) +
-                              dot(rbxt1, b.invInertiaMul(rbxt2));
+            const float k12 = dot(raxt1, invIA(raxt2)) +
+                              dot(rbxt1, invIB(rbxt2));
             const float determinant = kNormal * (k1 * k2 - k12 * k12) -
                                       kN1 * (kN1 * k2 - kN2 * k12) +
                                       kN2 * (kN1 * k12 - kN2 * k1);
@@ -262,11 +310,11 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
                              tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
         if (a.isDynamic()) {
             a.velocity += impulse * a.solverInvMass();
-            a.angularVelocity += a.invInertiaMul(cross(ra, impulse));
+            a.angularVelocity += invIA(cross(ra, impulse));
         }
         if (b.isDynamic()) {
             b.velocity -= impulse * b.solverInvMass();
-            b.angularVelocity -= b.invInertiaMul(cross(rb, impulse));
+            b.angularVelocity -= invIB(cross(rb, impulse));
         }
     }
 
@@ -274,10 +322,10 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
     // normal load. Coefficients have length units, matching common rigid-body
     // rolling-friction models (torque impulse <= coefficient * normal impulse).
     Vec3 wr = a.angularVelocity - b.angularVelocity;
-    float kr1 = dot(tangent1, a.invInertiaMul(tangent1)) +
-                dot(tangent1, b.invInertiaMul(tangent1));
-    float kr2 = dot(tangent2, a.invInertiaMul(tangent2)) +
-                dot(tangent2, b.invInertiaMul(tangent2));
+    float kr1 = dot(tangent1, invIA(tangent1)) +
+                dot(tangent1, invIB(tangent1));
+    float kr2 = dot(tangent2, invIA(tangent2)) +
+                dot(tangent2, invIB(tangent2));
     if (c.rollingFriction > 0.0f && kr1 > 0.0f && kr2 > 0.0f) {
         float oldRolling1 = c.rollingImpulse1, oldRolling2 = c.rollingImpulse2;
         float nextRolling1 = oldRolling1 - dot(wr, tangent1) / kr1;
@@ -293,12 +341,12 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
         c.rollingImpulse2 = nextRolling2;
         Vec3 torque = tangent1 * (nextRolling1 - oldRolling1) +
                       tangent2 * (nextRolling2 - oldRolling2);
-        if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(torque);
-        if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(torque);
+        if (a.isDynamic()) a.angularVelocity += invIA(torque);
+        if (b.isDynamic()) b.angularVelocity -= invIB(torque);
     }
     wr = a.angularVelocity - b.angularVelocity;
-    float ks = dot(c.normal, a.invInertiaMul(c.normal)) +
-               dot(c.normal, b.invInertiaMul(c.normal));
+    float ks = dot(c.normal, invIA(c.normal)) +
+               dot(c.normal, invIB(c.normal));
     if (c.spinningFriction > 0.0f && ks > 0.0f) {
         float old = c.spinningImpulse;
         float next = old - dot(wr, c.normal) / ks;
@@ -306,8 +354,8 @@ VELOX_HD inline float solveContact(Body& a, Body& b, Contact& c, float dt,
         next = vclamp(next, -limit, limit);
         c.spinningImpulse = next;
         Vec3 torque = c.normal * (next - old);
-        if (a.isDynamic()) a.angularVelocity += a.invInertiaMul(torque);
-        if (b.isDynamic()) b.angularVelocity -= b.invInertiaMul(torque);
+        if (a.isDynamic()) a.angularVelocity += invIA(torque);
+        if (b.isDynamic()) b.angularVelocity -= invIB(torque);
     }
     float maxChange = fabsf(c.normalImpulse - oldNormalImpulse);
     maxChange = vmax(maxChange, fabsf(c.tangentImpulse1 - oldTangentImpulse1));

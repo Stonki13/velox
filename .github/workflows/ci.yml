@@ -145,6 +145,90 @@ jobs:
       - name: Require generated index
         run: test -f docs/api-reference/html/index.html
 
+  cross-platform:
+    name: Cross-platform / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
+          - os: windows-latest
+            name: Windows x86_64
+          - os: macos-13
+            name: macOS Intel x86_64
+          - os: macos-14
+            name: macOS Apple Silicon ARM64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with strict FP
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DVELOX_ENABLE_CUDA=OFF -DVELOX_BUILD_EXAMPLES=OFF
+          -DVELOX_STRICT_FLOATING_POINT=ON -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Run cross-platform tests
+        run: ctest --test-dir build -C Release -R "velox\.xplatform\." --output-on-failure
+      - name: Extract determinism trace
+        shell: bash
+        run: |
+          exe=build/tests/cross_platform/test_determinism
+          if [ "$RUNNER_OS" = Windows ]; then
+            exe=build/tests/cross_platform/Release/test_determinism.exe
+          fi
+          "$exe" | grep '^VELOX_XPLATFORM_TRACE' > xplatform-trace-${{ matrix.os }}.txt || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xplatform-trace-${{ matrix.os }}
+          path: xplatform-trace-${{ matrix.os }}.txt
+          if-no-files-found: warn
+
+  cross-platform-parity:
+    name: Cross-platform determinism parity
+    needs: cross-platform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: xplatform-trace-*
+          path: traces
+          merge-multiple: true
+      - name: Compare traces across platforms
+        shell: bash
+        run: |
+          echo "=== Trace files ==="
+          ls -la traces/
+          echo ""
+          # Normalize line endings and extract unique traces.
+          for f in traces/xplatform-trace-*.txt; do
+            tr -d '\r' < "$f"
+          done | sort -u > distinct-xplatform-traces.txt
+          count=$(wc -l < distinct-xplatform-traces.txt)
+          echo "Distinct traces: $count"
+          cat distinct-xplatform-traces.txt
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Cross-platform determinism failure: $count distinct traces found (expected 1)"
+            exit 1
+          fi
+          echo "All platforms produce identical determinism traces."
+      - name: Generate compatibility report
+        shell: bash
+        run: |
+          python3 scripts/cross_platform_test.py \
+            --compare-only \
+            --trace-dir traces \
+            --output-dir reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-platform-report
+          path: reports/
+          if-no-files-found: warn
+
   nightly-reliability:
     name: Nightly reliability
     if: github.event_name == 'schedule'

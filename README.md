@@ -244,6 +244,9 @@ ctest --test-dir build -C Release --output-on-failure
 
 - [Getting started](docs/getting-started.md) covers the supported integration
   flow, queries, events, debugging, and determinism modes.
+- [Debugging and debug visualization](docs/debugging.md) explains the
+  renderer-agnostic debug-draw layers, the `DebugDraw` interface, and the
+  Dear ImGui interactive overlay.
 - [Concepts](docs/concepts.md) describes Predictive Contact Sweeping, TGS,
   manifolds, islands, and backend tradeoffs.
 - [Threading contract](docs/threading.md) specifies safe cross-thread world

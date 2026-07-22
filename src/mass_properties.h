@@ -5,7 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <stdexcept>
+#include "velox/error.h"
 #include <vector>
 
 namespace velox::mass_properties {
@@ -78,7 +78,8 @@ inline std::vector<std::array<uint32_t, 3>> convexTriangles(
         }
     }
     if (bestLineDistance <= epsilon * epsilon)
-        throw std::invalid_argument("velox: convex hull points are collinear");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullCollinearPoints,
+                    "convex hull points are collinear");
     Vec3 initialNormal = normalize(cross(points[i1] - points[i0],
                                          points[i2] - points[i0]));
     uint32_t i3 = i0;
@@ -91,7 +92,8 @@ inline std::vector<std::array<uint32_t, 3>> convexTriangles(
         }
     }
     if (bestPlaneDistance <= epsilon)
-        throw std::invalid_argument("velox: convex hull points are coplanar");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullCoplanarPoints,
+                    "convex hull points are coplanar");
     Vec3 interior = (points[i0] + points[i1] + points[i2] + points[i3]) * 0.25f;
     std::vector<HullFace> faces;
     faces.push_back(makeFace(i0, i1, i2, points, interior));
@@ -306,7 +308,8 @@ inline ConvexMassProperties convex(const std::vector<Vec3>& points) {
         }
     }
     if (result.volume <= 1e-12)
-        throw std::invalid_argument("velox: convex hull has no positive volume");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::HullNoVolume,
+                    "convex hull has no positive volume");
     double center[3] = {first[0] / result.volume, first[1] / result.volume,
                         first[2] / result.volume};
     result.center = {float(center[0]), float(center[1]), float(center[2])};

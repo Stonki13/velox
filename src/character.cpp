@@ -1,7 +1,7 @@
 #include "velox/character.h"
 
 #include <cmath>
-#include <stdexcept>
+#include "velox/error.h"
 
 namespace velox {
 
@@ -30,12 +30,12 @@ CharacterController::CharacterController(World& world, const CharacterController
         desc_.slopeLimitCosine > 1.0f || !std::isfinite(desc_.movementSpeed) ||
         desc_.movementSpeed < 0.0f || !std::isfinite(desc_.ghostPadding) ||
         desc_.ghostPadding < 0.0f)
-        throw std::invalid_argument("velox: invalid character controller description");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::CharacterInvalidDesc, "invalid character controller description");
 }
 
 void CharacterController::SetPosition(Vec3 position) {
     if (!finiteVec3(position))
-        throw std::invalid_argument("velox: character position must be finite");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::NonFiniteValue, "character position must be finite");
     position_ = position;
 }
 
@@ -84,7 +84,7 @@ bool CharacterController::tryStep(Vec3& position, Vec3 remaining,
 
 CharacterControllerResult CharacterController::Move(Vec3 displacement) {
     if (!finiteVec3(displacement))
-        throw std::invalid_argument("velox: character displacement must be finite");
+        VELOX_THROW(VeloxInvalidArgument, ErrorCode::NonFiniteValue, "character displacement must be finite");
 
     CharacterControllerResult result;
     const Vec3 start = position_;

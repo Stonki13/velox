@@ -1,4 +1,5 @@
 #include "velox/world.h"
+#include "velox/profiler.h"
 #include "broadphase.h"
 #include "geometry_diagnostics.h"
 #include "mass_properties.h"
@@ -78,7 +79,7 @@ void validateSolverOptions(const SolverOptions& options) {
 }
 
 bool validJointType(JointType type) {
-    return (uint8_t)type <= (uint8_t)JointType::Motor;
+    return (uint8_t)type <= (uint8_t)JointType::Gear;
 }
 
 void jointFrame(const Joint& joint, const Body& a, const Body& b,
@@ -351,6 +352,54 @@ World::World(BackendType type)
     : requestedBackend_(type), broadPhase_(new BroadPhaseData),
       ownerThread_(std::this_thread::get_id()) {
     resetBackend(type);
+    // Pre-reserve the dense arrays so a typical scene steps without ever
+    // reallocating bodies, contacts, or joints. The cost is paid once here,
+    // off the hot path, instead of in amortized vector growth during step().
+    reserveCapacity(256, 4096, 128);
+}
+
+void World::reserveCapacity(size_t bodies, size_t contacts, size_t joints) {
+    AccessGuard guard(*this, AccessKind::Mutation, "reserveCapacity");
+    if (bodies_.capacity() < bodies) bodies_.reserve(bodies);
+    if (bodySlots_.capacity() < bodies) bodySlots_.reserve(bodies);
+    if (bodyDenseToSlot_.capacity() < bodies) bodyDenseToSlot_.reserve(bodies);
+    if (contacts_.capacity() < contacts) contacts_.reserve(contacts);
+    if (prevContacts_.capacity() < contacts) prevContacts_.reserve(contacts);
+    if (joints_.capacity() < joints) joints_.reserve(joints);
+    if (jointSlots_.capacity() < joints) jointSlots_.reserve(joints);
+    if (jointDenseToSlot_.capacity() < joints) jointDenseToSlot_.reserve(joints);
+}
+
+MemoryPoolStats World::memoryStats() const {
+    AccessGuard guard(*this, AccessKind::Query, "memoryStats");
+    MemoryPoolStats stats = memoryPool_.stats();
+    // Account the pre-reserved dense arrays. These are not pool-allocated, but
+    // they are the dominant per-record memory and the thing the pools exist to
+    // keep from reallocating, so report them alongside the slab accounting.
+    auto addVector = [&stats](size_t capacity, size_t size, size_t elemSize) {
+        stats.reservedBytes += capacity * elemSize;
+        stats.usedBytes += size * elemSize;
+        stats.requestedBytes += size * elemSize;
+        stats.peakUsedBytes += size * elemSize;
+    };
+    addVector(bodies_.capacity(), bodies_.size(), sizeof(Body));
+    addVector(contacts_.capacity(), contacts_.size(), sizeof(Contact));
+    addVector(prevContacts_.capacity(), prevContacts_.size(), sizeof(Contact));
+    addVector(joints_.capacity(), joints_.size(), sizeof(Joint));
+    stats.fragmentation = stats.usedBytes > 0
+        ? 1.0 - double(stats.requestedBytes) / double(stats.usedBytes)
+        : 0.0;
+    return stats;
+}
+
+void* World::acquireQueryBuffer(size_t bytes) {
+    // The pool is self-synchronized; no world lock so query threads can acquire
+    // scratch concurrently regardless of the world thread-safety policy.
+    return memoryPool_.allocate(bytes ? bytes : 1);
+}
+
+void World::releaseQueryBuffer(void* ptr, size_t bytes) {
+    memoryPool_.deallocate(ptr, bytes ? bytes : 1);
 }
 
 ThreadSafetyPolicy World::threadSafetyPolicy() const {
@@ -1827,6 +1876,24 @@ void World::setCollisionFilter(BodyId id, uint32_t category, uint32_t mask) {
     broadPhase_->touched = true;
 }
 
+void World::setCollisionFilter(BodyId id, const CollisionFilterData& filter) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setCollisionFilter");
+    Body& b = body(id);
+    b.categoryBits = filter.categoryBits;
+    b.maskBits = filter.maskBits;
+    b.groupIndex = filter.groupIndex;
+    contacts_.erase(std::remove_if(contacts_.begin(), contacts_.end(),
+        [&](const Contact& c) { return c.a == resolve(id) || c.b == resolve(id); }),
+        contacts_.end());
+    broadPhase_->touched = true;
+}
+
+CollisionFilterData World::collisionFilter(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "collisionFilter");
+    const Body& b = body(id);
+    return CollisionFilterData{b.categoryBits, b.maskBits, b.groupIndex};
+}
+
 void World::setEnableSleep(BodyId id, bool enabled) {
     AccessGuard guard(*this, AccessKind::Mutation, "setEnableSleep");
     Body& b = body(id);
@@ -1860,16 +1927,13 @@ bool World::isFixedRotation(BodyId id) const {
 void World::wakeBody(BodyId id) {
     AccessGuard guard(*this, AccessKind::Mutation, "wakeBody");
     Body& b = body(id);
-    b.asleep = 0;
-    b.sleepTimer = 0.0f;
+    sleepManager_.wakeBody(b, id);
 }
 
 void World::sleepBody(BodyId id) {
     AccessGuard guard(*this, AccessKind::Mutation, "sleepBody");
     Body& b = body(id);
-    b.asleep = 1;
-    b.velocity = {};
-    b.angularVelocity = {};
+    sleepManager_.sleepBody(b, id);
 }
 
 void World::explode(Vec3 origin, float radius, float impulse) {
@@ -1879,7 +1943,7 @@ void World::explode(Vec3 origin, float radius, float impulse) {
     if (radius <= 0.0f || impulse <= 0.0f) return;
     float invRadius = 1.0f / radius;
     for (Body& b : bodies_) {
-        if (!b.isDynamic() || b.asleep) continue;
+        if (!b.isDynamic() || isFullyAsleep(b.asleep)) continue;
         Vec3 delta = b.position - origin;
         float dist = length(delta);
         if (dist >= radius || dist < 1e-8f) continue;
@@ -2223,6 +2287,128 @@ JointId World::addMotorJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAn
     return addJoint(j);
 }
 
+JointId World::addWeldJoint(BodyId a, BodyId b, Vec3 worldAnchor,
+                            float breakForce, float breakTorque) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addWeldJoint");
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchor, "velox: weld-joint anchor must be finite");
+    if (!finiteFloat(breakForce) || breakForce < 0.0f)
+        throw std::invalid_argument("velox: weld break force must be finite and non-negative");
+    if (!finiteFloat(breakTorque) || breakTorque < 0.0f)
+        throw std::invalid_argument("velox: weld break torque must be finite and non-negative");
+    Joint j;
+    j.type = JointType::Weld;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchor - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, {1, 0, 0});
+    j.localAxisB = rotateInv(bodies_[ib].orientation, {1, 0, 0});
+    j.localRefA = rotateInv(bodies_[ia].orientation, {0, 1, 0});
+    j.localRefB = rotateInv(bodies_[ib].orientation, {0, 1, 0});
+    j.breakForce = breakForce;
+    j.breakTorque = breakTorque;
+    return addJoint(j);
+}
+
+JointId World::addWheelJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxis) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addWheelJoint");
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchor, "velox: wheel-joint anchor must be finite");
+    requireFiniteVec(worldAxis, "velox: wheel-joint axis must be finite");
+    if (lengthSq(worldAxis) < 1e-12f)
+        throw std::invalid_argument("velox: wheel-joint axis must be non-zero");
+    Vec3 axis = normalize(worldAxis);
+    Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+    ref = normalize(cross(axis, ref));
+    Joint j;
+    j.type = JointType::Wheel;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchor - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchor - bodies_[ib].position);
+    j.localAxisA = rotateInv(bodies_[ia].orientation, axis);
+    j.localAxisB = rotateInv(bodies_[ib].orientation, axis);
+    j.localRefA = rotateInv(bodies_[ia].orientation, ref);
+    j.localRefB = rotateInv(bodies_[ib].orientation, ref);
+    return addJoint(j);
+}
+
+JointId World::addRopeJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB,
+                            float maxLength) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addRopeJoint");
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchorA, "velox: rope-joint anchor A must be finite");
+    requireFiniteVec(worldAnchorB, "velox: rope-joint anchor B must be finite");
+    requirePositive(maxLength, "velox: rope max length must be finite and positive");
+    Joint j;
+    j.type = JointType::Rope;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchorA - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchorB - bodies_[ib].position);
+    j.maxLength = maxLength;
+    return addJoint(j);
+}
+
+JointId World::addPulleyJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnchorB,
+                              Vec3 groundAnchorA, Vec3 groundAnchorB, float ratio) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addPulleyJoint");
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAnchorA, "velox: pulley-joint anchor A must be finite");
+    requireFiniteVec(worldAnchorB, "velox: pulley-joint anchor B must be finite");
+    requireFiniteVec(groundAnchorA, "velox: pulley ground anchor A must be finite");
+    requireFiniteVec(groundAnchorB, "velox: pulley ground anchor B must be finite");
+    requirePositive(ratio, "velox: pulley ratio must be finite and positive");
+    Joint j;
+    j.type = JointType::Pulley;
+    j.a = ia; j.b = ib;
+    j.localAnchorA = rotateInv(bodies_[ia].orientation,
+                               worldAnchorA - bodies_[ia].position);
+    j.localAnchorB = rotateInv(bodies_[ib].orientation,
+                               worldAnchorB - bodies_[ib].position);
+    j.pulleyAnchorA = groundAnchorA;
+    j.pulleyAnchorB = groundAnchorB;
+    j.pulleyRatio = ratio;
+    // Store the rest total length: lenA + ratio * lenB at creation.
+    float lenA = length(worldAnchorA - groundAnchorA);
+    float lenB = length(worldAnchorB - groundAnchorB);
+    j.restLength = lenA + ratio * lenB;
+    return addJoint(j);
+}
+
+JointId World::addGearJoint(BodyId a, BodyId b, Vec3 worldAxisA, Vec3 worldAxisB,
+                            float ratio) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addGearJoint");
+    BodyIndex ia = resolve(a), ib = resolve(b);
+    if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
+    requireFiniteVec(worldAxisA, "velox: gear-joint axis A must be finite");
+    requireFiniteVec(worldAxisB, "velox: gear-joint axis B must be finite");
+    if (lengthSq(worldAxisA) < 1e-12f)
+        throw std::invalid_argument("velox: gear-joint axis A must be non-zero");
+    if (lengthSq(worldAxisB) < 1e-12f)
+        throw std::invalid_argument("velox: gear-joint axis B must be non-zero");
+    if (!finiteFloat(ratio) || ratio == 0.0f)
+        throw std::invalid_argument("velox: gear ratio must be finite and non-zero");
+    Joint j;
+    j.type = JointType::Gear;
+    j.a = ia; j.b = ib;
+    // Gear joint anchors are at the body centers (no linear constraint).
+    j.localAnchorA = {};
+    j.localAnchorB = {};
+    j.localAxisA = rotateInv(bodies_[ia].orientation, normalize(worldAxisA));
+    j.localAxisB = rotateInv(bodies_[ib].orientation, normalize(worldAxisB));
+    j.gearRatio = ratio;
+    return addJoint(j);
+}
+
 float World::hingeAngle(JointId id) const {
     AccessGuard guard(*this, AccessKind::Query, "hingeAngle");
     const Joint& j = joint(id);
@@ -2305,8 +2491,7 @@ Vec3 World::sixDofAngularRotation(JointId id) const {
 void World::wake(BodyId id) {
     AccessGuard guard(*this, AccessKind::Mutation, "wake");
     Body& b = body(id);
-    b.asleep = 0;
-    b.sleepTimer = 0.0f;
+    sleepManager_.wakeBody(b, id);
 }
 
 namespace {
@@ -2361,13 +2546,18 @@ void World::ensureBroadPhase(float dt, bool refit) const {
 }
 
 void World::buildCandidatePairs(float dt) {
+    VELOX_PROFILE_CATEGORY_SCOPE("Broadphase", velox::profile::Category::Broadphase);
     ensureBroadPhase(dt, /*refit=*/true);
     const BroadPhaseData& bp = *broadPhase_;
     candidatePairs_.clear();
 
     auto inert = [&](BodyIndex k) {
-        return bodies_[k].isStatic() || bodies_[k].asleep;
+        return bodies_[k].isStatic() || isFullyAsleep(bodies_[k].asleep);
     };
+    // Capture the custom filter callback by reference for the parallel
+    // section. The callback is read-only here; thread safety of the
+    // callable itself is the user's responsibility.
+    const CollisionFilterCallback& filterCb = collisionFilterCallback_;
     // Tree queries are read-only after the refit above, so awake bodies fan
     // out across the backend's worker pool (this was the dominant serial
     // cost of a large-scene CPU step: one tree walk per awake body). Chunk
@@ -2392,13 +2582,13 @@ void World::buildCandidatePairs(float dt) {
                     // keep the lower index's discovery. Inert bodies never
                     // run a query, so their pairs survive unconditionally.
                     if (!inert(j) && j < i) return;
-                    if (!a.canCollideWith(bodies_[j])) return;
+                    if (!evaluateCollisionFilterWithCallback(a, bodies_[j], filterCb)) return;
                     BodyIndex lo32 = i < j ? i : (BodyIndex)j;
                     BodyIndex hi32 = i < j ? (BodyIndex)j : i;
                     out.push_back((uint64_t)lo32 << 32 | hi32);
                 });
                 for (BodyIndex p : bp.planes)
-                    if (a.canCollideWith(bodies_[p]))
+                    if (evaluateCollisionFilterWithCallback(a, bodies_[p], filterCb))
                         out.push_back(i < p ? ((uint64_t)i << 32 | p)
                                             : ((uint64_t)p << 32 | i));
             }
@@ -2417,12 +2607,27 @@ void World::buildCandidatePairs(float dt) {
 
 bool World::isAwake(BodyId id) const {
     AccessGuard guard(*this, AccessKind::Query, "isAwake");
-    return !bodies_[resolve(id)].asleep;
+    return bodies_[resolve(id)].asleep == 0;
+}
+
+SleepState World::sleepState(BodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "sleepState");
+    return sleepStateFromByte(bodies_[resolve(id)].asleep);
 }
 
 void World::setContactModifier(ContactModifier modifier) {
     AccessGuard guard(*this, AccessKind::Mutation, "setContactModifier");
     contactModifier_ = std::move(modifier);
+}
+
+void World::setCollisionFilterCallback(CollisionFilterCallback callback) {
+    AccessGuard guard(*this, AccessKind::Mutation, "setCollisionFilterCallback");
+    collisionFilterCallback_ = std::move(callback);
+    // Purge existing contacts so the new filter takes effect immediately.
+    if (!contacts_.empty()) {
+        contacts_.clear();
+        broadPhase_->touched = true;
+    }
 }
 
 void World::removeJointDense(uint32_t dense) {
@@ -2691,6 +2896,7 @@ uint32_t processHighToi(std::vector<Body>& bodies, const std::vector<Body>& star
                         const std::vector<Contact>& contacts, float dt,
                         const MeshSoupView& soup,
                         const WorldMultiToiSettings& settings,
+                        const CollisionFilterCallback& filterCallback,
                         std::vector<uint8_t>& processedBodies) {
     processedBodies.assign(bodies.size(), 0);
     if (!settings.defaultConfig.enabled || !settings.enableSubstepSplitting)
@@ -2699,7 +2905,7 @@ uint32_t processHighToi(std::vector<Body>& bodies, const std::vector<Body>& star
     for (BodyIndex i = 0; i < bodies.size(); ++i) {
         const Body& start = starts[i];
         const BodyCcdTuning& tuning = start.ccdTuning;
-        eligible[i] = start.isDynamic() && !bodies[i].asleep &&
+        eligible[i] = start.isDynamic() && !isFullyAsleep(bodies[i].asleep) &&
                       tuning.quality == MotionQuality::High &&
                       tuning.enableContinuous &&
                       start.maxPointSpeed() >= std::max(
@@ -2744,7 +2950,7 @@ uint32_t processHighToi(std::vector<Body>& bodies, const std::vector<Body>& star
                 const bool dynamicPair = eligible[b];
                 if (dynamicPair && b < a) continue;
                 if (!dynamicPair && !bodies[b].isStatic()) continue;
-                if (bodies[b].isSensor() || !bodies[a].canCollideWith(bodies[b])) continue;
+                if (bodies[b].isSensor() || !evaluateCollisionFilterWithCallback(bodies[a], bodies[b], filterCallback)) continue;
                 if (dynamicPair && bodyEvents[b] >= settings.defaultConfig.maxToiEventsPerBody)
                     continue;
                 float toi = 0.0f;
@@ -2833,7 +3039,7 @@ std::vector<MultiToiHit> World::queryMultiToi(BodyId id, float dt) const {
     for (BodyIndex otherIndex = 0; otherIndex < bodies_.size(); ++otherIndex) {
         if (otherIndex == sourceIndex) continue;
         const Body& other = bodies_[otherIndex];
-        if (!source.canCollideWith(other) || (other.isStatic() && source.isStatic()))
+        if (!evaluateCollisionFilterWithCallback(source, other, collisionFilterCallback_) || (other.isStatic() && source.isStatic()))
             continue;
         float toi = 0.0f;
         Vec3 normal{}, point{};
@@ -2888,7 +3094,7 @@ void World::solveJoints(float dt) {
         for (Joint& j : joints_) {
             Body& a = bodies_[j.a];
             Body& b = bodies_[j.b];
-            if (a.asleep && b.asleep) continue;
+            if (isFullyAsleep(a.asleep) && isFullyAsleep(b.asleep)) continue;
             Vec3 ra = rotate(a.orientation, j.localAnchorA);
             Vec3 rb = rotate(b.orientation, j.localAnchorB);
             Vec3 pa = a.position + ra, pb = b.position + rb;
@@ -3260,6 +3466,171 @@ void World::solveJoints(float dt) {
                 applyJointAngularImpulse(j, a, b, -angVel);
                 break;
             }
+            case JointType::Weld: {
+                // Linear: lock anchor points together.
+                Vec3 bias = clampJointPositionBias((pa - pb) * (kBeta / dt));
+                Vec3 P = mul(inverse(pointMass(a, b, ra, rb)), -(vel + bias));
+                applyJointImpulse(j, a, b, ra, rb, P, +1.0f);
+                // Angular: lock relative orientation.
+                solveAngularFrame(j, a, b, kBeta / dt);
+                break;
+            }
+            case JointType::Wheel: {
+                // Constrain lateral motion (perpendicular to suspension axis).
+                Vec3 axisA = normalize(rotate(a.orientation, j.localAxisA));
+                Vec3 ref = rotate(a.orientation, j.localRefA);
+                Vec3 t1 = normalize(ref - axisA * dot(ref, axisA));
+                if (lengthSq(t1) < 1e-12f) {
+                    ref = std::fabs(axisA.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
+                    t1 = normalize(cross(axisA, ref));
+                }
+                Vec3 t2 = cross(axisA, t1);
+                Mat3 pointK = pointMass(a, b, ra, rb);
+                Vec3 error = pa - pb;
+                for (Vec3 t : {t1, t2}) {
+                    float k = dot(t, mul(pointK, t));
+                    if (k <= 0.0f) continue;
+                    float lambda = -(dot(vel, t) + dot(error, t) * (kBeta / dt)) / k;
+                    applyJointImpulse(j, a, b, ra, rb, t * lambda, +1.0f);
+                    vel = anchorVelocity(a, ra) - anchorVelocity(b, rb);
+                }
+                // Suspension spring along the axis.
+                float kAxis = dot(axisA, mul(pointK, axisA));
+                if (kAxis > 0.0f) {
+                    float axisSpeed = dot(anchorVelocity(b, rb) -
+                                          anchorVelocity(a, ra), axisA);
+                    float displacement = dot(pb - pa, axisA);
+                    constexpr float kTau = 6.28318530718f;
+                    float effectiveMass = 1.0f / kAxis;
+                    float omega = kTau * j.suspensionFrequencyHz;
+                    float stiffness = effectiveMass * omega * omega;
+                    float damping = 2.0f * effectiveMass *
+                                    j.suspensionDampingRatio * omega;
+                    float softness = 1.0f /
+                        (dt * (damping + dt * stiffness));
+                    float bias = displacement * dt * stiffness * softness;
+                    float lambda = -(axisSpeed + bias +
+                                     softness * j.springImpulse) /
+                                   (kAxis + softness);
+                    j.springImpulse += lambda;
+                    applyJointImpulse(j, a, b, ra, rb, axisA * lambda, -1.0f);
+                }
+                // Lock angular DOF except rotation about the axle.
+                Vec3 wr = a.angularVelocity - b.angularVelocity;
+                Vec3 refA = rotate(a.orientation, j.localRefA);
+                Vec3 refB = rotate(b.orientation, j.localRefB);
+                Vec3 frameErr = cross(refB, refA);
+                for (Vec3 t : {t1, t2}) {
+                    float k = dot(t, a.invInertiaMul(t)) +
+                              dot(t, b.invInertiaMul(t));
+                    if (k <= 0.0f) continue;
+                    float lambda = -(dot(wr, t) +
+                                     dot(frameErr, t) * (kBeta / dt)) / k;
+                    applyJointAngularImpulse(j, a, b, t * lambda);
+                    wr = a.angularVelocity - b.angularVelocity;
+                }
+                // Axle motor.
+                if (j.enableMotor) {
+                    float kAxle = dot(axisA, a.invInertiaMul(axisA)) +
+                                  dot(axisA, b.invInertiaMul(axisA));
+                    if (kAxle > 0.0f) {
+                        float wAxle = dot(b.angularVelocity -
+                                          a.angularVelocity, axisA);
+                        float lambda = (wAxle - j.motorSpeed) / kAxle;
+                        float maxImpulse = j.maxMotorTorque * dt;
+                        float oldImpulse = j.motorImpulse;
+                        j.motorImpulse = vclamp(oldImpulse + lambda,
+                                                -maxImpulse, maxImpulse);
+                        lambda = j.motorImpulse - oldImpulse;
+                        applyJointAngularImpulse(j, a, b, axisA * lambda);
+                    }
+                }
+                break;
+            }
+            case JointType::Rope: {
+                // Only resists stretching beyond maxLength.
+                Vec3 d = pa - pb;
+                float len = length(d);
+                if (len < 1e-8f || len <= j.maxLength) break;
+                Vec3 n = d * (1.0f / len);
+                Vec3 raxn = cross(ra, n), rbxn = cross(rb, n);
+                float k = a.solverInvMass() + b.solverInvMass() +
+                          dot(raxn, a.invInertiaMul(raxn)) +
+                          dot(rbxn, b.invInertiaMul(rbxn));
+                if (k <= 0.0f) break;
+                float overshoot = len - j.maxLength;
+                float bias = overshoot * (kBeta / dt);
+                float lambda = -(dot(vel, n) + bias) / k;
+                float oldImpulse = j.limitImpulse;
+                j.limitImpulse = vmin(0.0f, oldImpulse + lambda);
+                lambda = j.limitImpulse - oldImpulse;
+                applyJointImpulse(j, a, b, ra, rb, n * lambda, +1.0f);
+                break;
+            }
+            case JointType::Pulley: {
+                // lengthA + ratio * lengthB = restTotal.
+                Vec3 dA = pa - j.pulleyAnchorA;
+                Vec3 dB = pb - j.pulleyAnchorB;
+                float lenA = length(dA);
+                float lenB = length(dB);
+                if (lenA < 1e-8f || lenB < 1e-8f) break;
+                Vec3 nA = dA * (1.0f / lenA);
+                Vec3 nB = dB * (1.0f / lenB);
+                Vec3 raxnA = cross(ra, nA);
+                Vec3 rbxnB = cross(rb, nB);
+                float kA = a.solverInvMass() +
+                           dot(raxnA, a.invInertiaMul(raxnA));
+                float kB = b.solverInvMass() +
+                           dot(rbxnB, b.invInertiaMul(rbxnB));
+                float ratio = j.pulleyRatio;
+                float k = kA + ratio * ratio * kB;
+                if (k <= 0.0f) break;
+                float C = lenA + ratio * lenB - j.restLength;
+                float bias = C * (kBeta / dt);
+                float speedA = dot(anchorVelocity(a, ra), nA);
+                float speedB = dot(anchorVelocity(b, rb), nB);
+                float cdot = speedA + ratio * speedB;
+                float lambda = -(cdot + bias) / k;
+                float oldImpulse = j.limitImpulse;
+                j.limitImpulse += lambda;
+                lambda = j.limitImpulse - oldImpulse;
+                if (a.isDynamic() && !a.isLocked()) {
+                    a.velocity += nA * (lambda * a.solverInvMass());
+                    a.angularVelocity +=
+                        a.invInertiaMul(cross(ra, nA * lambda));
+                }
+                if (b.isDynamic() && !b.isLocked()) {
+                    b.velocity += nB * (lambda * ratio * b.solverInvMass());
+                    b.angularVelocity +=
+                        b.invInertiaMul(cross(rb, nB * (lambda * ratio)));
+                }
+                j.reactionLinearImpulse += nA * lambda;
+                break;
+            }
+            case JointType::Gear: {
+                // Couples angular velocity: wA + ratio * wB = 0.
+                Vec3 axisA = normalize(rotate(a.orientation, j.localAxisA));
+                Vec3 axisB = normalize(rotate(b.orientation, j.localAxisB));
+                float ratio = j.gearRatio;
+                float kA = dot(axisA, a.invInertiaMul(axisA));
+                float kB = dot(axisB, b.invInertiaMul(axisB));
+                float k = kA + ratio * ratio * kB;
+                if (k <= 0.0f) break;
+                float wA = dot(a.angularVelocity, axisA);
+                float wB = dot(b.angularVelocity, axisB);
+                float cdot = wA + ratio * wB;
+                float lambda = -cdot / k;
+                float oldImpulse = j.motorImpulse;
+                j.motorImpulse += lambda;
+                lambda = j.motorImpulse - oldImpulse;
+                if (a.isDynamic() && !a.isLocked())
+                    a.angularVelocity += a.invInertiaMul(axisA * lambda);
+                if (b.isDynamic() && !b.isLocked())
+                    b.angularVelocity +=
+                        b.invInertiaMul(axisB * (lambda * ratio));
+                j.reactionAngularImpulse += axisA * lambda;
+                break;
+            }
             }
         }
     }
@@ -3287,56 +3658,14 @@ void World::finishBrokenJoints(float dt) {
     }
 }
 
-// Union-find islands over contacts and joints; whole islands fall asleep
-// together once every member has been slow for long enough.
+// Island-based sleeping with configurable thresholds, gradual sleep (drowsy
+// intermediate state), contact stability tracking, and sleep/wake callbacks.
+// Delegates to the SleepManager for the improved algorithm.
 void World::updateSleeping(float dt) {
-    constexpr float kMotionTol = 2.5e-3f; // |v|^2 + |w|^2 threshold
-    constexpr float kTimeToSleep = 0.5f;  // seconds
-
-    size_t n = bodies_.size();
-    unionParent_.resize(n);
-    for (uint32_t i = 0; i < n; ++i) unionParent_[i] = i;
-    // Iterative find with path halving.
-    auto find = [&](uint32_t x) {
-        while (unionParent_[x] != x) {
-            unionParent_[x] = unionParent_[unionParent_[x]];
-            x = unionParent_[x];
-        }
-        return x;
-    };
-    auto unite = [&](uint32_t x, uint32_t y) {
-        x = find(x); y = find(y);
-        if (x != y) unionParent_[x] = y;
-    };
-    for (const Contact& c : contacts_)
-        if (!bodies_[c.a].isSensor() && !bodies_[c.b].isSensor() &&
-            bodies_[c.a].isDynamic() && bodies_[c.b].isDynamic()) unite(c.a, c.b);
-    for (const Joint& j : joints_)
-        if (bodies_[j.a].isDynamic() && bodies_[j.b].isDynamic()) unite(j.a, j.b);
-
-    for (Body& b : bodies_) {
-        if (!b.isDynamic() || b.asleep || !b.enableSleep) continue;
-        float motion = lengthSq(b.velocity) + lengthSq(b.angularVelocity);
-        b.sleepTimer = motion < kMotionTol ? b.sleepTimer + dt : 0.0f;
-    }
-
-    // Minimum timer per island root; islands where everyone is calm sleep.
-    islandTimer_.assign(n, 1e30f);
-    for (BodyIndex i = 0; i < n; ++i) {
-        Body& b = bodies_[i];
-        if (!b.isDynamic() || b.asleep || !b.enableSleep) continue;
-        uint32_t root = find(i);
-        if (b.sleepTimer < islandTimer_[root]) islandTimer_[root] = b.sleepTimer;
-    }
-    for (BodyIndex i = 0; i < n; ++i) {
-        Body& b = bodies_[i];
-        if (!b.isDynamic() || b.asleep || !b.enableSleep) continue;
-        if (islandTimer_[find(i)] > kTimeToSleep) {
-            b.asleep = 1;
-            b.velocity = {};
-            b.angularVelocity = {};
-        }
-    }
+    sleepManager_.update(
+        bodies_, contacts_, joints_,
+        unionParent_, islandTimer_, dt,
+        [this](BodyIndex dense) { return bodyHandle(dense); });
 }
 
 // Predictive Contact Sweeping (PCS)
@@ -3376,6 +3705,8 @@ void World::step(float dt) {
 
 void World::stepImpl(float dt) {
     using Clock = std::chrono::steady_clock;
+    VELOX_PROFILE_FRAME();
+    VELOX_PROFILE_CATEGORY_SCOPE("World::step", velox::profile::Category::Setup);
     const auto stepStart = Clock::now();
     lastStepStats_ = {};
     lastStepStats_.dt = dt;
@@ -3386,7 +3717,7 @@ void World::stepImpl(float dt) {
     drainAsyncQueries();
     if (dt == 0.0f) {
         for (const Body& body : bodies_)
-            if (body.isDynamic() && !body.asleep)
+            if (body.isDynamic() && !isFullyAsleep(body.asleep))
                 ++lastStepStats_.awakeDynamicBodies;
         lastStepStats_.totalMs = std::chrono::duration<double, std::milli>(
             Clock::now() - stepStart).count();
@@ -3556,7 +3887,7 @@ void World::stepImpl(float dt) {
     backend_->integrate(bodies_, gravity, h); // first substep's gravity
     bool hasHighStaticToi = false;
     for (const Body& body : bodies_) {
-        if (body.isDynamic() && !body.asleep &&
+        if (body.isDynamic() && !isFullyAsleep(body.asleep) &&
             body.ccdTuning.quality == MotionQuality::High &&
             body.ccdTuning.enableContinuous) {
             hasHighStaticToi = true;
@@ -3572,6 +3903,8 @@ void World::stepImpl(float dt) {
         hostPairs = &candidatePairs_;
     }
     const auto broadPhaseEnd = Clock::now();
+    // Narrowphase contact generation is instrumented at its implementation
+    // site (Backend::findContacts) so the zone sits on the actual hot loop.
     backend_->findContacts(bodies_, meshes_, dt, hostPairs, contacts_);
     const auto detectionEnd = Clock::now();
     lastStepStats_.generatedContacts = contacts_.size();
@@ -3657,10 +3990,10 @@ void World::stepImpl(float dt) {
         auto moving = [](const Body& x) {
             return lengthSq(x.velocity) + lengthSq(x.angularVelocity) > 1e-3f;
         };
-        if (a.asleep && !b.isStatic() && !b.asleep && (impact || moving(b))) {
+        if (a.asleep && !b.isStatic() && !isFullyAsleep(b.asleep) && (impact || moving(b))) {
             a.asleep = 0; a.sleepTimer = 0.0f;
         }
-        if (b.asleep && !a.isStatic() && !a.asleep && (impact || moving(a))) {
+        if (b.asleep && !a.isStatic() && !isFullyAsleep(a.asleep) && (impact || moving(a))) {
             b.asleep = 0; b.sleepTimer = 0.0f;
         }
     }
@@ -3735,6 +4068,7 @@ void World::stepImpl(float dt) {
     // Each substep: gravity, velocity solve against live gaps, joints, and
     // position integration. Warm starting applies only on the first substep;
     // afterwards the accumulated impulses already live in the velocities.
+    VELOX_PROFILE_GPU_SYNC("advanceSubsteps");
     bool advancedOnDevice = backend_->advanceSubsteps(
         bodies_, contacts_, joints_, gravity, h, nSub, solverOptions_);
     lastStepStats_.deviceSubsteps = advancedOnDevice;
@@ -3754,7 +4088,7 @@ void World::stepImpl(float dt) {
             contactSolverAccum += std::chrono::duration<double, std::milli>(csEnd - csStart).count();
             jointSolverAccum += std::chrono::duration<double, std::milli>(jsEnd - jsStart).count();
             for (Body& b : bodies_) {
-                if (b.isStatic() || b.asleep) continue;
+                if (b.isStatic() || isFullyAsleep(b.asleep)) continue;
                 b.advanceTransform(h);
             }
         }
@@ -3782,7 +4116,7 @@ void World::stepImpl(float dt) {
     if (!highToiStarts.empty()) {
         lastStepStats_.multiToiEvents = processHighToi(
             bodies_, highToiStarts, contacts_, dt, view(meshes_), multiToiSettings_,
-            highToiProcessedBodies);
+            collisionFilterCallback_, highToiProcessedBodies);
     }
     const bool highToiProcessed = std::any_of(highToiProcessedBodies.begin(),
                                                highToiProcessedBodies.end(),
@@ -3893,6 +4227,7 @@ void World::stepImpl(float dt) {
         }
     }
 
+    VELOX_PROFILE_GPU_SYNC("fetchImpulses");
     backend_->fetchImpulses(contacts_); // GPU-resident impulses -> host contacts
     if (highToiProcessed) backend_->invalidateCaches();
     const auto ccdEnd = Clock::now();
@@ -3924,9 +4259,9 @@ void World::stepImpl(float dt) {
                     }
                 }
                 float push = -resolve * (g + kPositionSlop) / invMassSum;
-                if (a.isDynamic() && !a.asleep)
+                if (a.isDynamic() && !isFullyAsleep(a.asleep))
                     a.position += c.normal * (push * a.solverInvMass());
-                if (b.isDynamic() && !b.asleep)
+                if (b.isDynamic() && !isFullyAsleep(b.asleep))
                     b.position -= c.normal * (push * b.solverInvMass());
             }
         }
@@ -4012,7 +4347,7 @@ void World::stepImpl(float dt) {
 
     const auto stepEnd = Clock::now();
     for (const Body& body : bodies_)
-        if (body.isDynamic() && !body.asleep)
+        if (body.isDynamic() && !isFullyAsleep(body.asleep))
             ++lastStepStats_.awakeDynamicBodies;
     lastStepStats_.bodyCount = bodies_.size();
     lastStepStats_.jointCount = joints_.size();
@@ -4032,6 +4367,37 @@ void World::stepImpl(float dt) {
     lastStepStats_.jointSolverMs = jointSolverAccum;
     lastStepStats_.ccdRecoveryMs = lastStepStats_.ccdMs;
     lastStepStats_.islandCount = backend_->lastIslandCount();
+
+    // Publish pool accounting for this step so callers can observe allocation
+    // overhead (and its absence) without a separate query.
+    {
+        MemoryPoolStats memStats = memoryPool_.stats();
+        size_t reserved = memStats.reservedBytes;
+        size_t used = memStats.usedBytes;
+        size_t requested = memStats.requestedBytes;
+        size_t peak = memStats.peakUsedBytes;
+        reserved += bodies_.capacity() * sizeof(Body);
+        reserved += contacts_.capacity() * sizeof(Contact);
+        reserved += prevContacts_.capacity() * sizeof(Contact);
+        reserved += joints_.capacity() * sizeof(Joint);
+        used += bodies_.size() * sizeof(Body);
+        used += contacts_.size() * sizeof(Contact);
+        used += prevContacts_.size() * sizeof(Contact);
+        used += joints_.size() * sizeof(Joint);
+        requested += bodies_.size() * sizeof(Body);
+        requested += contacts_.size() * sizeof(Contact);
+        requested += prevContacts_.size() * sizeof(Contact);
+        requested += joints_.size() * sizeof(Joint);
+        peak += bodies_.size() * sizeof(Body);
+        lastStepStats_.memoryReservedBytes = reserved;
+        lastStepStats_.memoryUsedBytes = used;
+        lastStepStats_.memoryPeakBytes = peak;
+        lastStepStats_.memoryFragmentation =
+            used > 0 ? 1.0 - double(requested) / double(used) : 0.0;
+        lastStepStats_.bodyCapacity = bodies_.capacity();
+        lastStepStats_.contactCapacity = contacts_.capacity();
+        lastStepStats_.jointCapacity = joints_.capacity();
+    }
 
     for (size_t i = 0; i < bodies_.size(); ++i) {
         const Body& b = bodies_[i];

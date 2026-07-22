@@ -33,6 +33,46 @@ The `with_cuda` option defaults to off, making the generated package portable
 across Intel and AMD CPUs and systems without an NVIDIA toolkit. CUDA packages
 require a compatible toolkit on both build and consumer machines.
 
+## vcpkg
+
+The repository root doubles as a vcpkg port: `vcpkg.json` is the manifest and
+`portfile.cmake` builds and installs the library, the public headers, and the
+CMake package config consumed through `find_package(Velox)`. The port derives
+its version from the `vcpkg.json` `version` field, which must be kept in sync
+with `kVersionMajor/Minor/Patch` in `include/velox/version.h` (vcpkg cannot read
+the header at manifest-parse time).
+
+Until the port is published to a registry, install it as an overlay port from a
+checkout of this repository:
+
+```powershell
+vcpkg install velox --overlay-ports=C:\path\to\velox
+```
+
+Once a maintainer has filled in the release archive SHA-512 in `portfile.cmake`
+and published the port, consumers install it normally:
+
+```powershell
+vcpkg install velox
+```
+
+Then link it from CMake exactly as with the Conan package:
+
+```cmake
+find_package(Velox CONFIG REQUIRED)
+target_link_libraries(my_game PRIVATE velox::velox)
+```
+
+Notes:
+
+- Static vs shared is selected by the active triplet's `VCPKG_LIBRARY_LINKAGE`;
+  `vcpkg_cmake_configure` forwards `BUILD_SHARED_LIBS` and the build defines
+  `VELOX_BUILDING_SHARED` / `VELOX_USING_SHARED` from the resolved target type,
+  so both linkages export and import symbols correctly.
+- The optional CUDA backend is opt-in via the `cuda` feature:
+  `vcpkg install velox[cuda]`. As with Conan, the default is CPU-only so the
+  package stays portable across Intel and AMD machines without an NVIDIA toolkit.
+
 ## Tagged Releases
 
 The `Release` workflow runs only for `v*` tags or manual dispatch. It creates

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
+#include "velox/error.h"
 
 namespace velox {
 
@@ -34,7 +35,7 @@ namespace {
         error == cudaErrorLaunchFailure || error == cudaErrorLaunchTimeout ||
         error == cudaErrorUnknown)
         throw BackendFailure(BackendFailureKind::DeviceLost, message);
-    throw std::runtime_error(message);
+    VELOX_THROW(VeloxRuntimeError, ErrorCode::BackendUnavailable, message);
 }
 
 #define VELOX_CUDA_CHECK(expr)                                                \
@@ -460,7 +461,7 @@ public:
                 VELOX_CUDA_CHECK(cudaMemcpy(&count, dCount_, sizeof(int),
                                             cudaMemcpyDeviceToHost));
                 if (count < 0)
-                    throw std::length_error("velox: CUDA contact count overflow");
+                    VELOX_THROW(VeloxCapacityExceeded, ErrorCode::ContactCountOverflow, "CUDA contact count overflow");
                 if (count <= cap) break;
                 cap = count;
                 ensureContactCapacity(cap);
