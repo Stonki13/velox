@@ -24,6 +24,9 @@ option(VELOX_BUILD_DIFFTEST "Build differential tests against Jolt Physics" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
 set(VELOX_CUDA_ARCHITECTURES "native" CACHE STRING
     "CUDA architectures passed to CMake when the CUDA backend is enabled")
+set(VELOX_CUDA_FAST_COMPILE "min" CACHE STRING
+    "CUDA 13+ device fast-compile mode (0, min, mid, or max)")
+set_property(CACHE VELOX_CUDA_FAST_COMPILE PROPERTY STRINGS 0 min mid max)
 option(VELOX_STRICT_FLOATING_POINT
        "Build the CPU reference path with reproducible floating-point semantics" OFF)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
@@ -71,6 +74,11 @@ if(VELOX_ENABLE_CUDA)
             target_compile_options(velox PRIVATE
                 $<$<COMPILE_LANGUAGE:CUDA>:--split-compile=0>
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=--split-compile=0>)
+        endif()
+        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0 AND
+           NOT VELOX_CUDA_FAST_COMPILE STREQUAL "0")
+            target_compile_options(velox PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:--Ofast-compile=${VELOX_CUDA_FAST_COMPILE}>)
         endif()
         set(VELOX_HAS_CUDA 1)
         find_package(CUDAToolkit REQUIRED)

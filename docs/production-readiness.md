@@ -25,6 +25,9 @@ toolkit and a real NVIDIA device. The workflow records `nvidia-smi`, compiles
 the CUDA backend, and runs `velox.cuda_smoke`, `stress_demo`, and
 `proto_manifold`. It is manually dispatched and capped at 90 minutes because
 the clean `sm_120` CUDA build is substantially more expensive than CPU builds.
+CUDA 13+ builds use the compiler's `min` fast-compile mode by default; set
+`VELOX_CUDA_FAST_COMPILE=0` to restore every device optimization when an
+offline release build can absorb the longer compilation time.
 
 `velox.cuda_smoke` fails if `BackendType::Cuda` falls back to CPU, if GPU
 substeps were not used, or if a 240-frame CPU/CUDA scene diverges beyond its
