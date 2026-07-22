@@ -3729,6 +3729,8 @@ void World::stepImpl(float dt) {
     pendingBodyEvents_.clear();
     if (substeps <= 0) throw std::invalid_argument("velox: substeps must be positive");
     if (!finiteVec(gravity)) throw std::invalid_argument("velox: gravity must be finite");
+#ifndef NDEBUG
+    // Full validation only in debug builds - release builds skip this for performance
     for (Body& body : bodies_) {
         validateRuntimeBody(body);
         switch (body.shape) {
@@ -3877,6 +3879,7 @@ void World::stepImpl(float dt) {
             joint.breakForce < 0.0f || joint.breakTorque < 0.0f)
             throw std::invalid_argument("velox: joint contains invalid break thresholds");
     }
+#endif // NDEBUG
     const int nSub = substeps > 0 ? substeps : 1;
     const float h = dt / nSub;
 
