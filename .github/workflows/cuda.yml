@@ -12,7 +12,9 @@ jobs:
   cuda:
     name: CUDA / self-hosted GPU
     runs-on: [self-hosted, windows, x64, gpu]
-    timeout-minutes: 45
+    # sm_120 compilation of the template-heavy CUDA backend can exceed 45 min
+    # on a clean Windows runner. Keep this dedicated manual validation bounded.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Record CUDA environment

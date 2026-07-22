@@ -65,6 +65,12 @@ if(VELOX_ENABLE_CUDA)
         set(CMAKE_CUDA_STANDARD 17)
         set_property(TARGET velox PROPERTY CUDA_ARCHITECTURES ${VELOX_CUDA_ARCHITECTURES})
         target_sources(velox PRIVATE src/backend_cuda.cu)
+        # backend_cuda.cu is template-heavy. CUDA 12+ can parallelize its device
+        # optimizer without changing the generated program's semantics.
+        if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+            target_compile_options(velox PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:--split-compile=0>)
+        endif()
         set(VELOX_HAS_CUDA 1)
         find_package(CUDAToolkit REQUIRED)
         target_link_libraries(velox PUBLIC CUDA::cudart)

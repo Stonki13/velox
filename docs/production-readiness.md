@@ -23,7 +23,8 @@ GPU.
 runner labelled `self-hosted`, `windows`, `x64`, and `gpu`. It requires a CUDA
 toolkit and a real NVIDIA device. The workflow records `nvidia-smi`, compiles
 the CUDA backend, and runs `velox.cuda_smoke`, `stress_demo`, and
-`proto_manifold`.
+`proto_manifold`. It is manually dispatched and capped at 90 minutes because
+the clean `sm_120` CUDA build is substantially more expensive than CPU builds.
 
 `velox.cuda_smoke` fails if `BackendType::Cuda` falls back to CPU, if GPU
 substeps were not used, or if a 240-frame CPU/CUDA scene diverges beyond its
