@@ -20,7 +20,7 @@ GPU.
 ## GPU Hardware Gate
 
 `.github/workflows/cuda.yml` is intentionally dispatched on a self-hosted
-runner labelled `self-hosted`, `linux`, `x64`, and `gpu`. It requires a CUDA
+runner labelled `self-hosted`, `windows`, `x64`, and `gpu`. It requires a CUDA
 toolkit and a real NVIDIA device. The workflow records `nvidia-smi`, compiles
 the CUDA backend, and runs `velox.cuda_smoke`, `stress_demo`, and
 `proto_manifold`.

@@ -11,7 +11,7 @@ on:
 jobs:
   cuda:
     name: CUDA / self-hosted GPU
-    runs-on: [self-hosted, linux, x64, gpu]
+    runs-on: [self-hosted, windows, x64, gpu]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -26,9 +26,9 @@ jobs:
           -DVELOX_CUDA_ARCHITECTURES=${{ inputs.cuda_architectures }}
           -DVELOX_BUILD_SANDBOX=OFF -DVELOX_BUILD_DIFFTEST=OFF
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --config Release --parallel
       - name: Require CUDA execution and CPU/CUDA parity
         run: |
-          ctest --test-dir build -R "^velox.cuda_smoke$" --output-on-failure
-          build/examples/stress_demo
-          build/examples/proto_manifold
+          ctest --test-dir build -C Release -R "^velox.cuda_smoke$" --output-on-failure
+          build\examples\Release\stress_demo.exe
+          build\examples\Release\proto_manifold.exe
