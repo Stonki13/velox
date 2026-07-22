@@ -24,8 +24,8 @@ namespace velox {
  * world.sleepConfig().timeToSleep = 1.0f;
  * world.sleepConfig().enableGradualSleep = true;
  * world.setSleepCallbacks({
- *     .onSleep = [](velox::BodyId id) { /* body fell asleep *\/ },
- *     .onWake  = [](velox::BodyId id) { /* body woke up *\/ },
+ *     .onSleep = [](velox::BodyId id) { (void)id; },
+ *     .onWake  = [](velox::BodyId id) { (void)id; },
  * });
  * @endcode
  *

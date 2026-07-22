@@ -5,6 +5,15 @@ set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+# GLFW 3.4 enables Wayland when its scanner is present. Minimal Linux build
+# images often omit that tool but still support GLFW's X11 backend, so choose
+# the available backend rather than failing configuration for an optional demo.
+if(UNIX AND NOT APPLE)
+    find_program(VELOX_WAYLAND_SCANNER wayland-scanner)
+    if(NOT VELOX_WAYLAND_SCANNER)
+        set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
 FetchContent_Declare(
     glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git

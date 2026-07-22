@@ -34,6 +34,13 @@ substeps were not used, or if a 240-frame CPU/CUDA scene diverges beyond its
 documented tolerance. Dispatch it with `cuda_architectures=120` for an RTX
 50-series runner, or `native` to let a recent CMake select the installed GPU.
 
+### Validated Hardware
+
+On Windows 11 with CUDA 13.2 and an RTX 5080 (`sm_120`), the clean Release
+build completed in 75 seconds with `VELOX_CUDA_FAST_COMPILE=min`. The CUDA
+smoke/parity test, stress demo, and persistent-manifold prototype passed in
+the same hardware workflow.
+
 ## Release Checklist
 
 1. All pull request gates are green for the release commit.

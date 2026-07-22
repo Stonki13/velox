@@ -172,6 +172,57 @@ private:
     std::atomic_flag flag_ = ATOMIC_FLAG_INIT;
 };
 
+// Standard-library mutexes do not carry Clang Thread Safety Analysis
+// capabilities themselves. These BasicLockable wrappers retain the standard
+// lock interface while giving guarded World state a concrete capability.
+class VELOX_CAPABILITY("mutex") ThreadSafeMutex {
+public:
+    ThreadSafeMutex() = default;
+    ThreadSafeMutex(const ThreadSafeMutex&) = delete;
+    ThreadSafeMutex& operator=(const ThreadSafeMutex&) = delete;
+
+    void lock() VELOX_ACQUIRE() { mutex_.lock(); }
+    bool try_lock() { return mutex_.try_lock(); }
+    void unlock() VELOX_RELEASE() { mutex_.unlock(); }
+
+private:
+    std::mutex mutex_;
+};
+
+class VELOX_CAPABILITY("mutex") ThreadSafeRecursiveMutex {
+public:
+    ThreadSafeRecursiveMutex() = default;
+    ThreadSafeRecursiveMutex(const ThreadSafeRecursiveMutex&) = delete;
+    ThreadSafeRecursiveMutex& operator=(const ThreadSafeRecursiveMutex&) = delete;
+
+    void lock() VELOX_ACQUIRE() { mutex_.lock(); }
+    bool try_lock() { return mutex_.try_lock(); }
+    void unlock() VELOX_RELEASE() { mutex_.unlock(); }
+
+private:
+    std::recursive_mutex mutex_;
+};
+
+// Clang recognizes a scoped capability, unlike std::lock_guard and
+// std::unique_lock. It also provides lock()/unlock() for
+// std::condition_variable_any.
+template <typename Mutex>
+class VELOX_SCOPED_CAPABILITY ScopedLock {
+public:
+    explicit ScopedLock(Mutex& mutex) VELOX_ACQUIRE(mutex) : mutex_(mutex) {
+        mutex_.lock();
+    }
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+    ~ScopedLock() VELOX_RELEASE() { mutex_.unlock(); }
+
+    void lock() VELOX_ACQUIRE(mutex_) { mutex_.lock(); }
+    void unlock() VELOX_RELEASE(mutex_) { mutex_.unlock(); }
+
+private:
+    Mutex& mutex_;
+};
+
 // ---------------------------------------------------------------------------
 // 2c. Atomic<T> — a thin, ergonomic wrapper over std::atomic
 // ---------------------------------------------------------------------------

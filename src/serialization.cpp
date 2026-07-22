@@ -16,11 +16,93 @@ struct Writer {
     std::vector<uint8_t>& out;
 
     template <typename T>
-    void pod(const T& value) {
-        static_assert(std::is_trivially_copyable<T>::value, "POD only");
+    void writeRaw(const T& value) {
+        // The archive format deliberately stores raw records for compactness.
         const size_t offset = out.size();
         out.resize(offset + sizeof(T));
         std::memcpy(out.data() + offset, &value, sizeof(T));
+    }
+
+    template <typename T>
+    void pod(const T& value) {
+        static_assert(std::is_trivially_copyable<T>::value, "POD only");
+        // Most serialized records have no padding. Keep the existing compact
+        // native layout, but start from a known representation for records
+        // that do carry padding (Body has its own field-wise overload below).
+        T canonical{};
+        canonical = value;
+        writeRaw(canonical);
+    }
+
+    void pod(const Body& value) {
+        Body canonical{};
+        std::memset(&canonical, 0, sizeof(canonical));
+        canonical.position = value.position;
+        canonical.orientation = value.orientation;
+        canonical.velocity = value.velocity;
+        canonical.angularVelocity = value.angularVelocity;
+        canonical.force = value.force;
+        canonical.torque = value.torque;
+        canonical.invMass = value.invMass;
+        canonical.invInertia = value.invInertia;
+        canonical.inertiaOrientation = value.inertiaOrientation;
+        canonical.restitution = value.restitution;
+        canonical.friction = value.friction;
+        canonical.frictionScale = value.frictionScale;
+        canonical.rollingFriction = value.rollingFriction;
+        canonical.spinningFriction = value.spinningFriction;
+        canonical.frictionCombine = value.frictionCombine;
+        canonical.restitutionCombine = value.restitutionCombine;
+        canonical.linearDamping = value.linearDamping;
+        canonical.angularDamping = value.angularDamping;
+        canonical.gravityScale = value.gravityScale;
+        canonical.motionType = value.motionType;
+        canonical.ccdTuning.quality = value.ccdTuning.quality;
+        canonical.ccdTuning.collisionMargin = value.ccdTuning.collisionMargin;
+        canonical.ccdTuning.speculativeDistance = value.ccdTuning.speculativeDistance;
+        canonical.ccdTuning.enableContinuous = value.ccdTuning.enableContinuous;
+        canonical.ccdTuning.minVelocityForCCD = value.ccdTuning.minVelocityForCCD;
+        canonical.ccdTuning.ccdSettings.quality = value.ccdTuning.ccdSettings.quality;
+        canonical.ccdTuning.ccdSettings.maxAdvancementIterations =
+            value.ccdTuning.ccdSettings.maxAdvancementIterations;
+        canonical.ccdTuning.ccdSettings.maxRootFindIterations =
+            value.ccdTuning.ccdSettings.maxRootFindIterations;
+        canonical.ccdTuning.ccdSettings.distanceTolerance =
+            value.ccdTuning.ccdSettings.distanceTolerance;
+        canonical.ccdTuning.ccdSettings.timeTolerance = value.ccdTuning.ccdSettings.timeTolerance;
+        canonical.ccdTuning.ccdSettings.enableRotationalCcd =
+            value.ccdTuning.ccdSettings.enableRotationalCcd;
+        canonical.ccdTuning.ccdSettings.enableCompoundCcd =
+            value.ccdTuning.ccdSettings.enableCompoundCcd;
+        canonical.ccdTuning.ccdSettings.useBrentRootFinder =
+            value.ccdTuning.ccdSettings.useBrentRootFinder;
+        canonical.ccdTuning.ccdSettings.meshBvhMaxDepth =
+            value.ccdTuning.ccdSettings.meshBvhMaxDepth;
+        canonical.ccdTuning.ccdSettings.speculativeMargin =
+            value.ccdTuning.ccdSettings.speculativeMargin;
+        canonical.geometryQuality = value.geometryQuality;
+        canonical.categoryBits = value.categoryBits;
+        canonical.maskBits = value.maskBits;
+        canonical.groupIndex = value.groupIndex;
+        canonical.sensor = value.sensor;
+        canonical.enableSleep = value.enableSleep;
+        canonical.fixedRotation = value.fixedRotation;
+        canonical.asleep = value.asleep;
+        canonical.sleepTimer = value.sleepTimer;
+        canonical.shape = value.shape;
+        canonical.radius = value.radius;
+        canonical.halfExtents = value.halfExtents;
+        canonical.capsuleHalfHeight = value.capsuleHalfHeight;
+        canonical.planeNormal = value.planeNormal;
+        canonical.planeOffset = value.planeOffset;
+        canonical.meshIndex = value.meshIndex;
+        canonical.hullFirst = value.hullFirst;
+        canonical.hullCount = value.hullCount;
+        canonical.hullFaceFirst = value.hullFaceFirst;
+        canonical.hullFaceCount = value.hullFaceCount;
+        canonical.compoundFirst = value.compoundFirst;
+        canonical.compoundCount = value.compoundCount;
+        writeRaw(canonical);
     }
 
     template <typename T>
@@ -28,10 +110,8 @@ struct Writer {
         static_assert(std::is_trivially_copyable<T>::value, "POD only");
         pod(static_cast<uint64_t>(sizeof(T)));
         pod(static_cast<uint64_t>(values.size()));
-        const size_t bytes = values.size() * sizeof(T);
-        const size_t offset = out.size();
-        out.resize(offset + bytes);
-        if (bytes) std::memcpy(out.data() + offset, values.data(), bytes);
+        out.reserve(out.size() + values.size() * sizeof(T));
+        for (const T& value : values) pod(value);
     }
 };
 

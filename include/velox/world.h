@@ -243,9 +243,9 @@ private:
     std::vector<JointBreakEvent> jointBreakEvents_;
     MeshSoup meshes_;
     StepStats lastStepStats_;
-    WorldCcdDefaults ccdDefaults_;
-    WorldMultiToiSettings multiToiSettings_;
-    SolverOptions solverOptions_;
+    WorldCcdDefaults ccdDefaults_{};
+    WorldMultiToiSettings multiToiSettings_{};
+    SolverOptions solverOptions_{};
 };
 
 struct BroadPhaseData;
@@ -850,6 +850,9 @@ private:
                                    const QueryFilter& filter,
                                    const MeshSoupView& soup) const;
     QueryResult executeQuery(const QueryDesc& query) const;
+    bool asyncQueryReady(uint64_t id) const VELOX_REQUIRES(asyncQueryMutex_);
+    void waitForAsyncQuery(ScopedLock<ThreadSafeMutex>& lock, uint64_t id)
+        VELOX_REQUIRES(asyncQueryMutex_) VELOX_NO_THREAD_SAFETY_ANALYSIS;
     void drainAsyncQueries();
     void removeJointDense(uint32_t dense);
     // Incremental broad phase: rebuild/refit the AABB tree as needed.
@@ -873,7 +876,7 @@ private:
 
     private:
         const World& world_;
-        std::unique_lock<std::recursive_mutex> lock_;
+        ScopedLock<ThreadSafeRecursiveMutex> lock_;
     };
 
     std::vector<Body> bodies_;
@@ -908,7 +911,7 @@ private:
     WorldMultiToiSettings multiToiSettings_;
     SolverOptions solverOptions_;
     BackendType requestedBackend_ = BackendType::Auto;
-    StepStats lastStepStats_;
+    StepStats lastStepStats_{};
     // General-purpose pool for query-result and scratch buffers. Pre-reserved
     // body/contact/joint vector capacity (see reserveCapacity) keeps the dense
     // arrays from reallocating during stepping; this pool handles the irregular
@@ -922,13 +925,13 @@ private:
     // Reentrant world lock serializing every supported entry point under the
     // Relaxed/Concurrent thread-safety policies. Marked as a Clang Thread
     // Safety Analysis capability so the members it protects can be annotated.
-    mutable std::recursive_mutex accessMutex_ VELOX_CAPABILITY("mutex");
+    mutable ThreadSafeRecursiveMutex accessMutex_;
     struct PendingAsyncQuery { uint64_t id; QueryDesc query; };
     struct AsyncQueryResult { bool ready = false; QueryResult result; };
     // Owns the async-query bookkeeping below. Distinct from accessMutex_ so a
     // foreign thread can submit a query without taking the world lock.
-    mutable std::mutex asyncQueryMutex_ VELOX_CAPABILITY("mutex");
-    std::condition_variable asyncQueryReady_;
+    mutable ThreadSafeMutex asyncQueryMutex_;
+    std::condition_variable_any asyncQueryReady_;
     std::atomic<bool> hasPendingAsyncQueries_{false};
     uint64_t nextAsyncQueryId_ VELOX_GUARDED_BY(asyncQueryMutex_) = 1;
     std::deque<PendingAsyncQuery> pendingAsyncQueries_ VELOX_GUARDED_BY(asyncQueryMutex_);

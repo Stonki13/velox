@@ -783,7 +783,7 @@ void World::batchQueries(const std::vector<QueryDesc>& queries,
 }
 
 AsyncQueryHandle World::submitAsyncQuery(const QueryDesc& query) {
-    std::lock_guard<std::mutex> lock(asyncQueryMutex_);
+    ScopedLock<ThreadSafeMutex> lock(asyncQueryMutex_);
     uint64_t id = nextAsyncQueryId_++;
     if (id == 0) id = nextAsyncQueryId_++;
     asyncQueryResults_.emplace(id, AsyncQueryResult{});
@@ -795,24 +795,35 @@ AsyncQueryHandle World::submitAsyncQuery(const QueryDesc& query) {
 QueryResult World::getAsyncResult(AsyncQueryHandle handle) {
     if (handle.id == 0)
         VELOX_THROW(VeloxInvalidArgument, ErrorCode::StaleQueryHandle, "invalid async query handle");
-    std::unique_lock<std::mutex> lock(asyncQueryMutex_);
+    ScopedLock<ThreadSafeMutex> lock(asyncQueryMutex_);
     if (asyncQueryResults_.find(handle.id) == asyncQueryResults_.end())
         VELOX_THROW(VeloxOutOfRange, ErrorCode::StaleQueryHandle, "async query handle is unknown or already consumed");
-    asyncQueryReady_.wait(lock, [&] {
-        auto it = asyncQueryResults_.find(handle.id);
-        return it != asyncQueryResults_.end() && it->second.ready;
-    });
+    waitForAsyncQuery(lock, handle.id);
     auto it = asyncQueryResults_.find(handle.id);
     QueryResult result = std::move(it->second.result);
     asyncQueryResults_.erase(it);
     return result;
 }
 
+bool World::asyncQueryReady(uint64_t id) const {
+    auto it = asyncQueryResults_.find(id);
+    return it != asyncQueryResults_.end() && it->second.ready;
+}
+
+void World::waitForAsyncQuery(ScopedLock<ThreadSafeMutex>& lock, uint64_t id)
+    VELOX_NO_THREAD_SAFETY_ANALYSIS {
+    // condition_variable_any releases and reacquires the lock inside a
+    // standard-library template that Clang's analysis cannot model.
+    asyncQueryReady_.wait(lock, [&]() VELOX_NO_THREAD_SAFETY_ANALYSIS {
+        return asyncQueryReady(id);
+    });
+}
+
 void World::drainAsyncQueries() {
     if (!hasPendingAsyncQueries_.load(std::memory_order_acquire)) return;
     std::deque<PendingAsyncQuery> pending;
     {
-        std::lock_guard<std::mutex> lock(asyncQueryMutex_);
+        ScopedLock<ThreadSafeMutex> lock(asyncQueryMutex_);
         pending.swap(pendingAsyncQueries_);
         hasPendingAsyncQueries_.store(!pendingAsyncQueries_.empty(),
                                       std::memory_order_release);
@@ -828,7 +839,7 @@ void World::drainAsyncQueries() {
             result.userData = entry.query.userData;
             result.error = error.what();
         }
-        std::lock_guard<std::mutex> lock(asyncQueryMutex_);
+        ScopedLock<ThreadSafeMutex> lock(asyncQueryMutex_);
         auto it = asyncQueryResults_.find(entry.id);
         if (it != asyncQueryResults_.end()) {
             it->second.result = std::move(result);

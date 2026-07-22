@@ -726,7 +726,7 @@ BodyId World::addSphere(Vec3 position, float radius, float mass) {
     requireFiniteVec(position, "velox: sphere position must be finite");
     requirePositive(radius, "velox: sphere radius must be finite and positive");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position;
     b.shape = ShapeType::Sphere;
     b.radius = radius;
@@ -746,7 +746,7 @@ BodyId World::addBox(Vec3 position, Vec3 halfExtents, float mass) {
     if (halfExtents.x <= 0.0f || halfExtents.y <= 0.0f || halfExtents.z <= 0.0f)
         throw std::invalid_argument("velox: box half extents must be positive");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position;
     b.shape = ShapeType::Box;
     b.halfExtents = halfExtents;
@@ -768,7 +768,7 @@ BodyId World::addCapsule(Vec3 position, float radius, float halfHeight, float ma
     requirePositive(radius, "velox: capsule radius must be finite and positive");
     requireNonNegative(halfHeight, "velox: capsule half height must be finite and non-negative");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position;
     b.shape = ShapeType::Capsule;
     b.radius = radius;
@@ -804,7 +804,7 @@ BodyId World::addCylinder(Vec3 position, float radius, float halfHeight, float m
     requirePositive(halfHeight,
                     "velox: cylinder half height must be finite and positive");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position;
     b.shape = ShapeType::Cylinder;
     b.radius = radius;
@@ -826,7 +826,7 @@ BodyId World::addCone(Vec3 position, float radius, float height, float mass) {
     requirePositive(radius, "velox: cone radius must be finite and positive");
     requirePositive(height, "velox: cone height must be finite and positive");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position; // center of mass, one quarter-height above the base
     b.shape = ShapeType::Cone;
     b.radius = radius;
@@ -850,7 +850,7 @@ BodyId World::addRoundedBox(Vec3 position, Vec3 halfExtents, float radius, float
         throw std::invalid_argument("velox: rounded box half extents must be positive");
     requirePositive(radius, "velox: rounded box radius must be finite and positive");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position;
     b.shape = ShapeType::RoundedBox;
     b.halfExtents = halfExtents;
@@ -874,7 +874,7 @@ BodyId World::addEllipsoid(Vec3 position, Vec3 radii, float mass) {
     if (radii.x <= 0.0f || radii.y <= 0.0f || radii.z <= 0.0f)
         throw std::invalid_argument("velox: ellipsoid radii must be positive");
     requireMass(mass);
-    Body b;
+    Body b{};
     b.position = position;
     b.shape = ShapeType::Ellipsoid;
     b.halfExtents = radii;
@@ -934,7 +934,7 @@ BodyId World::addConvexHull(Vec3 position, const std::vector<Vec3>& points, floa
     if (mass > 0.0f) {
         for (Vec3& point : storedPoints) point -= properties.center;
     }
-    Body b;
+    Body b{};
     b.position = position + (mass > 0.0f ? properties.center : Vec3{});
     b.shape = ShapeType::Hull;
     b.hullFirst = static_cast<uint32_t>(meshes_.hullPoints.size());
@@ -1229,7 +1229,7 @@ BodyId World::addCompound(Vec3 position, const std::vector<CompoundShape>& shape
         childBounds.push_back(bound);
     }
 
-    Body body;
+    Body body{};
     Vec3 center;
     mass_properties::Matrix3 centeredTensor;
     double totalVolume = 0.0;
@@ -1291,7 +1291,7 @@ BodyId World::addStaticPlane(Vec3 normal, float offset) {
     if (lengthSq(normal) < 1e-12f)
         throw std::invalid_argument("velox: plane normal must be non-zero");
     if (!finiteFloat(offset)) throw std::invalid_argument("velox: plane offset must be finite");
-    Body b;
+    Body b{};
     b.shape = ShapeType::Plane;
     b.motionType = MotionType::Static;
     b.planeNormal = normalize(normal);
@@ -1414,7 +1414,7 @@ BodyId World::addStaticMesh(const std::vector<Vec3>& vertices,
     m.nodeCount = static_cast<uint32_t>(meshes_.bvhNodes.size()) - m.firstNode;
     meshes_.meshes.push_back(m);
 
-    Body b;
+    Body b{};
     b.shape = ShapeType::Mesh;
     b.motionType = MotionType::Static;
     b.meshIndex = static_cast<uint32_t>(meshes_.meshes.size() - 1);
@@ -2114,7 +2114,7 @@ JointId World::addBallJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: ball-joint anchor must be finite");
-    Joint j;
+    Joint j{};
     j.type = JointType::Ball;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchor - bodies_[ia].position);
@@ -2128,7 +2128,7 @@ JointId World::addDistanceJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worl
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchorA, "velox: distance-joint anchor must be finite");
     requireFiniteVec(worldAnchorB, "velox: distance-joint anchor must be finite");
-    Joint j;
+    Joint j{};
     j.type = JointType::Distance;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchorA - bodies_[ia].position);
@@ -2161,7 +2161,7 @@ JointId World::addHingeJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxi
     requireFiniteVec(worldAxis, "velox: hinge axis must be finite");
     if (lengthSq(worldAxis) < 1e-12f)
         throw std::invalid_argument("velox: hinge axis must be non-zero");
-    Joint j;
+    Joint j{};
     j.type = JointType::Hinge;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchor - bodies_[ia].position);
@@ -2189,7 +2189,7 @@ JointId World::addConeTwistJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worl
     Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
     ref = normalize(cross(axis, ref));
 
-    Joint j;
+    Joint j{};
     j.type = JointType::ConeTwist;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation, worldAnchor - bodies_[ia].position);
@@ -2206,7 +2206,7 @@ JointId World::addFixedJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: fixed-joint anchor must be finite");
-    Joint j;
+    Joint j{};
     j.type = JointType::Fixed;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2232,7 +2232,7 @@ JointId World::addPrismaticJoint(BodyId a, BodyId b, Vec3 worldAnchor,
     Vec3 axis = normalize(worldAxis);
     Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
     ref = normalize(cross(axis, ref));
-    Joint j;
+    Joint j{};
     j.type = JointType::Prismatic;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2251,7 +2251,7 @@ JointId World::addSixDofJoint(BodyId a, BodyId b, Vec3 worldAnchor) {
     BodyIndex ia = resolve(a), ib = resolve(b);
     if (ia == ib) throw std::invalid_argument("velox: a joint requires two different bodies");
     requireFiniteVec(worldAnchor, "velox: 6DoF-joint anchor must be finite");
-    Joint j;
+    Joint j{};
     j.type = JointType::SixDof;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2274,7 +2274,7 @@ JointId World::addMotorJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAn
     requireFiniteVec(worldAnchorB, "velox: motor joint anchor B must be finite");
     if (maxForce < 0.0f || maxTorque < 0.0f)
         throw std::invalid_argument("velox: motor joint limits must be non-negative");
-    Joint j;
+    Joint j{};
     j.type = JointType::Motor;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2300,7 +2300,7 @@ JointId World::addWeldJoint(BodyId a, BodyId b, Vec3 worldAnchor,
         throw std::invalid_argument("velox: weld break force must be finite and non-negative");
     if (!finiteFloat(breakTorque) || breakTorque < 0.0f)
         throw std::invalid_argument("velox: weld break torque must be finite and non-negative");
-    Joint j;
+    Joint j{};
     j.type = JointType::Weld;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2327,7 +2327,7 @@ JointId World::addWheelJoint(BodyId a, BodyId b, Vec3 worldAnchor, Vec3 worldAxi
     Vec3 axis = normalize(worldAxis);
     Vec3 ref = std::fabs(axis.x) < 0.9f ? Vec3{1, 0, 0} : Vec3{0, 1, 0};
     ref = normalize(cross(axis, ref));
-    Joint j;
+    Joint j{};
     j.type = JointType::Wheel;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2349,7 +2349,7 @@ JointId World::addRopeJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldAnc
     requireFiniteVec(worldAnchorA, "velox: rope-joint anchor A must be finite");
     requireFiniteVec(worldAnchorB, "velox: rope-joint anchor B must be finite");
     requirePositive(maxLength, "velox: rope max length must be finite and positive");
-    Joint j;
+    Joint j{};
     j.type = JointType::Rope;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2370,7 +2370,7 @@ JointId World::addPulleyJoint(BodyId a, BodyId b, Vec3 worldAnchorA, Vec3 worldA
     requireFiniteVec(groundAnchorA, "velox: pulley ground anchor A must be finite");
     requireFiniteVec(groundAnchorB, "velox: pulley ground anchor B must be finite");
     requirePositive(ratio, "velox: pulley ratio must be finite and positive");
-    Joint j;
+    Joint j{};
     j.type = JointType::Pulley;
     j.a = ia; j.b = ib;
     j.localAnchorA = rotateInv(bodies_[ia].orientation,
@@ -2400,7 +2400,7 @@ JointId World::addGearJoint(BodyId a, BodyId b, Vec3 worldAxisA, Vec3 worldAxisB
         throw std::invalid_argument("velox: gear-joint axis B must be non-zero");
     if (!finiteFloat(ratio) || ratio == 0.0f)
         throw std::invalid_argument("velox: gear ratio must be finite and non-zero");
-    Joint j;
+    Joint j{};
     j.type = JointType::Gear;
     j.a = ia; j.b = ib;
     // Gear joint anchors are at the body centers (no linear constraint).

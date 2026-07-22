@@ -241,4 +241,20 @@ TEST_SUITE("cross_platform.endianness") {
         REQUIRE(s1.size() == s2.size());
         CHECK(s1 == s2);
     }
+
+    TEST_CASE("Byte-level archive preserves simulated contacts and joints") {
+        World world(BackendType::Cpu);
+        world.setGravity({0, -9.81f, 0});
+        world.addStaticPlane({0, 1, 0}, 0.0f);
+        const BodyId box = world.addBox({0, 0.5f, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
+        const BodyId bob = world.addSphere({0, 2.0f, 0}, 0.25f, 1.0f);
+        world.addDistanceJoint(box, bob, {0, 1.0f, 0}, {0, 1.75f, 0});
+        for (int i = 0; i < 30; ++i) world.step(1.0f / 60.0f);
+
+        const auto s1 = packScene(serializeWorld(world));
+        const auto s2 = packScene(serializeWorld(world));
+
+        REQUIRE(s1.size() == s2.size());
+        CHECK(s1 == s2);
+    }
 }
