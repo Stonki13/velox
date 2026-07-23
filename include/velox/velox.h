@@ -15,6 +15,7 @@
 #include "solver.h"
 #include "queries.h"
 #include "sleep.h"
+#include "softbody.h"
 #include "world.h"
 #include "character.h"
 #include "ragdoll.h"

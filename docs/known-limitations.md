@@ -14,7 +14,11 @@ for the full comparison; the headline gaps:
 - **No production shipping history.** Jolt has shipped in real titles
   (Horizon Forbidden West) and is Godot 4's default. Velox has not shipped
   in a released game.
-- **No soft-body solver.** Not planned until real user demand exists.
+- **Soft-body solver is minimal.** XPBD distance-constraint solver covers
+  cloth and deformable spheres with collision against static rigid bodies
+  (planes, spheres, boxes). No self-collision, no tetrahedral FEM, no
+  coupling back into the rigid-body solver (soft bodies do not push rigid
+  bodies). See `include/velox/softbody.h`.
 - **One vehicle model.** A single raycast vehicle vs. Jolt's wheeled/
   tracked/motorcycle controller family.
 - **Full GPU acceleration is NVIDIA-only; the cross-vendor Vulkan backend

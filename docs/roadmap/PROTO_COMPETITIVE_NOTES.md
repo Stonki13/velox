@@ -860,3 +860,51 @@ Diagnostic (same binary, `BackendType::Auto`, Windows 11, RTX 5080):
   pass (100%)**.
 - `docs/known-limitations.md` updated: the "Known pre-existing test
   issues" section replaced with "Resolved test issues".
+
+## Phase B: soft-body solver (XPBD)
+
+Added a minimal but real soft-body solver using Extended Position-Based
+Dynamics (XPBD) with distance constraints. Closes the "no soft bodies"
+gap acknowledged since Phase 0.
+
+### What was added
+
+- `include/velox/softbody.h` — public API: `SoftBodyId` handle,
+  `SoftBody` runtime state (particles, velocities, constraints, AABB),
+  `SoftBodyDesc` creation descriptor, two factory helpers
+  (`makeClothSoftBody`, `makeSoftSphereSoftBody`), and the internal
+  `softbody_detail::stepSoftBody` solver entry point.
+- `src/softbody.cpp` — XPBD solver: predict positions, iterate distance
+  constraints with compliance-based stiffness, collide particles against
+  static rigid bodies (planes, spheres, boxes), derive velocities from
+  position delta. Cloth uses structural + shear constraints on a grid;
+  soft sphere uses a Fibonacci lattice with core-to-surface and
+  surface-to-surface distance constraints.
+- `World` integration: `addSoftBody`/`softBody`/`removeSoftBody`/
+  `softBodyCount`/`isValid(SoftBodyId)` with the same slot+generation
+  handle pattern as `BodyId`/`JointId`. Soft bodies are stepped inside
+  `World::stepImpl` after the rigid-body solve and before sleeping.
+- `tests/unit/test_softbody.cpp` (CTest `velox.unit.test_softbody`,
+  5 `TEST_CASE`s): cloth drapes over a sphere (behavioral: lowest
+  particle below equator, no particle inside the sphere), soft sphere
+  bounces and settles on a plane (all particles above plane, max
+  velocity < 1.0 after 15 s), pinned cloth corners don't move, handle
+  lifecycle (add/remove/validity), factory constraint validation.
+
+### Scope guards (stated plainly)
+
+- No self-collision between soft-body particles.
+- No two-way coupling: soft bodies collide with static rigid bodies
+  but do not push dynamic rigid bodies back.
+- No tetrahedral FEM or shape-matching constraints — distance
+  constraints only.
+- Collision limited to static planes, spheres, and boxes.
+
+### Gate results
+
+- `cmake --build build_phase1 --config Release -j 16`: clean, 0
+  compiler errors.
+- `ctest --test-dir build_phase1 -C Release`: **57/57 CTest suites
+  pass (100%)**, including the new `velox.unit.test_softbody`.
+- `docs/known-limitations.md` updated: "No soft-body solver" replaced
+  with an honest description of the minimal solver's scope.

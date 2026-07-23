@@ -2715,6 +2715,102 @@ void World::removeBody(BodyId id) {
     islandTimer_.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Soft bodies
+// ---------------------------------------------------------------------------
+
+SoftBodyId World::addSoftBody(const SoftBodyDesc& desc) {
+    AccessGuard guard(*this, AccessKind::Mutation, "addSoftBody");
+    SoftBody sb;
+    sb.positions = desc.positions;
+    sb.prevPositions = desc.positions;
+    sb.velocities.resize(desc.positions.size(), {});
+    sb.invMasses = desc.invMasses;
+    sb.constraints = desc.constraints;
+    sb.gravityScale = desc.gravityScale;
+    sb.linearDamping = desc.linearDamping;
+    sb.solverIterations = desc.solverIterations;
+    if (!sb.positions.empty()) {
+        sb.aabbMin = sb.aabbMax = sb.positions[0];
+        for (const Vec3& p : sb.positions) {
+            sb.aabbMin = vmin(sb.aabbMin, p);
+            sb.aabbMax = vmax(sb.aabbMax, p);
+        }
+    }
+
+    uint32_t slot;
+    if (!freeSoftBodySlots_.empty()) {
+        slot = freeSoftBodySlots_.back();
+        freeSoftBodySlots_.pop_back();
+    } else {
+        slot = static_cast<uint32_t>(softBodySlots_.size());
+        softBodySlots_.push_back({});
+    }
+    uint32_t dense = static_cast<uint32_t>(softBodies_.size());
+    softBodies_.push_back(std::move(sb));
+    softBodyDenseToSlot_.push_back(slot);
+    softBodySlots_[slot] = {dense, softBodySlots_[slot].generation};
+    return SoftBodyId::make(slot, softBodySlots_[slot].generation);
+}
+
+SoftBody& World::softBody(SoftBodyId id) {
+    AccessGuard guard(*this, AccessKind::Query, "softBody");
+    uint32_t slot = id.slot();
+    if (slot >= softBodySlots_.size() ||
+        softBodySlots_[slot].generation != id.generation() ||
+        softBodySlots_[slot].dense == UINT32_MAX)
+        throw std::out_of_range("velox: invalid SoftBodyId");
+    return softBodies_[softBodySlots_[slot].dense];
+}
+
+const SoftBody& World::softBody(SoftBodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "softBody");
+    uint32_t slot = id.slot();
+    if (slot >= softBodySlots_.size() ||
+        softBodySlots_[slot].generation != id.generation() ||
+        softBodySlots_[slot].dense == UINT32_MAX)
+        throw std::out_of_range("velox: invalid SoftBodyId");
+    return softBodies_[softBodySlots_[slot].dense];
+}
+
+void World::removeSoftBody(SoftBodyId id) {
+    AccessGuard guard(*this, AccessKind::Mutation, "removeSoftBody");
+    uint32_t slot = id.slot();
+    if (slot >= softBodySlots_.size() ||
+        softBodySlots_[slot].generation != id.generation() ||
+        softBodySlots_[slot].dense == UINT32_MAX)
+        throw std::out_of_range("velox: invalid SoftBodyId");
+    uint32_t dense = softBodySlots_[slot].dense;
+    uint32_t last = static_cast<uint32_t>(softBodies_.size() - 1);
+    if (dense != last) {
+        softBodies_[dense] = std::move(softBodies_[last]);
+        uint32_t movedSlot = softBodyDenseToSlot_[last];
+        softBodyDenseToSlot_[dense] = movedSlot;
+        softBodySlots_[movedSlot].dense = dense;
+    }
+    softBodies_.pop_back();
+    softBodyDenseToSlot_.pop_back();
+    HandleSlot& hs = softBodySlots_[slot];
+    hs.dense = UINT32_MAX;
+    if (hs.generation != UINT32_MAX) {
+        ++hs.generation;
+        freeSoftBodySlots_.push_back(slot);
+    }
+}
+
+size_t World::softBodyCount() const {
+    AccessGuard guard(*this, AccessKind::Query, "softBodyCount");
+    return softBodies_.size();
+}
+
+bool World::isValid(SoftBodyId id) const {
+    AccessGuard guard(*this, AccessKind::Query, "isValid(SoftBodyId)");
+    uint32_t slot = id.slot();
+    return slot < softBodySlots_.size() &&
+           softBodySlots_[slot].generation == id.generation() &&
+           softBodySlots_[slot].dense != UINT32_MAX;
+}
+
 namespace {
 
 // Minimal column-major 3x3 for joint effective-mass solves.
@@ -4375,6 +4471,10 @@ void World::stepImpl(float dt) {
         pairKeys_.erase(std::unique(pairKeys_.begin(), pairKeys_.end()), pairKeys_.end());
         prevPairKeys_ = pairKeys_;
     }
+
+    // --- soft bodies (XPBD, after rigid-body solve) --------------------------
+    for (SoftBody& sb : softBodies_)
+        softbody_detail::stepSoftBody(sb, gravity, h, bodies_);
 
     // --- sleeping + persistent contacts for next frame ------------------------
     updateSleeping(dt);

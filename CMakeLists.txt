@@ -51,6 +51,7 @@ add_library(velox
     src/stable_api.cpp
     src/manifold.cpp
     src/sleep.cpp
+    src/softbody.cpp
 )
 if(WIN32 AND BUILD_SHARED_LIBS)
     # The C++ API is header-declared rather than individually annotated with
