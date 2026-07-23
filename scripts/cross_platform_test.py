@@ -176,7 +176,8 @@ def extract_trace(build_dir, verbose=False):
 def load_traces(trace_dir):
     """Load trace files from a directory.
 
-    Expected file naming: strict-trace-<os>.txt or trace-<platform_id>.txt
+    Expected file naming: strict-trace-<os>-<arch>.txt or
+    trace-<platform_id>.txt.
     Each file contains lines starting with VELOX_XPLATFORM_TRACE or
     VELOX_STRICT_TRACE followed by hex data.
     """

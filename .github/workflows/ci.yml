@@ -140,11 +140,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             executable=build/examples/Release/determinism_demo.exe
           fi
-          "$executable" --trace | grep '^VELOX_STRICT_TRACE' > strict-trace-${{ matrix.os }}.txt
+          "$executable" --trace | grep '^VELOX_STRICT_TRACE' > strict-trace-${{ matrix.os }}-${{ runner.arch }}.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: strict-trace-${{ matrix.os }}
-          path: strict-trace-${{ matrix.os }}.txt
+          name: strict-trace-${{ matrix.os }}-${{ runner.arch }}
+          path: strict-trace-${{ matrix.os }}-${{ runner.arch }}.txt
           if-no-files-found: error
 
   strict-parity:
@@ -211,11 +211,11 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             exe=build/tests/cross_platform/Release/test_determinism.exe
           fi
-          "$exe" | grep '^VELOX_XPLATFORM_TRACE' > xplatform-trace-${{ matrix.os }}.txt || true
+          "$exe" | grep '^VELOX_XPLATFORM_TRACE' > xplatform-trace-${{ matrix.os }}-${{ runner.arch }}.txt || true
       - uses: actions/upload-artifact@v4
         with:
-          name: xplatform-trace-${{ matrix.os }}
-          path: xplatform-trace-${{ matrix.os }}.txt
+          name: xplatform-trace-${{ matrix.os }}-${{ runner.arch }}
+          path: xplatform-trace-${{ matrix.os }}-${{ runner.arch }}.txt
           if-no-files-found: warn
 
   cross-platform-parity:

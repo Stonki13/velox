@@ -42,6 +42,10 @@ bitwise-identical simulation results across all supported platforms:
 | GCC/Clang | `-ffp-contract=off -fno-fast-math -fno-math-errno` |
 | NVCC | `--fmad=false` (disable FMA on GPU) |
 
+Strict mode also selects the scalar CPU reference path and one worker. This
+avoids architecture-specific SSE2/NEON reduction order while leaving SIMD
+enabled in normal relaxed builds.
+
 ### What Is Deterministic
 
 - Rigid body integration (position, orientation, velocity)

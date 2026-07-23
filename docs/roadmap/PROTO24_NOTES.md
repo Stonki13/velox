@@ -14,7 +14,9 @@ work.
   GCC/Clang. The CUDA compile option is also prepared with `--fmad=false`.
 - `World::setDeterminismMode(Strict)` is accepted only by a strict build. It
   recreates the backend as the portable CPU reference implementation and
-  forces sequential island solving.
+  forces sequential island solving and one worker. Strict builds also disable
+  host SIMD so SSE2 and NEON cannot introduce different reduction order at a
+  contact boundary. Relaxed builds retain SIMD acceleration.
 - CUDA strict mode is deliberately not advertised. Its graph-colored solver
   changes impulse order, so accepting it would create an unsupported
   bit-identical guarantee. Switching back to `Relaxed` restores the backend
@@ -37,7 +39,8 @@ starting, solving, and sleeping rather than a contact-free trajectory.
 
 `determinism_demo --trace` also records all tracked float fields after every
 frame into an explicitly serialized 1000-frame FNV trace. The local MSVC
-strict trace is `b7a7ef9fb436ad19`. CI uploads and compares this trace across
+strict trace after the scalar-reference change is `a94f3d6a7c279873`. CI
+uploads and compares this trace across
 Windows, Linux, macOS Intel, and macOS ARM once the workflow runs.
 
 ## Remaining Acceptance Work

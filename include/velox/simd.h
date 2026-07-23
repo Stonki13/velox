@@ -45,7 +45,16 @@
 #  endif
 #endif
 
-#define VELOX_SIMD_AVAILABLE (VELOX_SIMD_SSE2 || VELOX_SIMD_NEON)
+// Strict replay is a portability contract, not a throughput mode. The SSE2
+// and NEON reductions use different instruction sequences, so even with FMA
+// contraction disabled they can round differently at contact boundaries.
+// Keep strict builds on the common scalar evaluation order; relaxed builds
+// retain all host SIMD acceleration.
+#if defined(VELOX_STRICT_FLOATING_POINT) && VELOX_STRICT_FLOATING_POINT
+#  define VELOX_SIMD_AVAILABLE 0
+#else
+#  define VELOX_SIMD_AVAILABLE (VELOX_SIMD_SSE2 || VELOX_SIMD_NEON)
+#endif
 
 // GCC/Clang allow per-function ISA selection via target attributes,
 // enabling AVX2 code paths even when the translation unit targets SSE2.

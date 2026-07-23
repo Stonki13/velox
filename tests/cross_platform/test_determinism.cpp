@@ -17,6 +17,7 @@
 #include <velox/math.h>
 #include <velox/serialization.h>
 #include <velox/platform.h>
+#include <velox/simd.h>
 
 #include <cmath>
 #include <cstdint>
@@ -25,6 +26,11 @@
 #include <vector>
 
 using namespace velox;
+
+#if VELOX_STRICT_FLOATING_POINT
+static_assert(!VELOX_SIMD_AVAILABLE,
+              "strict replay must use the canonical scalar math path");
+#endif
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,6 +45,9 @@ static uint32_t floatBits(float f) {
 
 /// Build a deterministic test scene: a stack of boxes on a plane.
 static void buildStackScene(World& world, int boxCount, float spacing) {
+#if VELOX_STRICT_FLOATING_POINT
+    world.setDeterminismMode(DeterminismMode::Strict);
+#endif
     world.setGravity({0.0f, -9.81f, 0.0f});
     world.addStaticPlane({0.0f, 1.0f, 0.0f}, 0.0f);
 
@@ -104,6 +113,9 @@ TEST_SUITE("cross_platform.determinism") {
         // Serialize and deserialize into a fresh world.
         SerializedScene scene = serializeWorld(world);
         World restored(BackendType::Cpu);
+#if VELOX_STRICT_FLOATING_POINT
+        restored.setDeterminismMode(DeterminismMode::Strict);
+#endif
         deserializeWorld(restored, scene);
 
         // Continue both for another 120 frames — must remain bitwise equal.

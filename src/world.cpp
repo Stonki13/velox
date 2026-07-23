@@ -519,6 +519,11 @@ void World::setDeterminismMode(DeterminismMode mode) {
         determinismMode_ = DeterminismMode::Strict;
         islandSolvingMode_ = IslandSolvingMode::Sequential;
         resetBackend(BackendType::Cpu);
+        // Candidate generation and constraint solving must use the same
+        // scalar, ordered traversal on every host. The strict backend is a
+        // reproducibility reference, so it deliberately does not inherit an
+        // automatic worker count from the relaxed runtime.
+        backend_->setWorkerCount(1);
 #endif
         return;
     }
