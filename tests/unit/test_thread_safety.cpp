@@ -384,6 +384,7 @@ TEST_CASE("Queries do not deadlock against a stepping owner thread") {
     AtomicCounter<int> queriesCompleted;
     AtomicCounter<int> workersReady;
     AtomicCounter<int> queriesStarted;
+    AtomicCounter<int> firstQueriesCompleted;
 
     Joiner joiner;
     for (int t = 0; t < kQueryThreads; ++t) {
@@ -392,6 +393,7 @@ TEST_CASE("Queries do not deadlock against a stepping owner thread") {
             while (!beginQueries.load(std::memory_order_acquire)) {
                 Backoff::cpuRelax();
             }
+            bool firstQuery = true;
             while (!done.load(std::memory_order_acquire)) {
                 queriesStarted.increment();
                 // These calls overlap step() and must wait for it rather than
@@ -400,6 +402,10 @@ TEST_CASE("Queries do not deadlock against a stepping owner thread") {
                 world.overlapSphere({0.0f, 5.0f, 0.0f}, 100.0f, out);
                 world.rayCast({0.0f, 20.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, 100.0f);
                 queriesCompleted.increment();
+                if (firstQuery) {
+                    firstQuery = false;
+                    firstQueriesCompleted.increment();
+                }
             }
         });
     }
@@ -408,13 +414,21 @@ TEST_CASE("Queries do not deadlock against a stepping owner thread") {
     while (workersReady.load() != kQueryThreads) Backoff::cpuRelax();
     beginQueries.store(true, std::memory_order_release);
     while (queriesStarted.load() < kQueryThreads) Backoff::cpuRelax();
-    for (int s = 0; s < kSteps; ++s) {
+    // Release one step while every worker has an outstanding query, then
+    // require every worker to finish that query before a short owner-thread
+    // loop. This avoids treating a host scheduler delay as a deadlock while
+    // preserving actual step/query lock contention.
+    world.step(1.0f / 60.0f);
+    while (firstQueriesCompleted.load() < kQueryThreads) {
+        std::this_thread::yield();
+    }
+    for (int s = 1; s < kSteps; ++s) {
         world.step(1.0f / 60.0f);
     }
     done.store(true, std::memory_order_release);
     // Joiner destructor joins the workers here at scope end.
 
-    CHECK(queriesCompleted.load() > 0);
+    CHECK(queriesCompleted.load() >= kQueryThreads);
     CHECK(world.bodyCount() == 51); // 50 spheres + plane, none lost
 }
 
