@@ -1,11 +1,13 @@
 // Smoke + parity test for the cross-vendor Vulkan compute backend.
 // Runs the same scene on BackendType::Cpu and BackendType::Vulkan and
-// compares final state within a tight tolerance: the Vulkan backend's only
-// GPU stage (velocity integration) does the same arithmetic as the CPU
-// reference, so the two runs should agree to float rounding, not just
-// behaviorally. Skips (exit 0, message) when the library was built without
-// VELOX_ENABLE_VULKAN or no Vulkan driver/device is present, matching
-// cuda_recovery_demo's convention.
+// compares final state within a behavioral tolerance: the Vulkan backend
+// solves contacts in graph-colored order on the GPU while the CPU reference
+// solves sequentially (same per-contact math, different order — the same
+// deliberate trade the CUDA backend makes), so small trajectory divergence
+// in a contact pile is expected and bitwise agreement is not. Skips
+// (exit 0, message) when the library was built without VELOX_ENABLE_VULKAN
+// or no Vulkan driver/device is present, matching cuda_recovery_demo's
+// convention.
 #include <velox/velox.h>
 
 #include <cmath>
@@ -59,11 +61,10 @@ int main() {
             finite = finite && std::isfinite(b.position.x) && std::isfinite(b.velocity.x);
         }
 
-        // Integration is the only stage on the GPU and does identical math;
-        // remaining divergence is float contraction feeding a mildly chaotic
-        // contact pile. These bounds are far tighter than the cross-backend
-        // CUDA parity test's, reflecting the much smaller surface.
-        const bool ok = finite && maxPositionDelta < 0.02f && maxVelocityDelta < 0.1f;
+        // Same bounds philosophy as cuda_parity_demo: per-contact math is
+        // identical, solve order is not (colored vs sequential), so a
+        // settling pile diverges by solver-order chaos, not by error.
+        const bool ok = finite && maxPositionDelta < 0.05f && maxVelocityDelta < 0.25f;
         std::printf("vulkan_smoke: maxPosDelta=%.6f maxVelDelta=%.6f %s\n",
                     maxPositionDelta, maxVelocityDelta, ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;

@@ -17,16 +17,18 @@ for the full comparison; the headline gaps:
 - **No soft-body solver.** Not planned until real user demand exists.
 - **One vehicle model.** A single raycast vehicle vs. Jolt's wheeled/
   tracked/motorcycle controller family.
-- **Full GPU acceleration is NVIDIA-only; the cross-vendor path is
-  stage 1.** The CUDA backend (full on-device broad phase, narrow phase,
-  and graph-colored contact solve) requires an NVIDIA GPU. A cross-vendor
-  Vulkan compute backend (`BackendType::Vulkan`, NVIDIA/AMD/Intel) exists
-  but currently runs only velocity integration on the GPU, delegating
-  collision and solving to the CPU reference path — correct results on any
-  GPU vendor, but not yet a performance win over the CPU backend. On
-  non-NVIDIA hardware, compare Velox's CPU backend to Jolt's CPU backend,
-  not the CUDA numbers. Neither GPU backend is part of the strict bitwise
-  determinism guarantee; use `BackendType::Cpu` for lockstep replay.
+- **Full GPU acceleration is NVIDIA-only; the cross-vendor Vulkan backend
+  covers integration + contact solving.** The CUDA backend additionally
+  runs the broad and narrow phases on-device. The Vulkan backend
+  (`BackendType::Vulkan`, NVIDIA/AMD/Intel) runs velocity integration and
+  the graph-colored contact solve on the GPU, with collision detection on
+  the CPU — measured ~25% faster than the best CPU configuration on a
+  dense 8192-body contact scene, a wash at 2048 bodies, and slower on
+  small or joint-dominated scenes (per-step dispatch overhead; joints and
+  the `ConeBlockSolver`/`Adaptive` solver configurations delegate to the
+  CPU path). Its crossover point is therefore higher than CUDA's. Neither
+  GPU backend is part of the strict bitwise determinism guarantee; use
+  `BackendType::Cpu` for lockstep replay.
 - **CUDA has a crossover point.** Measured (see
   `PROTO_COMPETITIVE_NOTES.md`'s Phase 2 section): the CUDA backend wins
   clearly on dense dynamic-dynamic contact scenes at roughly 2000+ bodies.

@@ -104,21 +104,23 @@ if(VELOX_ENABLE_VULKAN)
     if(Vulkan_FOUND AND Vulkan_GLSLC_EXECUTABLE)
         set(velox_spv_dir ${CMAKE_CURRENT_BINARY_DIR}/generated)
         file(MAKE_DIRECTORY ${velox_spv_dir})
-        add_custom_command(
-            OUTPUT ${velox_spv_dir}/integrate_spv.h
-            COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O
-                    ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/integrate.comp
-                    -o ${velox_spv_dir}/integrate.spv
-            COMMAND ${CMAKE_COMMAND}
-                    -DINPUT=${velox_spv_dir}/integrate.spv
-                    -DOUTPUT=${velox_spv_dir}/integrate_spv.h
-                    -DSYMBOL=velox_integrate_spv
-                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/integrate.comp
-                    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
-            COMMENT "velox: compiling integrate.comp to embedded SPIR-V")
-        target_sources(velox PRIVATE src/backend_vulkan.cpp
-                       ${velox_spv_dir}/integrate_spv.h)
+        foreach(shader IN ITEMS integrate solve_contacts)
+            add_custom_command(
+                OUTPUT ${velox_spv_dir}/${shader}_spv.h
+                COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${shader}.comp
+                        -o ${velox_spv_dir}/${shader}.spv
+                COMMAND ${CMAKE_COMMAND}
+                        -DINPUT=${velox_spv_dir}/${shader}.spv
+                        -DOUTPUT=${velox_spv_dir}/${shader}_spv.h
+                        -DSYMBOL=velox_${shader}_spv
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/${shader}.comp
+                        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+                COMMENT "velox: compiling ${shader}.comp to embedded SPIR-V")
+            target_sources(velox PRIVATE ${velox_spv_dir}/${shader}_spv.h)
+        endforeach()
+        target_sources(velox PRIVATE src/backend_vulkan.cpp)
         target_include_directories(velox PRIVATE ${velox_spv_dir})
         target_link_libraries(velox PRIVATE Vulkan::Vulkan)
         set(VELOX_HAS_VULKAN 1)

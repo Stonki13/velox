@@ -113,7 +113,8 @@ int main(int argc, char** argv) {
     const Configuration configurations[] = {
         {velox::BackendType::Cpu, 1, "cpu-1"},
         {velox::BackendType::Cpu, 0, "cpu-auto"},
-        {velox::BackendType::Auto, 0, "auto"}};
+        {velox::BackendType::Auto, 0, "auto"},
+        {velox::BackendType::Vulkan, 0, "vulkan"}};
 
     for (int n : {512, 2048, 8192}) {
         std::printf("Scene A: %d-sphere rain\n", n);
