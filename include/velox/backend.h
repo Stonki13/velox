@@ -84,7 +84,11 @@ struct alignas(64) Contact {
 
 // Cpu is portable across supported Intel and AMD processor hosts. Cuda is an
 // NVIDIA-only accelerator backend; Auto falls back to Cpu when CUDA is absent.
-enum class BackendType { Auto, Cpu, Cuda };
+// Vulkan is a cross-vendor (NVIDIA/AMD/Intel) compute backend, explicit
+// opt-in: Auto never selects it (its stage-1 GPU coverage is integration
+// only; see backend_vulkan.cpp). Appended so existing enum values keep their
+// numeric identity for the C API and serialized configs.
+enum class BackendType { Auto, Cpu, Cuda, Vulkan };
 
 // Recoverable accelerator failures are reported separately from invalid scene
 // data and programming errors so World can retry the same frame on CPU.
@@ -168,6 +172,7 @@ public:
 };
 
 Backend* createCpuBackend();
-Backend* createCudaBackend(); // returns nullptr if unavailable (no build/device)
+Backend* createCudaBackend();   // returns nullptr if unavailable (no build/device)
+Backend* createVulkanBackend(); // returns nullptr if unavailable (no build/driver/device)
 
 } // namespace velox

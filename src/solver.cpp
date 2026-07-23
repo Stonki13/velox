@@ -685,4 +685,8 @@ Backend* createCpuBackend() { return new CpuBackend(); }
 Backend* createCudaBackend() { return nullptr; }
 #endif
 
+#if !VELOX_HAS_VULKAN
+Backend* createVulkanBackend() { return nullptr; }
+#endif
+
 } // namespace velox

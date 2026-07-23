@@ -17,6 +17,7 @@ static velox_JointId fromJointId(JointId id) { return id.value; }
 // World management
 velox_World* velox_World_Create(velox_BackendType backend) {
     BackendType b = backend == VELOX_BACKEND_CUDA ? BackendType::Cuda :
+                    backend == VELOX_BACKEND_VULKAN ? BackendType::Vulkan :
                     backend == VELOX_BACKEND_CPU ? BackendType::Cpu : BackendType::Auto;
     try {
         World* w = new World(b);

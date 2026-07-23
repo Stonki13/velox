@@ -329,7 +329,15 @@ World::AccessGuard::AccessGuard(const World& world, AccessKind kind,
 
 void World::resetBackend(BackendType type) {
     std::unique_ptr<Backend> next;
-    if (type != BackendType::Cpu) next.reset(createCudaBackend());
+    if (type == BackendType::Vulkan) {
+        next.reset(createVulkanBackend());
+        if (!next)
+            throw std::runtime_error("velox: Vulkan backend unavailable "
+                                     "(not built with VELOX_ENABLE_VULKAN, no "
+                                     "Vulkan driver, or no compute-capable device)");
+    } else if (type != BackendType::Cpu) {
+        next.reset(createCudaBackend());
+    }
     if (!next) {
         if (type == BackendType::Cuda)
             throw std::runtime_error("velox: CUDA backend unavailable "

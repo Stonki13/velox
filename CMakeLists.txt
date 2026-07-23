@@ -22,6 +22,8 @@ option(VELOX_BUILD_BENCHMARKS "Build the performance benchmark suite" ON)
 option(VELOX_BUILD_SANDBOX "Build the optional GLFW/Vulkan interactive sandbox" OFF)
 option(VELOX_BUILD_DIFFTEST "Build differential tests against Jolt Physics" OFF)
 option(VELOX_ENABLE_CUDA "Build the optional NVIDIA CUDA GPU backend if a toolkit is found" ON)
+option(VELOX_ENABLE_VULKAN
+       "Build the optional cross-vendor Vulkan compute backend if an SDK is found" ON)
 set(VELOX_CUDA_ARCHITECTURES "native" CACHE STRING
     "CUDA architectures passed to CMake when the CUDA backend is enabled")
 set(VELOX_CUDA_FAST_COMPILE "min" CACHE STRING
@@ -31,6 +33,7 @@ option(VELOX_STRICT_FLOATING_POINT
        "Build the CPU reference path with reproducible floating-point semantics" OFF)
 set(VELOX_PACKAGE_NEEDS_CUDA OFF)
 set(VELOX_HAS_CUDA 0)
+set(VELOX_HAS_VULKAN 0)
 
 add_library(velox
     src/world.cpp
@@ -91,10 +94,45 @@ if(VELOX_ENABLE_CUDA)
     endif()
 endif()
 
+# Optional cross-vendor Vulkan compute backend (NVIDIA/AMD/Intel). Requires a
+# Vulkan SDK at build time (headers, loader, and glslc for GLSL -> SPIR-V);
+# consumers without one build CPU/CUDA-only exactly as before. The integrate
+# shader is compiled and embedded at build time so the installed library has
+# no runtime file dependency.
+if(VELOX_ENABLE_VULKAN)
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND AND Vulkan_GLSLC_EXECUTABLE)
+        set(velox_spv_dir ${CMAKE_CURRENT_BINARY_DIR}/generated)
+        file(MAKE_DIRECTORY ${velox_spv_dir})
+        add_custom_command(
+            OUTPUT ${velox_spv_dir}/integrate_spv.h
+            COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O
+                    ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/integrate.comp
+                    -o ${velox_spv_dir}/integrate.spv
+            COMMAND ${CMAKE_COMMAND}
+                    -DINPUT=${velox_spv_dir}/integrate.spv
+                    -DOUTPUT=${velox_spv_dir}/integrate_spv.h
+                    -DSYMBOL=velox_integrate_spv
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/integrate.comp
+                    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spirv.cmake
+            COMMENT "velox: compiling integrate.comp to embedded SPIR-V")
+        target_sources(velox PRIVATE src/backend_vulkan.cpp
+                       ${velox_spv_dir}/integrate_spv.h)
+        target_include_directories(velox PRIVATE ${velox_spv_dir})
+        target_link_libraries(velox PRIVATE Vulkan::Vulkan)
+        set(VELOX_HAS_VULKAN 1)
+        message(STATUS "velox: Vulkan compute backend enabled")
+    else()
+        message(STATUS "velox: no Vulkan SDK with glslc found, Vulkan backend disabled")
+    endif()
+endif()
+
 # Consumers and implementation files must see an explicit value in CPU-only
 # builds too. Undefined preprocessor symbols silently evaluate to zero and can
 # conceal an accidental CUDA-only dependency.
 target_compile_definitions(velox PUBLIC VELOX_HAS_CUDA=${VELOX_HAS_CUDA})
+target_compile_definitions(velox PUBLIC VELOX_HAS_VULKAN=${VELOX_HAS_VULKAN})
 
 # Symbol export/import for shared builds (see include/velox/version.h). The
 # library itself is compiled with VELOX_BUILDING_SHARED so its public symbols

@@ -587,3 +587,49 @@ reference doing this but didn't point anywhere). Added:
 - `ctest --test-dir build_phase1 -C Release`: **55/55 CTest suites pass
   (100%)**, confirming the change is inert with respect to the build (as
   expected for a documentation-only phase).
+
+## Post-plan: cross-vendor Vulkan compute backend (stage 1)
+
+User-requested follow-up after the five phases: GPU support beyond
+NVIDIA-only CUDA. Added `BackendType::Vulkan` — a Vulkan 1.1 compute
+backend that runs on any vendor's driver (NVIDIA, AMD, Intel; macOS via
+MoltenVK when a loader is present).
+
+Deliberate stage-1 scope, stated plainly rather than oversold:
+
+- **On the GPU**: velocity integration (`src/shaders/integrate.comp`,
+  GLSL → SPIR-V compiled by `glslc` at build time and embedded via
+  `cmake/embed_spirv.cmake`, so the installed library has no runtime
+  shader-file dependency). The shader mirrors `integrateKernel` in
+  `backend_cuda.cu` exactly (gravity/force/torque application, world-space
+  inverse-inertia multiply through the `orientation × inertiaOrientation`
+  frame, implicit damping), with body eligibility (dynamic/locked/asleep/
+  rotation-locked) resolved on the host into two flag bits.
+- **Delegated to the owned CPU backend**: broad phase (host AABB tree via
+  `wantsHostPairs`), narrow phase, contact/joint solve. Correct by
+  construction on every vendor; not yet a performance win over
+  `BackendType::Cpu`. Moving the graph-colored contact solve on-device
+  (the CUDA backend's actual profit center) is the natural stage 2 and
+  needs no further interface changes.
+- **Graceful degradation**: builds without a Vulkan SDK skip the backend
+  (`VELOX_HAS_VULKAN=0`, same pattern as CUDA); at runtime, no
+  driver/device → `World(BackendType::Vulkan)` throws with a clear
+  message; a mid-run allocation failure falls back to CPU integration for
+  that call. `BackendType::Auto` never selects Vulkan in stage 1.
+- **API stability**: enum value appended (`Vulkan = 3` implicitly,
+  `VELOX_BACKEND_VULKAN = 3` in the C API), so existing numeric values
+  are unchanged.
+
+Evidence (Windows 11, RTX 5080 driving the Vulkan path — the same binary
+path an AMD/Intel GPU would take; no NVIDIA-specific API involved):
+
+- Configure detects the SDK: `velox: Vulkan compute backend enabled`
+  (Vulkan SDK 1.4.341, glslc).
+- `examples/vulkan_smoke.cpp` (CTest `velox.vulkan_smoke`): 20-box
+  contact pile, 120 frames, CPU vs Vulkan — `maxPosDelta=0.007372`,
+  `maxVelDelta=0.000000`, PASS. Skips cleanly (exit 0) when the backend
+  is unavailable, matching `cuda_recovery_demo`'s convention.
+- Full CPU-only+Vulkan suite: **56/56 CTest suites pass (100%)**.
+- Like CUDA, the Vulkan backend is documented as outside the strict
+  bitwise determinism guarantee (GPU float contraction differs from the
+  CPU reference); `docs/known-limitations.md` updated accordingly.

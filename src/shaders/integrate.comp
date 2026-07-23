@@ -1,0 +1,70 @@
+#version 450
+// Velocity integration for the Vulkan compute backend (backend_vulkan.cpp).
+// Mirrors integrateKernel in backend_cuda.cu / CpuBackend::integrate: gravity
+// and accumulated force/torque are applied to velocity, then implicit
+// damping. Eligibility (dynamic, not locked, not asleep, rotation lock) is
+// resolved on the host into two flag bits so this shader never needs the full
+// Body struct or its enums.
+layout(local_size_x = 256) in;
+
+struct GpuBody {
+    vec4 velocity_invMass;            // xyz velocity, w solver inverse mass
+    vec4 angularVelocity_gravityScale; // xyz angular velocity, w gravity scale
+    vec4 force_linearDamping;          // xyz force, w linear damping
+    vec4 torque_angularDamping;        // xyz torque, w angular damping
+    vec4 invInertia_flags;             // xyz inverse inertia diagonal, w flag bits
+    vec4 orientation;                  // body orientation quaternion (xyzw)
+    vec4 inertiaOrientation;           // principal-inertia frame quaternion
+};
+
+layout(std430, binding = 0) buffer Bodies { GpuBody bodies[]; };
+
+layout(push_constant) uniform Push {
+    vec4 gravity_dt; // xyz gravity, w dt
+    uint count;
+} push;
+
+// bit 0: body integrates at all (dynamic, not locked, awake)
+// bit 1: torque contributes to angular velocity (rotation not locked)
+const uint kIntegrate = 1u;
+const uint kTorque = 2u;
+
+vec3 quatRotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+vec3 quatRotateInv(vec4 q, vec3 v) {
+    return quatRotate(vec4(-q.xyz, q.w), v);
+}
+
+vec4 quatMul(vec4 a, vec4 b) {
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count) return;
+    uint flags = floatBitsToUint(bodies[i].invInertia_flags.w);
+    if ((flags & kIntegrate) == 0u) return;
+
+    float dt = push.gravity_dt.w;
+    vec3 v = bodies[i].velocity_invMass.xyz;
+    vec3 w = bodies[i].angularVelocity_gravityScale.xyz;
+
+    v += (push.gravity_dt.xyz * bodies[i].angularVelocity_gravityScale.w +
+          bodies[i].force_linearDamping.xyz * bodies[i].velocity_invMass.w) * dt;
+    if ((flags & kTorque) != 0u) {
+        // World-space inverse-inertia multiply: R (I^-1_body (R^T torque)),
+        // with R = orientation * inertiaOrientation (Body::invInertiaMul).
+        vec4 frame = quatMul(bodies[i].orientation, bodies[i].inertiaOrientation);
+        vec3 local = quatRotateInv(frame, bodies[i].torque_angularDamping.xyz);
+        w += quatRotate(frame, local * bodies[i].invInertia_flags.xyz) * dt;
+    }
+    v *= 1.0 / (1.0 + bodies[i].force_linearDamping.w * dt);
+    w *= 1.0 / (1.0 + bodies[i].torque_angularDamping.w * dt);
+
+    bodies[i].velocity_invMass.xyz = v;
+    bodies[i].angularVelocity_gravityScale.xyz = w;
+}
