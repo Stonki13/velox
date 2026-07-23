@@ -19,8 +19,11 @@ for the full comparison; the headline gaps:
   (planes, spheres, boxes). No self-collision, no tetrahedral FEM, no
   coupling back into the rigid-body solver (soft bodies do not push rigid
   bodies). See `include/velox/softbody.h`.
-- **One vehicle model.** A single raycast vehicle vs. Jolt's wheeled/
-  tracked/motorcycle controller family.
+- **One vehicle model (extended).** A raycast vehicle with suspension,
+  anti-roll bars, and a configurable differential (open/limited-slip/
+  locked). Still a single model vs. Jolt's wheeled/tracked/motorcycle
+  controller family — no tracked-vehicle or motorcycle-specific
+  dynamics.
 - **Full GPU acceleration is NVIDIA-only; the cross-vendor Vulkan backend
   covers integration + contact solving.** The CUDA backend additionally
   runs the broad and narrow phases on-device. The Vulkan backend

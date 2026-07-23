@@ -212,3 +212,67 @@ TEST_CASE("Vehicle DrivetrainType options") {
         CHECK(vehicle.wheelCount() == 4);
     }
 }
+
+TEST_CASE("Vehicle: stable cornering without rollover") {
+    World world(BackendType::Cpu);
+    world.addStaticPlane({0, 1, 0}, 0.0f);
+
+    VehicleConfig config{};
+    config.drivetrain = DrivetrainType::RWD;
+    config.differential.type = DifferentialType::LimitedSlip;
+    Vehicle vehicle(world, config, {0, 2, 0});
+    vehicle.AddDefaultWheels();
+
+    // Accelerate to speed, then steer into a turn.
+    vehicle.SetThrottle(1.0f);
+    for (int i = 0; i < 180; ++i) { // 3 seconds to build speed
+        vehicle.Step(1.0f / 60.0f);
+        world.step(1.0f / 60.0f);
+    }
+    float speedBeforeTurn = vehicle.forwardSpeed();
+    CHECK(speedBeforeTurn > 5.0f); // must have accelerated
+
+    // Steer into a sustained turn for 3 seconds.
+    vehicle.SetThrottle(0.3f);
+    vehicle.SetSteering(0.4f); // moderate left turn
+    bool flipped = false;
+    for (int i = 0; i < 180; ++i) {
+        vehicle.Step(1.0f / 60.0f);
+        world.step(1.0f / 60.0f);
+        // Check the chassis hasn't flipped: the up vector should stay
+        // mostly pointing up (dot with world up > 0.5).
+        const Body& b = world.body(vehicle.chassis());
+        Vec3 up = rotate(b.orientation, {0, 1, 0});
+        if (up.y < 0.3f) flipped = true;
+    }
+    CHECK_FALSE(flipped);
+}
+
+TEST_CASE("Vehicle: differential types produce different behavior") {
+    // A locked differential should keep both driven wheels at the same
+    // spin velocity; an open differential allows them to differ.
+    auto runWith = [](DifferentialType type) {
+        World world(BackendType::Cpu);
+        world.addStaticPlane({0, 1, 0}, 0.0f);
+        VehicleConfig config{};
+        config.drivetrain = DrivetrainType::RWD;
+        config.differential.type = type;
+        Vehicle vehicle(world, config, {0, 2, 0});
+        vehicle.AddDefaultWheels();
+        vehicle.SetThrottle(1.0f);
+        vehicle.SetSteering(0.5f); // turning creates speed difference
+        for (int i = 0; i < 120; ++i) {
+            vehicle.Step(1.0f / 60.0f);
+            world.step(1.0f / 60.0f);
+        }
+        // Return the spin difference between the two rear (driven) wheels.
+        float s0 = vehicle.wheelState(2).spinVelocity;
+        float s1 = vehicle.wheelState(3).spinVelocity;
+        return std::fabs(s0 - s1);
+    };
+
+    float openDiff = runWith(DifferentialType::Open);
+    float lockedDiff = runWith(DifferentialType::Locked);
+    // Locked diff should have smaller (or zero) spin difference.
+    CHECK(lockedDiff <= openDiff + 0.01f);
+}

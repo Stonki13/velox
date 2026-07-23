@@ -12,6 +12,19 @@ namespace velox {
 
 enum class DrivetrainType : uint8_t { RWD, FWD, AWD };
 
+/// Differential model for torque distribution between driven wheels on an axle.
+enum class DifferentialType : uint8_t {
+    Open,        ///< Equal torque to both wheels; slipping wheel spins freely.
+    LimitedSlip, ///< Torque-bias differential; redirects torque to the grippier wheel.
+    Locked       ///< Both wheels forced to the same spin velocity.
+};
+
+struct DifferentialConfig {
+    DifferentialType type = DifferentialType::Open;
+    float biasRatio = 3.0f;      ///< LSD: max torque bias toward the grippier wheel.
+    float preloadTorque = 50.0f; ///< LSD: minimum torque transfer (N·m) before bias kicks in.
+};
+
 struct VehicleConfig {
     float chassisMass = 1500.0f;
     Vec3 chassisHalfExtents{1.0f, 0.5f, 2.2f}; // x width, y height, z length
@@ -23,6 +36,7 @@ struct VehicleConfig {
     float finalDriveRatio = 3.5f;
     float shiftUpRPM = 7500.0f;
     float shiftDownRPM = 2500.0f;
+    DifferentialConfig differential;   ///< Torque distribution between driven wheels.
     bool enableAntiRoll = true;
     float antiRollStiffness = 8000.0f; // N per meter of compression difference
 

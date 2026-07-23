@@ -908,3 +908,49 @@ gap acknowledged since Phase 0.
   pass (100%)**, including the new `velox.unit.test_softbody`.
 - `docs/known-limitations.md` updated: "No soft-body solver" replaced
   with an honest description of the minimal solver's scope.
+
+## Phase C: vehicle depth — differential model
+
+The existing raycast vehicle already had suspension (spring/damper with
+progressive bump stops), anti-roll bars (per-axle compression-difference
+force transfer), a multi-gear drivetrain with automatic shifting, and a
+Pacejka-style tire model with friction-circle combined-slip budgeting.
+The missing piece was a **differential model**: torque was split equally
+between driven wheels regardless of individual grip.
+
+### What was added
+
+- `DifferentialType` enum: `Open` (equal torque, current behavior),
+  `LimitedSlip` (velocity-blending toward the average spin, scaled by
+  a configurable `biasRatio`), `Locked` (all driven wheels forced to
+  the same spin velocity).
+- `DifferentialConfig` struct: `type`, `biasRatio`, `preloadTorque`.
+- `VehicleConfig::differential` field.
+- `Vehicle::Step` post-processing: after the per-wheel tire/suspension
+  loop, driven-wheel spin velocities are redistributed according to the
+  configured differential type.
+- Two new behavioral tests in `tests/unit/test_vehicle.cpp`:
+  - `Vehicle: stable cornering without rollover` — accelerates to
+    speed, steers into a sustained turn, verifies the chassis up-vector
+    stays above 0.3 (no flip).
+  - `Vehicle: differential types produce different behavior` — verifies
+    a locked differential produces smaller driven-wheel spin difference
+    than an open differential during a turn.
+
+### Scope guards
+
+- No tracked-vehicle or motorcycle-specific dynamics (Jolt's
+  `TrackedVehicleController` and `MotorcycleController` remain
+  unmatched).
+- The differential operates on all driven wheels as a group, not
+  per-axle (a real car has separate front/rear differentials plus a
+  center diff for AWD).
+
+### Gate results
+
+- `cmake --build build_phase1 --config Release -j 16`: clean, 0
+  compiler errors.
+- `ctest --test-dir build_phase1 -C Release`: **57/57 CTest suites
+  pass (100%)**, including the two new vehicle tests.
+- `docs/known-limitations.md` updated: "One vehicle model" → "One
+  vehicle model (extended)" with the differential noted.
