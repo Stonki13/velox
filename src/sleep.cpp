@@ -194,8 +194,16 @@ void SleepManager::update(std::vector<Body>& bodies,
 
     for (uint32_t i = 0; i < n; ++i) {
         Body& b = bodies[i];
-        if (!b.isDynamic() || velox::isFullyAsleep(b.asleep) || !b.enableSleep) continue;
+        if (!b.isDynamic() || velox::isFullyAsleep(b.asleep)) continue;
         uint32_t root = find(i);
+        if (!b.enableSleep) {
+            // A non-sleepable dynamic body forces its entire island awake:
+            // reset the island timer so connected sleepable bodies cannot
+            // transition while this body is still part of the island.
+            islandTimer[root] = 0.0f;
+            ++islandBodyCount[root];
+            continue;
+        }
         if (b.sleepTimer < islandTimer[root]) islandTimer[root] = b.sleepTimer;
         float motion = lengthSq(b.velocity) + lengthSq(b.angularVelocity);
         if (motion > islandMaxMotion[root]) islandMaxMotion[root] = motion;
@@ -271,7 +279,19 @@ void SleepManager::update(std::vector<Body>& bodies,
     }
 
     // Build island list from roots that have dynamic bodies.
-    // We iterate roots and aggregate.
+    // Single-pass aggregation: accumulate state flags per root, then build
+    // islands from the accumulated data (O(n) instead of the previous O(n²)).
+    std::vector<uint8_t> rootHasAwake(n, 0), rootHasDrowsy(n, 0);
+    std::vector<uint32_t> rootTotalBodies(n, 0);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!bodies[i].isDynamic()) continue;
+        uint32_t root = find(i);
+        ++rootTotalBodies[root];
+        SleepState s = sleepStateFromByte(bodies[i].asleep);
+        if (s == SleepState::Awake) rootHasAwake[root] = 1;
+        else if (s == SleepState::Drowsy) rootHasDrowsy[root] = 1;
+    }
+
     std::vector<uint8_t> rootSeen(n, 0);
     for (uint32_t i = 0; i < n; ++i) {
         const Body& b = bodies[i];
@@ -282,26 +302,12 @@ void SleepManager::update(std::vector<Body>& bodies,
 
         SleepIsland island;
         island.root = root;
-        island.bodyCount = islandBodyCount[root];
+        island.bodyCount = rootTotalBodies[root];
         island.minSleepTimer = islandTimer[root];
         island.maxMotion = islandMaxMotion[root];
 
-        // Determine aggregate island state:
-        // If any member is awake → island is awake.
-        // If all members are asleep → island is asleep.
-        // Otherwise → drowsy.
-        bool anyAwake = false, anyDrowsy = false, anyAsleep = false;
-        for (uint32_t j = 0; j < n; ++j) {
-            if (!bodies[j].isDynamic()) continue;
-            if (find(j) != root) continue;
-            SleepState s = sleepStateFromByte(bodies[j].asleep);
-            if (s == SleepState::Awake) anyAwake = true;
-            else if (s == SleepState::Drowsy) anyDrowsy = true;
-            else anyAsleep = true;
-        }
-
-        if (anyAwake) island.state = SleepState::Awake;
-        else if (anyDrowsy) island.state = SleepState::Drowsy;
+        if (rootHasAwake[root]) island.state = SleepState::Awake;
+        else if (rootHasDrowsy[root]) island.state = SleepState::Drowsy;
         else island.state = SleepState::Asleep;
 
         ++stats_.islandCount;

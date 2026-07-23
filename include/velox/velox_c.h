@@ -48,9 +48,10 @@ typedef struct { float x, y, z, w; } velox_Quat;
 
 /** @brief Solver backend selection. */
 typedef enum {
-    VELOX_BACKEND_AUTO = 0, ///< CUDA when available, otherwise CPU.
-    VELOX_BACKEND_CPU = 1,  ///< Portable CPU reference backend.
-    VELOX_BACKEND_CUDA = 2  ///< NVIDIA CUDA backend (throws if unavailable).
+    VELOX_BACKEND_AUTO = 0,  ///< CUDA when available, otherwise CPU.
+    VELOX_BACKEND_CPU = 1,   ///< Portable CPU reference backend.
+    VELOX_BACKEND_CUDA = 2,  ///< NVIDIA CUDA backend (creation fails if unavailable).
+    VELOX_BACKEND_VULKAN = 3 ///< Cross-vendor Vulkan compute backend (creation fails if unavailable).
 } velox_BackendType;
 
 /** @brief Collider primitive family. */

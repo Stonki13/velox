@@ -1,0 +1,69 @@
+#version 450
+// Position/orientation integration for the fused Vulkan substep loop
+// (VulkanBackend::advanceSubsteps). Ports Body::advanceTransform's ISOTROPIC
+// path only (position advance + the simple quaternion exponential-map
+// orientation update): advanceSubsteps on the host side rejects any body
+// with anisotropic inverse inertia before ever dispatching this shader, so
+// the iterative gyroscopic branch (Body::advanceOrientation's anisotropic
+// case) never needs to run here -- every dynamic body this shader sees has
+// invInertia.x == invInertia.y == invInertia.z (spheres, cubes, and any
+// symmetric shape), matching the CPU's own "else" branch exactly.
+layout(local_size_x = 256) in;
+
+struct GpuBody {
+    vec4 velocity_invMass;
+    vec4 angularVelocity_gravityScale;
+    vec4 force_linearDamping;
+    vec4 torque_angularDamping;
+    vec4 invInertia_flags;
+    vec4 orientation;
+    vec4 inertiaOrientation;
+    vec4 position;
+    vec4 shapeData;
+    vec4 material;
+    vec4 frictionScale_reach;
+};
+
+layout(std430, binding = 0) buffer Bodies { GpuBody bodies[]; };
+
+layout(push_constant) uniform Push {
+    float dt;
+    uint count;
+} push;
+
+// bit 7: eligible for transform integration (!isStatic() && !isLocked() &&
+// !asleep) -- distinct from bit 0 (velocity-integration eligibility), since
+// a kinematic body advances its transform from an externally-set velocity
+// without ever being gravity/force-integrated.
+const uint kFlagTransformIntegrate = 128u;
+const uint kFlagRotationLocked = 16384u;
+
+vec4 quatMul(vec4 a, vec4 b) {
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+// velox::integrate(q, omega, dt): the quaternion exponential-map step.
+vec4 integrateQuat(vec4 q, vec3 omega, float dt) {
+    vec4 dq = quatMul(vec4(omega * 0.5 * dt, 0.0), q);
+    vec4 next = q + dq;
+    return next / length(next);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count) return;
+    uint flags = floatBitsToUint(bodies[i].invInertia_flags.w);
+    if ((flags & kFlagTransformIntegrate) == 0u) return;
+
+    vec3 velocity = bodies[i].velocity_invMass.xyz;
+    vec3 position = bodies[i].position.xyz + velocity * push.dt;
+    bodies[i].position.xyz = position;
+
+    if ((flags & kFlagRotationLocked) != 0u) {
+        bodies[i].angularVelocity_gravityScale.xyz = vec3(0.0);
+    } else {
+        vec3 omega = bodies[i].angularVelocity_gravityScale.xyz;
+        bodies[i].orientation = integrateQuat(bodies[i].orientation, omega, push.dt);
+    }
+}

@@ -225,6 +225,29 @@ void Vehicle::Step(float dt) {
         if (wheel.driven) drivenSpinSum += std::fabs(state.spinVelocity);
     }
 
+    // Differential: redistribute spin among driven wheels.
+    if (drivenCount >= 2 && config_.differential.type != DifferentialType::Open) {
+        // Collect driven wheel indices and their spin velocities.
+        std::vector<size_t> drivenIdx;
+        float spinSum = 0.0f;
+        for (size_t i = 0; i < wheels_.size(); ++i)
+            if (wheels_[i].driven) { drivenIdx.push_back(i); spinSum += states_[i].spinVelocity; }
+        float avgSpin = spinSum / static_cast<float>(drivenCount);
+
+        if (config_.differential.type == DifferentialType::Locked) {
+            for (size_t idx : drivenIdx)
+                states_[idx].spinVelocity = avgSpin;
+        } else { // LimitedSlip
+            // Blend each driven wheel's spin toward the average. The bias
+            // ratio controls how aggressively the diff locks up: higher
+            // values transfer more torque to the grippier wheel.
+            float blend = std::min(1.0f, config_.differential.biasRatio * dt);
+            for (size_t idx : drivenIdx)
+                states_[idx].spinVelocity +=
+                    (avgSpin - states_[idx].spinVelocity) * blend;
+        }
+    }
+
     // Anti-roll bars: per axle pair (wheels are added in left/right pairs),
     // transfer force from the compressed side to the extended side.
     if (config_.enableAntiRoll) {

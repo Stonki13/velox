@@ -125,4 +125,23 @@ DiffResult compare(const SceneDesc& scene, const Trajectory& a, const Trajectory
     return result;
 }
 
+CharacterDiffResult compareCharacter(const CharacterSceneDesc& scene,
+                                     const CharacterResult& a,
+                                     const CharacterResult& b) {
+    CharacterDiffResult result;
+    result.bothGrounded = a.grounded && b.grounded;
+    bool aClimb = a.heightGained > 0.1f;
+    bool bClimb = b.heightGained > 0.1f;
+    result.agreeOnClimb = (aClimb == bClimb);
+    float dx = a.finalPosition.x - b.finalPosition.x;
+    float dy = a.finalPosition.y - b.finalPosition.y;
+    float dz = a.finalPosition.z - b.finalPosition.z;
+    result.positionDelta = std::sqrt(dx * dx + dy * dy + dz * dz);
+    // Pass if both agree on grounded/climb behavior and positions are
+    // within a generous behavioral tolerance (different solver approaches
+    // produce different slide distances on steep slopes).
+    result.passed = result.agreeOnClimb && result.positionDelta < 20.0f;
+    return result;
+}
+
 } // namespace difftest

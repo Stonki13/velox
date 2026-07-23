@@ -5,6 +5,7 @@
 #include "memory_pool.h"
 #include "queries.h"
 #include "sleep.h"
+#include "softbody.h"
 #include "solver.h"
 #include "task_system.h"
 #include "thread_safety.h"
@@ -565,6 +566,16 @@ public:
     StepStats lastStepStatsCopy() const;             ///< Thread-safe copy of timing stats.
     /// @}
 
+    /// @name Soft bodies
+    /// @{
+    SoftBodyId addSoftBody(const SoftBodyDesc& desc);
+    SoftBody& softBody(SoftBodyId id);
+    const SoftBody& softBody(SoftBodyId id) const;
+    void removeSoftBody(SoftBodyId id);
+    size_t softBodyCount() const;
+    bool isValid(SoftBodyId id) const;
+    /// @}
+
     /// @name Memory pools
     /// The world pre-reserves body/contact/joint capacity and routes scratch
     /// allocations through pooled allocators so a running simulation does not
@@ -922,6 +933,10 @@ private:
     mutable std::unique_ptr<BroadPhaseData> broadPhase_;
     std::unique_ptr<Backend> backend_;
     SleepManager sleepManager_; ///< Island-based sleep system with gradual sleep.
+    std::vector<SoftBody> softBodies_;
+    std::vector<HandleSlot> softBodySlots_;
+    std::vector<uint32_t> softBodyDenseToSlot_;
+    std::vector<uint32_t> freeSoftBodySlots_;
     // Reentrant world lock serializing every supported entry point under the
     // Relaxed/Concurrent thread-safety policies. Marked as a Clang Thread
     // Safety Analysis capability so the members it protects can be annotated.

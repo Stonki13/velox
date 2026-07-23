@@ -4,6 +4,7 @@
 // small or unsupported joint workloads retain the lower-latency CPU path.
 #include "narrowphase.h"
 #include "joint_solver.h"
+#include "velox/sleep.h"
 #include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
@@ -80,7 +81,7 @@ __global__ void integrateKernel(Body* bodies, int n, Vec3 gravity, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (!b.isDynamic() || b.isLocked() || b.asleep) return;
+    if (!b.isDynamic() || b.isLocked() || isFullyAsleep(b.asleep)) return;
     b.velocity += (gravity * b.gravityScale + b.force * b.solverInvMass()) * dt;
     b.angularVelocity += b.invInertiaMul(b.torque) * dt;
     b.velocity *= 1.0f / (1.0f + b.linearDamping * dt);
@@ -91,7 +92,7 @@ __global__ void integrateTransformsKernel(Body* bodies, int n, float dt) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     Body& b = bodies[i];
-    if (b.isStatic() || b.isLocked() || b.asleep) return;
+    if (b.isStatic() || b.isLocked() || isFullyAsleep(b.asleep)) return;
     b.advanceTransform(dt);
 }
 
@@ -205,7 +206,8 @@ __global__ void gridPairsKernel(const Body* bodies, const Aabb* aabbs,
                         continue;
                     const Body& a = bodies[rawI];
                     const Body& b = bodies[rawJ];
-                    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep))
+                    if ((a.isStatic() || isFullyAsleep(a.asleep)) &&
+                        (b.isStatic() || isFullyAsleep(b.asleep)))
                         continue;
                     if (!a.canCollideWith(b)) continue;
                     int slot = atomicAdd(pairCount, 1);
@@ -238,7 +240,8 @@ __global__ void oversizePairsKernel(const Body* bodies, const Aabb* aabbs,
     if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, boxJ.lo, boxJ.hi)) return;
     const Body& a = bodies[i];
     const Body& b = bodies[j];
-    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
+    if ((a.isStatic() || isFullyAsleep(a.asleep)) &&
+        (b.isStatic() || isFullyAsleep(b.asleep))) return;
     if (!a.canCollideWith(b)) return;
     BodyIndex loI = i < j ? (BodyIndex)i : (BodyIndex)j;
     BodyIndex hiI = i < j ? (BodyIndex)j : (BodyIndex)i;
@@ -284,7 +287,8 @@ __global__ void allPairsContactsKernel(const Body* bodies, const Aabb* aabbs,
     if (!aabbOverlap(aabbs[i].lo, aabbs[i].hi, aabbs[j].lo, aabbs[j].hi)) return;
     const Body& a = bodies[i];
     const Body& b = bodies[j];
-    if ((a.isStatic() || a.asleep) && (b.isStatic() || b.asleep)) return;
+    if ((a.isStatic() || isFullyAsleep(a.asleep)) &&
+        (b.isStatic() || isFullyAsleep(b.asleep))) return;
     if (!a.canCollideWith(b)) return;
     Contact buf[kMaxContactsPerPair];
     int count = collidePair(a, b, (BodyIndex)i, (BodyIndex)j, soup, dt,
@@ -330,7 +334,7 @@ __global__ void solveJointColorKernel(Body* bodies, Joint* joints,
     if (joint.broken) return;
     Body& a = bodies[joint.a];
     Body& b = bodies[joint.b];
-    if (a.asleep && b.asleep) return;
+    if (isFullyAsleep(a.asleep) && isFullyAsleep(b.asleep)) return;
     joint_solver::solve(joint, a, b, dt);
 }
 
@@ -713,7 +717,14 @@ public:
         if (bodies.empty()) return true;
 
         int n = static_cast<int>(bodies.size());
-        uploadBodies(bodies);
+        // solveVelocities only touches dBodies_ when there are contacts to
+        // solve (it early-returns before any transfer when contacts.empty());
+        // when it did run, the bodies it just downloaded into the host
+        // vector are byte-identical to what it left on the device, so
+        // re-uploading here would push those same bytes back across the bus
+        // for nothing. Only re-sync when solveVelocities skipped the device
+        // entirely and the device copy may be stale relative to `bodies`.
+        if (!hasContacts) uploadBodies(bodies);
         prepareJoints(bodies, joints, dt);
         if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
         for (int s = 0; s < substeps; ++s) {
@@ -880,7 +891,10 @@ private:
     }
 
     void uploadMeshes(const MeshSoup& m) {
-        // Static geometry: upload once, re-upload only if it grew.
+        // Static geometry: upload once, re-upload only if array sizes change.
+        // If mesh content is mutated in place at the same size, call
+        // invalidateCaches() to force a re-upload; otherwise the GPU keeps
+        // stale geometry.
         if (m.vertices.size() == meshVerts_ && m.bvhNodes.size() == meshNodes_ &&
             m.hullPoints.size() == hullPts_ &&
             m.hullFaceIndices.size() == hullFaceIndices_ &&
@@ -926,6 +940,10 @@ private:
     }
 
     // Reusable device scratch for thrust (grow-only, freed at teardown).
+    // WARNING: returns the SAME buffer for every request <= capacity and
+    // deallocate is a no-op. Only safe when at most one thrust allocation
+    // is live at a time (true for sort_by_key today). If a future thrust
+    // call holds two concurrent allocations, they will alias and corrupt.
     struct CachedDeviceAllocator {
         using value_type = char;
         char* buffer = nullptr;

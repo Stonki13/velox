@@ -158,6 +158,7 @@ def write_csv(results, path):
         "name", "category", "bodyCount", "iterations", "meanMs", "medianMs",
         "stddevMs", "minMs", "maxMs", "p50Ms", "p95Ms", "p99Ms", "cv",
         "peakMemoryMiB", "extraLabel", "extraMetric",
+        "gitCommit", "cpuName", "gpuName", "hostname",
     ]
     keys = [k for k in preferred if any(k in r for r in results)]
     keys += sorted({k for r in results for k in r} - set(keys))

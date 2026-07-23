@@ -155,8 +155,8 @@ TEST_CASE("Edge: convex hull with single point") {
     } catch (...) {
         threw = true;
     }
-    // A single point cannot form a volume — expect throw or graceful handling
-    CHECK(true); // No crash is the assertion
+    // A single point cannot form a volume — must throw.
+    CHECK(threw);
 }
 
 TEST_CASE("Edge: empty convex hull throws") {
@@ -373,8 +373,8 @@ TEST_CASE("Edge: negative dt step") {
     } catch (...) {
         threw = true;
     }
-    // Either outcome is acceptable — no crash
-    CHECK(true);
+    // Negative dt must throw (validated in World::stepImpl).
+    CHECK(threw);
 }
 
 // ============================================================================

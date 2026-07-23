@@ -522,8 +522,11 @@ private:
         // Check for allocation failure (arena exhausted)
         if (!islandParent_ || !islandIdOfRoot_ || !islandOfContact_ ||
             !islandSizes_ || !islandContacts_ || !islandRanges_) {
-            // Fall back to single-island solving
-            lastIslandCount_ = 1;
+            // Fall back to sequential solving: zero the island count so the
+            // caller's `islandCount_ >= 2` guard falls through to the batch
+            // path instead of dereferencing stale/null islandRanges_.
+            islandCount_ = 0;
+            lastIslandCount_ = 0;
             return;
         }
         islandContactCount_ = contactCount;
@@ -683,6 +686,10 @@ Backend* createCpuBackend() { return new CpuBackend(); }
 
 #if !VELOX_HAS_CUDA
 Backend* createCudaBackend() { return nullptr; }
+#endif
+
+#if !VELOX_HAS_VULKAN
+Backend* createVulkanBackend() { return nullptr; }
 #endif
 
 } // namespace velox

@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -46,6 +47,19 @@
 #define VELOX_BENCH_POSIX 1
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <unistd.h>
+#endif
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+#endif
+
+// Set by CMake from `git rev-parse --short HEAD` at configure time; "unknown"
+// in a source tree without git metadata (e.g. an extracted release tarball).
+#ifndef VELOX_GIT_COMMIT
+#define VELOX_GIT_COMMIT "unknown"
 #endif
 
 namespace veloxbench {
@@ -159,6 +173,97 @@ struct MemoryUsage {
 };
 
 // ---------------------------------------------------------------------------
+// Run provenance
+// ---------------------------------------------------------------------------
+
+/// Identifies the hardware and source commit a benchmark run was captured
+/// on, so a saved JSON/CSV report is self-describing evidence rather than a
+/// bare set of numbers that later needs its context reconstructed from
+/// memory. Populated once per process via runMetadata() below; gpuName is
+/// left blank by callers that never select the CUDA backend (this header
+/// stays dependency-free and never calls into CUDA itself).
+struct RunMetadata {
+    std::string gitCommit;
+    std::string cpuName;
+    std::string gpuName;
+    std::string hostname;
+};
+
+namespace detail {
+
+// CPU brand strings from CPUID are padded with leading/trailing spaces
+// (e.g. "       Intel(R) Core(TM)..."); trim so reports are legible.
+inline std::string trim(std::string s) {
+    size_t start = s.find_first_not_of(' ');
+    if (start == std::string::npos) return {};
+    size_t end = s.find_last_not_of(' ');
+    return s.substr(start, end - start + 1);
+}
+
+inline std::string queryCpuName() {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+    int regs[4] = {0, 0, 0, 0};
+    char brand[0x40] = {};
+    __cpuid(regs, 0x80000000);
+    if (static_cast<unsigned>(regs[0]) < 0x80000004u) return "unknown";
+    for (unsigned i = 0; i < 3; ++i) {
+        __cpuid(regs, 0x80000002 + i);
+        std::memcpy(brand + i * 16, regs, sizeof(regs));
+    }
+    return trim(std::string(brand));
+#elif (defined(__x86_64__) || defined(__i386__)) && !defined(_MSC_VER)
+    unsigned regs[4] = {0, 0, 0, 0};
+    char brand[0x40] = {};
+    if (!__get_cpuid(0x80000000, &regs[0], &regs[1], &regs[2], &regs[3]) ||
+        regs[0] < 0x80000004u)
+        return "unknown";
+    for (unsigned i = 0; i < 3; ++i) {
+        __get_cpuid(0x80000002 + i, &regs[0], &regs[1], &regs[2], &regs[3]);
+        std::memcpy(brand + i * 16, regs, sizeof(regs));
+    }
+    return trim(std::string(brand));
+#else
+    return "unknown"; // Non-x86 (e.g. ARM): no portable brand-string query.
+#endif
+}
+
+inline std::string queryHostname() {
+#if defined(VELOX_BENCH_WINDOWS)
+    char name[256] = {};
+    DWORD size = sizeof(name);
+    if (GetComputerNameA(name, &size)) return std::string(name);
+    return "unknown";
+#else
+    char name[256] = {};
+    if (gethostname(name, sizeof(name)) == 0) return std::string(name);
+    return "unknown";
+#endif
+}
+
+} // namespace detail
+
+/// Captures gitCommit/cpuName/hostname once per process (each query is
+/// cheap but pointless to repeat per benchmark case) and caches the result.
+/// gpuName is not queried here; set it via BenchmarkReport::setGpuName from
+/// a CUDA-aware caller (e.g. after cudaGetDeviceProperties).
+inline RunMetadata& runMetadata() {
+    static RunMetadata metadata = [] {
+        RunMetadata m;
+        m.gitCommit = VELOX_GIT_COMMIT;
+        m.cpuName = detail::queryCpuName();
+        m.hostname = detail::queryHostname();
+        return m;
+    }();
+    return metadata;
+}
+
+/// Records the GPU a run used, for benchmarks that select the CUDA backend.
+/// Call once before any runCase()/BenchmarkReport::add() so every result
+/// picks it up via the runMetadata() default member initializer. Left blank
+/// (the default) for CPU-only runs.
+inline void setGpuName(std::string name) { runMetadata().gpuName = std::move(name); }
+
+// ---------------------------------------------------------------------------
 // Benchmark case
 // ---------------------------------------------------------------------------
 
@@ -178,12 +283,18 @@ struct BenchResult {
     MemoryUsage memory;          ///< Peak memory observed during the run.
     double extraMetric = 0.0;    ///< Optional secondary metric (e.g. contacts).
     std::string extraLabel;      ///< Name for extraMetric in reports.
+    // Run provenance (hardware identity + source commit). Duplicated onto
+    // every result rather than hoisted to a single run-level object so the
+    // existing array-of-objects JSON/CSV schema (and every script that
+    // parses it) does not have to change shape to gain this field.
+    RunMetadata metadata = runMetadata();
 
     /// Serialise to a single JSON object. The field names match the schema
     /// consumed by scripts/run_benchmarks.py and the existing
-    /// scripts/benchmark_regression.py baseline format.
+    /// scripts/benchmark_regression.py baseline format, plus gitCommit/
+    /// cpuName/gpuName/hostname provenance fields.
     std::string toJson() const {
-        char buf[1024];
+        char buf[1536];
         std::snprintf(buf, sizeof(buf),
                       "    {\n"
                       "      \"name\": \"%s\",\n"
@@ -201,13 +312,19 @@ struct BenchResult {
                       "      \"cv\": %.6f,\n"
                       "      \"peakMemoryMiB\": %.3f,\n"
                       "      \"extraLabel\": \"%s\",\n"
-                      "      \"extraMetric\": %.6f\n"
+                      "      \"extraMetric\": %.6f,\n"
+                      "      \"gitCommit\": \"%s\",\n"
+                      "      \"cpuName\": \"%s\",\n"
+                      "      \"gpuName\": \"%s\",\n"
+                      "      \"hostname\": \"%s\"\n"
                       "    }",
                       config.name.c_str(), config.category.c_str(),
                       config.bodyCount, stats.count, stats.mean, stats.median,
                       stats.stddev, stats.min, stats.max, stats.p50, stats.p95,
                       stats.p99, stats.coefficientOfVariation(),
-                      memory.peakMiB(), extraLabel.c_str(), extraMetric);
+                      memory.peakMiB(), extraLabel.c_str(), extraMetric,
+                      metadata.gitCommit.c_str(), metadata.cpuName.c_str(),
+                      metadata.gpuName.c_str(), metadata.hostname.c_str());
         return std::string(buf);
     }
 };
@@ -282,18 +399,20 @@ public:
         std::string out =
             "name,category,bodyCount,iterations,meanMs,medianMs,stddevMs,"
             "minMs,maxMs,p50Ms,p95Ms,p99Ms,cv,peakMemoryMiB,extraLabel,"
-            "extraMetric\n";
-        char buf[1024];
+            "extraMetric,gitCommit,cpuName,gpuName,hostname\n";
+        char buf[1536];
         for (const auto& r : results_) {
             std::snprintf(buf, sizeof(buf),
                           "%s,%s,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-                          "%.6f,%.6f,%.3f,%s,%.6f\n",
+                          "%.6f,%.6f,%.3f,%s,%.6f,%s,%s,%s,%s\n",
                           r.config.name.c_str(), r.config.category.c_str(),
                           r.config.bodyCount, r.stats.count, r.stats.mean,
                           r.stats.median, r.stats.stddev, r.stats.min,
                           r.stats.max, r.stats.p50, r.stats.p95, r.stats.p99,
                           r.stats.coefficientOfVariation(), r.memory.peakMiB(),
-                          r.extraLabel.c_str(), r.extraMetric);
+                          r.extraLabel.c_str(), r.extraMetric,
+                          r.metadata.gitCommit.c_str(), r.metadata.cpuName.c_str(),
+                          r.metadata.gpuName.c_str(), r.metadata.hostname.c_str());
             out += buf;
         }
         return out;

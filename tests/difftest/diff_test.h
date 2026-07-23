@@ -18,15 +18,18 @@ struct Quatf {
 };
 
 // One body in a scene. GroundBox is a large static box used instead of an
-// infinite plane so both engines see identical geometry.
+// infinite plane so both engines see identical geometry. Mesh is a static
+// triangle soup (terrain); meshVertices/meshIndices are only populated for it.
 struct BodyDesc {
-    enum class Shape { Sphere, Box, Capsule, GroundBox };
+    enum class Shape { Sphere, Box, Capsule, GroundBox, Mesh };
     Shape shape = Shape::Sphere;
     Vec3f position{};
     Quatf orientation{};
     float radius = 0.5f;             // Sphere/Capsule
     float capsuleHalfHeight = 0.5f;  // Capsule
     Vec3f halfExtents{0.5f, 0.5f, 0.5f}; // Box/GroundBox
+    std::vector<Vec3f> meshVertices; // Mesh
+    std::vector<uint32_t> meshIndices; // Mesh, 3 per triangle
     float mass = 1.0f;               // 0 = static
     float restitution = 0.0f;
     float friction = 0.5f;
@@ -34,13 +37,26 @@ struct BodyDesc {
     Vec3f initialAngularVelocity{};
     bool highSpeedCcd = false;       // request continuous collision handling
     bool gyroscopic = false;         // Jolt: enable gyroscopic force
+    // Both engines' default sleep heuristics can put a body with a
+    // motorized joint to sleep before the motor has finished driving it
+    // (neither engine automatically exempts motor-driven bodies from
+    // sleeping). Set false for bodies attached to a HingeMotor joint.
+    bool allowSleep = true;
 };
 
-// Point (ball-socket) joint between two bodies by scene index.
+// A constraint between two bodies by scene index. Ball is a point (ball-
+// socket) joint; HingeMotor additionally drives relative rotation about
+// worldAxis at motorSpeed, budgeted by maxMotorTorque -- exercises each
+// engine's motorized-joint solver rather than just a passive constraint.
 struct JointDesc {
+    enum class Type { Ball, HingeMotor };
+    Type type = Type::Ball;
     int bodyA = -1;
     int bodyB = -1;
     Vec3f worldAnchor{};
+    Vec3f worldAxis{0.0f, 1.0f, 0.0f}; // HingeMotor only
+    float motorSpeed = 0.0f;           // rad/s, HingeMotor only
+    float maxMotorTorque = 0.0f;       // N*m, HingeMotor only
 };
 
 struct SceneDesc {
@@ -112,5 +128,44 @@ Trajectory runJolt(const SceneDesc& scene);
 
 // Canonical scene library.
 std::vector<SceneDesc> canonicalScenes();
+
+// ---------------------------------------------------------------------------
+// Character-controller cross-engine comparison
+// ---------------------------------------------------------------------------
+
+/// Describes a character-on-slope scenario for cross-engine validation.
+struct CharacterSceneDesc {
+    std::string name;
+    float slopeAngleDeg = 0.0f;      ///< Inclination of the ramp (degrees).
+    Vec3f targetVelocity{0, 0, 3};   ///< Desired horizontal walk velocity.
+    int frames = 120;                ///< Simulation frames at dt.
+    float dt = 1.0f / 60.0f;
+    float capsuleRadius = 0.3f;
+    float capsuleHalfHeight = 0.9f;
+    float slopeLimitCosine = 0.7071f; ///< ~45 degrees.
+};
+
+/// Outcome of one engine's character run.
+struct CharacterResult {
+    Vec3f finalPosition{};
+    bool grounded = false;
+    float heightGained = 0.0f;       ///< Y difference from start.
+    float horizontalDistance = 0.0f; ///< XZ distance from start.
+};
+
+/// Behavioral comparison between two engines' character results.
+struct CharacterDiffResult {
+    bool bothGrounded = false;
+    bool agreeOnClimb = false;       ///< Both gained height (or both didn't).
+    float positionDelta = 0.0f;      ///< Distance between final positions.
+    bool passed = false;
+};
+
+CharacterResult runVeloxCharacter(const CharacterSceneDesc& scene);
+CharacterResult runJoltCharacter(const CharacterSceneDesc& scene);
+CharacterDiffResult compareCharacter(const CharacterSceneDesc& scene,
+                                     const CharacterResult& a,
+                                     const CharacterResult& b);
+std::vector<CharacterSceneDesc> characterScenes();
 
 } // namespace difftest

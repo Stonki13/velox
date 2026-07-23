@@ -910,7 +910,7 @@ std::vector<SceneGraphNode> exportSceneGraph(const World& world) {
             node.orientation = b.orientation;
             node.mass = b.invMass > 0.0f ? 1.0f / b.invMass : 0.0f;
             node.isStatic = b.isStatic();
-            node.isSleeping = b.asleep != 0;
+            node.isSleeping = isFullyAsleep(b.asleep);
 
             size_t nodeIndex = graph.size();
             graph.push_back(std::move(node));

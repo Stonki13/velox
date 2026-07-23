@@ -1,0 +1,244 @@
+#version 450
+// Graph-colored contact solve for the Vulkan compute backend: a faithful
+// port of warmStartContact/solveContact (src/narrowphase.h, TwoAxisCoulomb
+// path) over the same color-sorted contact ranges the CUDA backend uses.
+// One dispatch covers one color's [first, first+count) range; contacts in a
+// color never share a dynamic body, so per-contact body writes are exclusive.
+layout(local_size_x = 128) in;
+
+struct GpuBody {
+    vec4 velocity_invMass;             // xyz velocity, w solver inverse mass
+    vec4 angularVelocity_gravityScale;
+    vec4 force_linearDamping;
+    vec4 torque_angularDamping;
+    vec4 invInertia_flags;             // xyz inverse inertia diagonal, w flag bits
+    vec4 orientation;
+    vec4 inertiaOrientation;
+    vec4 position;                     // xyz world position
+    vec4 shapeData;                    // narrow-phase shader only
+    vec4 material;                     // narrow-phase shader only
+    vec4 frictionScale_reach;          // narrow-phase shader only
+};
+
+struct GpuContact {
+    vec4 normal_bias0;    // xyz normal (from b towards a), w bias0
+    vec4 anchorA_f1;      // xyz local anchor on A, w friction1
+    vec4 anchorB_f2;      // xyz local anchor on B, w friction2
+    vec4 params;          // vn0, restitution, rollingFriction, spinningFriction
+    vec4 impulses;        // normalImpulse, tangentImpulse1, tangentImpulse2, spinningImpulse
+    vec4 rolling;         // rollingImpulse1, rollingImpulse2, featureKey bits (narrow phase)
+    uvec4 pair;           // body index a, body index b, skip (sensor pair), unused
+    vec4 point_gap;       // narrow-phase shader only
+};
+
+layout(std430, binding = 0) buffer Bodies { GpuBody bodies[]; };
+layout(std430, binding = 1) buffer Contacts { GpuContact contacts[]; };
+
+layout(push_constant) uniform Push {
+    uint mode;   // 0 = warm start, 1 = solve pass
+    uint first;  // first contact of this color
+    uint count;  // contacts in this color
+    float dt;
+} push;
+
+const uint kFlagDynamic = 4u;      // isDynamic()
+const uint kFlagSolveAngular = 8u; // isDynamic() && !isRotationLocked()
+const uint kFlagSphereAnchor = 16u; // sphere shape: local anchor is unrotated
+const float kRestitutionThreshold = 1.0;
+
+vec3 quatRotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+vec3 quatRotateInv(vec4 q, vec3 v) { return quatRotate(vec4(-q.xyz, q.w), v); }
+
+vec4 quatMul(vec4 a, vec4 b) {
+    return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz),
+                a.w * b.w - dot(a.xyz, b.xyz));
+}
+
+uint bodyFlags(uint i) { return floatBitsToUint(bodies[i].invInertia_flags.w); }
+
+vec3 anchorWorld(uint i, vec3 localAnchor) {
+    if ((bodyFlags(i) & kFlagSphereAnchor) != 0u)
+        return bodies[i].position.xyz + localAnchor;
+    return bodies[i].position.xyz + quatRotate(bodies[i].orientation, localAnchor);
+}
+
+// Body::invInertiaMul: R (I^-1_body (R^T v)) with R = orientation * inertiaOrientation.
+vec3 invInertiaMul(uint i, vec3 v) {
+    if ((bodyFlags(i) & kFlagSolveAngular) == 0u) return vec3(0.0);
+    vec4 frame = quatMul(bodies[i].orientation, bodies[i].inertiaOrientation);
+    vec3 local = quatRotateInv(frame, v);
+    return quatRotate(frame, local * bodies[i].invInertia_flags.xyz);
+}
+
+vec3 pointVelocity(uint i, vec3 p) {
+    return bodies[i].velocity_invMass.xyz +
+           cross(bodies[i].angularVelocity_gravityScale.xyz, p - bodies[i].position.xyz);
+}
+
+// Deterministic tangent basis, matching contactTangents in narrowphase.h.
+void contactTangents(vec3 normal, out vec3 tangent1, out vec3 tangent2) {
+    vec3 an = abs(normal);
+    vec3 reference = an.x < an.y
+        ? (an.x < an.z ? vec3(1, 0, 0) : vec3(0, 0, 1))
+        : (an.y < an.z ? vec3(0, 1, 0) : vec3(0, 0, 1));
+    tangent1 = normalize(cross(normal, reference));
+    tangent2 = cross(normal, tangent1);
+}
+
+void applyLinear(uint i, vec3 impulse, float sign) {
+    if ((bodyFlags(i) & kFlagDynamic) == 0u) return;
+    bodies[i].velocity_invMass.xyz += impulse * bodies[i].velocity_invMass.w * sign;
+}
+
+void applyAngular(uint i, vec3 angularDelta, float sign) {
+    if ((bodyFlags(i) & kFlagDynamic) == 0u) return;
+    bodies[i].angularVelocity_gravityScale.xyz += angularDelta * sign;
+}
+
+void warmStart(uint k) {
+    GpuContact c = contacts[k];
+    if (c.impulses.x <= 0.0 && c.impulses.y == 0.0 && c.impulses.z == 0.0 &&
+        c.impulses.w == 0.0 && c.rolling.x == 0.0 && c.rolling.y == 0.0) return;
+    uint a = c.pair.x, b = c.pair.y;
+    vec3 pa = anchorWorld(a, c.anchorA_f1.xyz);
+    vec3 pb = anchorWorld(b, c.anchorB_f2.xyz);
+    vec3 tangent1, tangent2;
+    contactTangents(c.normal_bias0.xyz, tangent1, tangent2);
+    vec3 impulse = c.normal_bias0.xyz * c.impulses.x + tangent1 * c.impulses.y +
+                   tangent2 * c.impulses.z;
+    vec3 angularImpulse = tangent1 * c.rolling.x + tangent2 * c.rolling.y +
+                          c.normal_bias0.xyz * c.impulses.w;
+    applyLinear(a, impulse, 1.0);
+    applyAngular(a, invInertiaMul(a, cross(pa - bodies[a].position.xyz, impulse)) +
+                    invInertiaMul(a, angularImpulse), 1.0);
+    applyLinear(b, impulse, -1.0);
+    applyAngular(b, invInertiaMul(b, cross(pb - bodies[b].position.xyz, impulse)) +
+                    invInertiaMul(b, angularImpulse), -1.0);
+}
+
+void solve(uint k) {
+    GpuContact c = contacts[k];
+    uint a = c.pair.x, b = c.pair.y;
+    vec3 normal = c.normal_bias0.xyz;
+    vec3 pa = anchorWorld(a, c.anchorA_f1.xyz);
+    vec3 pb = anchorWorld(b, c.anchorB_f2.xyz);
+    vec3 ra = pa - bodies[a].position.xyz;
+    vec3 rb = pb - bodies[b].position.xyz;
+    float invMassA = bodies[a].velocity_invMass.w;
+    float invMassB = bodies[b].velocity_invMass.w;
+
+    vec3 raxn = cross(ra, normal);
+    vec3 rbxn = cross(rb, normal);
+    float kNormal = invMassA + invMassB + dot(raxn, invInertiaMul(a, raxn)) +
+                    dot(rbxn, invInertiaMul(b, rbxn));
+    if (kNormal <= 0.0) return;
+
+    float vn = dot(pointVelocity(a, pa) - pointVelocity(b, pb), normal);
+    float liveGap = c.normal_bias0.w + dot(normal, pa - pb);
+    float target = liveGap > 0.0 ? -liveGap / push.dt : 0.0;
+    float vn0 = c.params.x;
+    if (vn0 < -kRestitutionThreshold && (liveGap <= 0.0 || vn > 0.0))
+        target = max(target, -c.params.y * vn0);
+
+    vec3 tangent1, tangent2;
+    contactTangents(normal, tangent1, tangent2);
+    vec3 raxt1 = cross(ra, tangent1), rbxt1 = cross(rb, tangent1);
+    vec3 raxt2 = cross(ra, tangent2), rbxt2 = cross(rb, tangent2);
+    float k1 = invMassA + invMassB + dot(raxt1, invInertiaMul(a, raxt1)) +
+               dot(rbxt1, invInertiaMul(b, rbxt1));
+    float k2 = invMassA + invMassB + dot(raxt2, invInertiaMul(a, raxt2)) +
+               dot(rbxt2, invInertiaMul(b, rbxt2));
+
+    // Normal row first, then friction from the post-normal relative velocity
+    // (the TwoAxisCoulomb scalar-row order the CPU reference uses).
+    float jn = (target - vn) / kNormal;
+    float nextNormal = max(c.impulses.x + jn, 0.0);
+    jn = nextNormal - c.impulses.x;
+    c.impulses.x = nextNormal;
+    vec3 normalImpulse = normal * jn;
+    applyLinear(a, normalImpulse, 1.0);
+    applyAngular(a, invInertiaMul(a, cross(ra, normalImpulse)), 1.0);
+    applyLinear(b, normalImpulse, -1.0);
+    applyAngular(b, invInertiaMul(b, cross(rb, normalImpulse)), -1.0);
+
+    if (k1 > 0.0 && k2 > 0.0) {
+        vec3 rv = pointVelocity(a, pa) - pointVelocity(b, pb);
+        float old1 = c.impulses.y, old2 = c.impulses.z;
+        float next1 = old1 - dot(rv, tangent1) / k1;
+        float next2 = old2 - dot(rv, tangent2) / k2;
+        float max1 = c.anchorA_f1.w * c.impulses.x;
+        float max2 = c.anchorB_f2.w * c.impulses.x;
+        if (max1 <= 0.0) next1 = 0.0;
+        if (max2 <= 0.0) next2 = 0.0;
+        float ellipse = (max1 > 0.0 ? next1 * next1 / (max1 * max1) : 0.0) +
+                        (max2 > 0.0 ? next2 * next2 / (max2 * max2) : 0.0);
+        if (ellipse > 1.0) {
+            float scale = 1.0 / sqrt(ellipse);
+            next1 *= scale;
+            next2 *= scale;
+        }
+        c.impulses.y = next1;
+        c.impulses.z = next2;
+        vec3 frictionImpulse = tangent1 * (next1 - old1) + tangent2 * (next2 - old2);
+        applyLinear(a, frictionImpulse, 1.0);
+        applyAngular(a, invInertiaMul(a, cross(ra, frictionImpulse)), 1.0);
+        applyLinear(b, frictionImpulse, -1.0);
+        applyAngular(b, invInertiaMul(b, cross(rb, frictionImpulse)), -1.0);
+    }
+
+    // Rolling and spinning resistance: angular impulses bounded by the
+    // normal load, exactly as in solveContact.
+    vec3 wr = bodies[a].angularVelocity_gravityScale.xyz -
+              bodies[b].angularVelocity_gravityScale.xyz;
+    float kr1 = dot(tangent1, invInertiaMul(a, tangent1)) +
+                dot(tangent1, invInertiaMul(b, tangent1));
+    float kr2 = dot(tangent2, invInertiaMul(a, tangent2)) +
+                dot(tangent2, invInertiaMul(b, tangent2));
+    if (c.params.z > 0.0 && kr1 > 0.0 && kr2 > 0.0) {
+        float oldRolling1 = c.rolling.x, oldRolling2 = c.rolling.y;
+        float nextRolling1 = oldRolling1 - dot(wr, tangent1) / kr1;
+        float nextRolling2 = oldRolling2 - dot(wr, tangent2) / kr2;
+        float limit = c.params.z * c.impulses.x;
+        float magnitude = sqrt(nextRolling1 * nextRolling1 + nextRolling2 * nextRolling2);
+        if (magnitude > limit && magnitude > 1e-9) {
+            float scale = limit / magnitude;
+            nextRolling1 *= scale;
+            nextRolling2 *= scale;
+        }
+        c.rolling.x = nextRolling1;
+        c.rolling.y = nextRolling2;
+        vec3 torque = tangent1 * (nextRolling1 - oldRolling1) +
+                      tangent2 * (nextRolling2 - oldRolling2);
+        applyAngular(a, invInertiaMul(a, torque), 1.0);
+        applyAngular(b, invInertiaMul(b, torque), -1.0);
+    }
+    wr = bodies[a].angularVelocity_gravityScale.xyz -
+         bodies[b].angularVelocity_gravityScale.xyz;
+    float ks = dot(normal, invInertiaMul(a, normal)) +
+               dot(normal, invInertiaMul(b, normal));
+    if (c.params.w > 0.0 && ks > 0.0) {
+        float old = c.impulses.w;
+        float limit = c.params.w * c.impulses.x;
+        float next = clamp(old - dot(wr, normal) / ks, -limit, limit);
+        c.impulses.w = next;
+        vec3 torque = normal * (next - old);
+        applyAngular(a, invInertiaMul(a, torque), 1.0);
+        applyAngular(b, invInertiaMul(b, torque), -1.0);
+    }
+
+    contacts[k].impulses = c.impulses;
+    contacts[k].rolling = c.rolling;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count) return;
+    uint k = push.first + i;
+    if (contacts[k].pair.z != 0u) return; // sensor pair: no response
+    if (push.mode == 0u) warmStart(k);
+    else solve(k);
+}

@@ -459,4 +459,8 @@ uint64_t verifyReplay(const ReplayRecording& recording, float positionTolerance,
     return 0;
 }
 
+std::vector<uint8_t> captureCanonicalBodyState(const World& world) {
+    return SerializationAccess::captureBodies(world);
+}
+
 } // namespace velox
