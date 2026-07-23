@@ -36,12 +36,20 @@ Trajectory runVelox(const SceneDesc& scene) {
         case BodyDesc::Shape::GroundBox:
             id = world.addBox(toVelox(desc.position), toVelox(desc.halfExtents), desc.mass);
             break;
+        case BodyDesc::Shape::Mesh: {
+            std::vector<velox::Vec3> verts;
+            verts.reserve(desc.meshVertices.size());
+            for (const Vec3f& v : desc.meshVertices) verts.push_back(toVelox(v));
+            id = world.addStaticMesh(verts, desc.meshIndices);
+            break;
+        }
         default:
             throw std::runtime_error("unsupported shape");
         }
         velox::Body& body = world.body(id);
         body.restitution = desc.restitution;
         body.friction = desc.friction;
+        body.enableSleep = desc.allowSleep;
         body.orientation = {desc.orientation.x, desc.orientation.y,
                             desc.orientation.z, desc.orientation.w};
         if (desc.mass > 0.0f) {
@@ -51,10 +59,21 @@ Trajectory runVelox(const SceneDesc& scene) {
         ids.push_back(id);
     }
 
-    for (const JointDesc& joint : scene.joints)
-        world.addBallJoint(ids[static_cast<size_t>(joint.bodyA)],
-                           ids[static_cast<size_t>(joint.bodyB)],
-                           toVelox(joint.worldAnchor));
+    for (const JointDesc& joint : scene.joints) {
+        if (joint.type == JointDesc::Type::HingeMotor) {
+            velox::JointId hinge = world.addHingeJoint(
+                ids[static_cast<size_t>(joint.bodyA)], ids[static_cast<size_t>(joint.bodyB)],
+                toVelox(joint.worldAnchor), toVelox(joint.worldAxis));
+            velox::Joint& j = world.joint(hinge);
+            j.enableMotor = true;
+            j.motorSpeed = joint.motorSpeed;
+            j.maxMotorTorque = joint.maxMotorTorque;
+        } else {
+            world.addBallJoint(ids[static_cast<size_t>(joint.bodyA)],
+                               ids[static_cast<size_t>(joint.bodyB)],
+                               toVelox(joint.worldAnchor));
+        }
+    }
 
     Trajectory trajectory;
     trajectory.reserve(static_cast<size_t>(scene.frames));
