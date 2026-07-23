@@ -1,0 +1,183 @@
+#version 450
+// GPU narrow phase for sphere-sphere and sphere-plane pairs: an exact port
+// of collideSpherePair (src/solver.cpp) and planeConvex's sphere case +
+// np_detail::emit (src/narrowphase.h). One thread per broad-phase candidate
+// pair; contacts append through an atomic counter. The host only routes a
+// scene here when every body is a sphere or a plane, so no other shape
+// combination can appear.
+layout(local_size_x = 128) in;
+
+struct GpuBody {
+    vec4 velocity_invMass;
+    vec4 angularVelocity_gravityScale;
+    vec4 force_linearDamping;
+    vec4 torque_angularDamping;
+    vec4 invInertia_flags;
+    vec4 orientation;
+    vec4 inertiaOrientation;
+    vec4 position;            // xyz world position, w speculativeDistance
+    vec4 shapeData;           // sphere: (radius,0,0,0); plane: (nx,ny,nz,offset)
+    vec4 material;            // restitution, friction, rollingFriction, spinningFriction
+    vec4 frictionScale_reach; // xyz frictionScale, w sweep speed (0 when CCD off)
+};
+
+struct GpuContact {
+    vec4 normal_bias0;
+    vec4 anchorA_f1;
+    vec4 anchorB_f2;
+    vec4 params;      // vn0, restitution, rollingFriction, spinningFriction
+    vec4 impulses;
+    vec4 rolling;     // rollingImpulse1, rollingImpulse2, featureKey lo/hi bits
+    uvec4 pair;
+    vec4 point_gap;   // xyz world contact point, w gap
+};
+
+layout(std430, binding = 0) buffer Bodies { GpuBody bodies[]; };
+layout(std430, binding = 1) buffer Contacts { GpuContact contacts[]; };
+layout(std430, binding = 2) readonly buffer Pairs { uint pairs[]; }; // 2 uints per pair
+layout(std430, binding = 3) buffer Counter { uint contactCount; };
+
+layout(push_constant) uniform Push {
+    uint pairCount;
+    uint capacity;
+    float dt;
+} push;
+
+const uint kFlagPlane = 32u;
+const uint kFlagSweep = 64u; // ccdTuning enables continuous sweep reach
+// contactFeatureKey(kImplicitFeature, kFaceFeature): (0x80000000+1)<<32 | (0x40000000+1)
+const uint kSpherePlaneKeyHi = 0x80000001u;
+const uint kSpherePlaneKeyLo = 0x40000001u;
+
+vec3 quatRotate(vec4 q, vec3 v) {
+    vec3 t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+vec3 quatRotateInv(vec4 q, vec3 v) { return quatRotate(vec4(-q.xyz, q.w), v); }
+
+uint bodyFlags(uint i) { return floatBitsToUint(bodies[i].invInertia_flags.w); }
+
+vec3 pointVelocity(uint i, vec3 p) {
+    return bodies[i].velocity_invMass.xyz +
+           cross(bodies[i].angularVelocity_gravityScale.xyz, p - bodies[i].position.xyz);
+}
+
+void contactTangents(vec3 normal, out vec3 tangent1, out vec3 tangent2) {
+    vec3 an = abs(normal);
+    vec3 reference = an.x < an.y
+        ? (an.x < an.z ? vec3(1, 0, 0) : vec3(0, 0, 1))
+        : (an.y < an.z ? vec3(0, 1, 0) : vec3(0, 0, 1));
+    tangent1 = normalize(cross(normal, reference));
+    tangent2 = cross(normal, tangent1);
+}
+
+// combineMaterial: the higher-numbered mode of the two bodies wins.
+// Modes: 0 Average, 1 GeometricMean, 2 Minimum, 3 Multiply, 4 Maximum.
+float combineMaterial(float a, float b, uint modeA, uint modeB) {
+    uint mode = modeA >= modeB ? modeA : modeB;
+    if (mode == 0u) return 0.5 * a + 0.5 * b;
+    if (mode == 1u) return sqrt(a) * sqrt(b);
+    if (mode == 2u) return min(a, b);
+    if (mode == 3u) return (b > 0.0 && a > 3.402823466e+38 / b)
+                        ? 3.402823466e+38 : a * b;
+    return max(a, b);
+}
+
+float directionalFrictionScale(uint i, vec3 worldDirection) {
+    vec3 local = quatRotateInv(bodies[i].orientation, worldDirection);
+    return length(local * bodies[i].frictionScale_reach.xyz);
+}
+
+// np_detail::emit, restricted to the data this shader carries. Body a is
+// always the sphere for sphere-plane pairs (matching planeConvex's argument
+// order in collideSimplePair).
+void emitContact(uint a, uint b, vec3 normal, vec3 point, float gap,
+                 uint featureLo, uint featureHi) {
+    const float slop = 1e-3;
+    float sweepA = (bodyFlags(a) & kFlagSweep) != 0u ? bodies[a].frictionScale_reach.w : 0.0;
+    float sweepB = (bodyFlags(b) & kFlagSweep) != 0u ? bodies[b].frictionScale_reach.w : 0.0;
+    float reach = (sweepA + sweepB) * push.dt +
+                  bodies[a].position.w + bodies[b].position.w + slop;
+    if (gap > reach) return;
+
+    uint slot = atomicAdd(contactCount, 1u);
+    if (slot >= push.capacity) return;
+
+    float vn = dot(pointVelocity(a, point) - pointVelocity(b, point), normal);
+    // contactAnchorLocal: spheres keep the world offset unrotated.
+    vec3 offsetA = point - bodies[a].position.xyz;
+    vec3 localA = (bodyFlags(a) & 16u) != 0u ? offsetA
+                  : quatRotateInv(bodies[a].orientation, offsetA);
+    vec3 offsetB = point - bodies[b].position.xyz;
+    vec3 localB = (bodyFlags(b) & 16u) != 0u ? offsetB
+                  : quatRotateInv(bodies[b].orientation, offsetB);
+    vec3 tangent1, tangent2;
+    contactTangents(normal, tangent1, tangent2);
+    uint frictionModeA = (bodyFlags(a) >> 8) & 7u;
+    uint frictionModeB = (bodyFlags(b) >> 8) & 7u;
+    uint restitutionModeA = (bodyFlags(a) >> 11) & 7u;
+    uint restitutionModeB = (bodyFlags(b) >> 11) & 7u;
+    float friction = combineMaterial(bodies[a].material.y, bodies[b].material.y,
+                                     frictionModeA, frictionModeB);
+    float scale1 = sqrt(directionalFrictionScale(a, tangent1) *
+                        directionalFrictionScale(b, tangent1));
+    float scale2 = sqrt(directionalFrictionScale(a, tangent2) *
+                        directionalFrictionScale(b, tangent2));
+    float restitution = combineMaterial(bodies[a].material.x, bodies[b].material.x,
+                                        restitutionModeA, restitutionModeB);
+    float rolling = combineMaterial(bodies[a].material.z, bodies[b].material.z,
+                                    frictionModeA, frictionModeB);
+    float spinning = combineMaterial(bodies[a].material.w, bodies[b].material.w,
+                                     frictionModeA, frictionModeB);
+
+    GpuContact c;
+    c.normal_bias0 = vec4(normal, gap);
+    c.anchorA_f1 = vec4(localA, friction * scale1);
+    c.anchorB_f2 = vec4(localB, friction * scale2);
+    c.params = vec4(vn, restitution, rolling, spinning);
+    c.impulses = vec4(0.0);
+    c.rolling = vec4(0.0, 0.0, uintBitsToFloat(featureLo), uintBitsToFloat(featureHi));
+    c.pair = uvec4(a, b, 0u, 0u);
+    c.point_gap = vec4(point, gap);
+    contacts[slot] = c;
+}
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= push.pairCount) return;
+    uint i = pairs[k * 2u];
+    uint j = pairs[k * 2u + 1u];
+    bool planeI = (bodyFlags(i) & kFlagPlane) != 0u;
+    bool planeJ = (bodyFlags(j) & kFlagPlane) != 0u;
+
+    if (!planeI && !planeJ) {
+        // collideSpherePair (src/solver.cpp), including its cull band.
+        vec3 delta = bodies[i].position.xyz - bodies[j].position.xyz;
+        float distanceSq = dot(delta, delta);
+        if (distanceSq <= 1e-10) return; // CPU falls back to GJK; degenerate, skip
+        float radiusI = bodies[i].shapeData.x;
+        float radiusJ = bodies[j].shapeData.x;
+        float travel = (bodies[i].frictionScale_reach.w + bodies[j].frictionScale_reach.w) *
+                       push.dt + 1e-3;
+        float maximumDistance = radiusI + radiusJ + travel;
+        float safeDistance = maximumDistance + 1e-5 * max(1.0, maximumDistance);
+        if (distanceSq > safeDistance * safeDistance) return;
+        float distance = sqrt(distanceSq);
+        vec3 normal = delta * (1.0 / distance);
+        float gap = distance - radiusI - radiusJ;
+        vec3 pointI = bodies[i].position.xyz - normal * radiusI;
+        vec3 pointJ = bodies[j].position.xyz + normal * radiusJ;
+        emitContact(i, j, normal, (pointI + pointJ) * 0.5, gap, 0u, 0u);
+        return;
+    }
+    if (planeI && planeJ) return;
+
+    uint sphere = planeI ? j : i;
+    uint plane = planeI ? i : j;
+    vec3 pn = bodies[plane].shapeData.xyz;
+    float radius = bodies[sphere].shapeData.x;
+    float gap = dot(pn, bodies[sphere].position.xyz) - bodies[plane].shapeData.w - radius;
+    emitContact(sphere, plane, pn, bodies[sphere].position.xyz - pn * radius, gap,
+                kSpherePlaneKeyLo, kSpherePlaneKeyHi);
+}

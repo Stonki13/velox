@@ -668,3 +668,37 @@ has not moved on-device yet. `velox.vulkan_smoke` parity bounds were
 relaxed to `cuda_parity_demo`'s philosophy (colored vs sequential solve
 order diverges a settling pile by solver-order chaos, not error); the full
 CPU+Vulkan suite remains **56/56 PASS**.
+
+### Stage 3: GPU narrow phase for spheres — built, measured, and honestly shelved
+
+`shaders/narrow_sphere.comp` ports `collideSpherePair` (`src/solver.cpp`)
+and `planeConvex`'s sphere case + `np_detail::emit` (`src/narrowphase.h`)
+exactly — including the cull band, speculative reach, material combine
+modes, and directional friction scaling — dispatching one thread per
+host-broad-phase candidate pair for scenes made entirely of spheres and
+planes (any other shape routes the whole call to the CPU narrow phase;
+GJK/EPA/manifold clipping are not ported).
+
+**Measured result: a regression, so it ships disabled.** On the canonical
+sphere-rain scenes the extra synchronous upload/dispatch/readback per step
+made whole-step time worse than stage 2's CPU narrow phase — 8192 bodies:
+159 ms vs 88 ms; 2048: 38 ms vs 24 ms. The cost is structural: stage 3 as
+built adds a third full GPU round-trip per step (integrate, narrow, solve
+are three separate fence-synchronized submissions, each re-packing the
+grown 176-byte body records). Per this plan's own rule — no unexplained
+regression ships — the GPU narrow phase is gated behind
+`VELOX_VULKAN_GPU_NARROW=1` (default off, preserving stage 2's measured
+88 ms), kept in-tree as a correct, tested experiment. Making it win
+requires fusing narrow phase + solve into one submission over
+device-resident bodies (eliminating two of the three round-trips), which
+is the real stage 4 and a larger restructuring than this pass.
+
+`velox.vulkan_smoke` now runs three checks: the box-pile trajectory parity
+(CPU narrow phase, tight bounds), and a sphere-pile scene with the GPU
+narrow phase off and on — both behavioral-bounded (free-rolling sphere
+piles scatter chaotically under any solve-order change, so trajectory
+bounds are the wrong instrument there, the same reasoning `tests/difftest`
+applies to chaotic scenes; importantly, the sphere-pile trajectory
+divergence is the SAME with the GPU narrow phase off and on, isolating it
+to the pre-existing colored-solve-order effect, not to the new shader).
+Full CPU+Vulkan suite: **56/56 PASS**.

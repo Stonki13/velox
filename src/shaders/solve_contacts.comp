@@ -15,6 +15,9 @@ struct GpuBody {
     vec4 orientation;
     vec4 inertiaOrientation;
     vec4 position;                     // xyz world position
+    vec4 shapeData;                    // narrow-phase shader only
+    vec4 material;                     // narrow-phase shader only
+    vec4 frictionScale_reach;          // narrow-phase shader only
 };
 
 struct GpuContact {
@@ -23,8 +26,9 @@ struct GpuContact {
     vec4 anchorB_f2;      // xyz local anchor on B, w friction2
     vec4 params;          // vn0, restitution, rollingFriction, spinningFriction
     vec4 impulses;        // normalImpulse, tangentImpulse1, tangentImpulse2, spinningImpulse
-    vec4 rolling;         // rollingImpulse1, rollingImpulse2, unused, unused
+    vec4 rolling;         // rollingImpulse1, rollingImpulse2, featureKey bits (narrow phase)
     uvec4 pair;           // body index a, body index b, skip (sensor pair), unused
+    vec4 point_gap;       // narrow-phase shader only
 };
 
 layout(std430, binding = 0) buffer Bodies { GpuBody bodies[]; };

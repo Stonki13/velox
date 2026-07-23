@@ -19,9 +19,11 @@
 
 #include "integrate_spv.h"
 #include "solve_contacts_spv.h"
+#include "narrow_sphere_spv.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -39,11 +41,14 @@ struct GpuBody {
     float invInertia[3];      float flagsBits;
     float orientation[4];
     float inertiaOrientation[4];
-    float position[3];        float pad;
+    float position[3];        float speculativeDistance;
+    float shapeData[4];       // sphere: (radius,0,0,0); plane: (nx,ny,nz,offset)
+    float material[4];        // restitution, friction, rollingFriction, spinningFriction
+    float frictionScale[3];   float maxPointSpeed;
 };
-static_assert(sizeof(GpuBody) == 128, "GpuBody must match the std430 layout");
+static_assert(sizeof(GpuBody) == 176, "GpuBody must match the std430 layout");
 
-// Must match GpuContact in shaders/solve_contacts.comp (seven vec4-sized rows).
+// Must match GpuContact in the shaders (eight vec4-sized rows).
 struct GpuContact {
     float normal[3];       float bias0;
     float anchorA[3];      float friction1;
@@ -53,10 +58,11 @@ struct GpuContact {
     float normalImpulse;   float tangentImpulse1;
     float tangentImpulse2; float spinningImpulse;
     float rollingImpulse1; float rollingImpulse2;
-    float rollingPad[2];
+    uint32_t featureLo, featureHi;
     uint32_t a, b, skip, pad;
+    float point[3];        float gap;
 };
-static_assert(sizeof(GpuContact) == 112, "GpuContact must match the std430 layout");
+static_assert(sizeof(GpuContact) == 128, "GpuContact must match the std430 layout");
 
 struct IntegratePush {
     float gravity[3];
@@ -71,12 +77,20 @@ struct SolvePush {
     float dt;
 };
 
+struct NarrowPush {
+    uint32_t pairCount;
+    uint32_t capacity;
+    float dt;
+};
+
 constexpr uint32_t kFlagIntegrate = 1u;
 constexpr uint32_t kFlagTorque = 2u;
 constexpr uint32_t kFlagDynamic = 4u;
 constexpr uint32_t kFlagSolveAngular = 8u;
 constexpr uint32_t kFlagSphereAnchor = 16u;
-constexpr uint32_t kPushRange = 32; // covers both shaders' push blocks
+constexpr uint32_t kFlagPlane = 32u;
+constexpr uint32_t kFlagSweep = 64u;
+constexpr uint32_t kPushRange = 32; // covers every shader's push block
 
 class VulkanBackend final : public Backend {
 public:
@@ -91,15 +105,19 @@ public:
             vkDeviceWaitIdle(device_);
             destroyBuffer(bodyBuffer_, bodyMemory_, mappedBodies_);
             destroyBuffer(contactBuffer_, contactMemory_, mappedContacts_);
+            destroyBuffer(pairBuffer_, pairMemory_, mappedPairs_);
+            destroyBuffer(counterBuffer_, counterMemory_, mappedCounter_);
             if (fence_) vkDestroyFence(device_, fence_, nullptr);
             if (commandPool_) vkDestroyCommandPool(device_, commandPool_, nullptr);
             if (descriptorPool_) vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
             if (integratePipeline_) vkDestroyPipeline(device_, integratePipeline_, nullptr);
             if (solvePipeline_) vkDestroyPipeline(device_, solvePipeline_, nullptr);
+            if (narrowPipeline_) vkDestroyPipeline(device_, narrowPipeline_, nullptr);
             if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
             if (descriptorLayout_) vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
             if (integrateModule_) vkDestroyShaderModule(device_, integrateModule_, nullptr);
             if (solveModule_) vkDestroyShaderModule(device_, solveModule_, nullptr);
+            if (narrowModule_) vkDestroyShaderModule(device_, narrowModule_, nullptr);
             vkDestroyDevice(device_, nullptr);
         }
         if (instance_) vkDestroyInstance(instance_, nullptr);
@@ -302,12 +320,87 @@ public:
         }
     }
 
-    // Broad phase and narrow phase remain on the CPU reference path.
+    // Broad phase stays on the host (the World's incremental AABB tree).
+    // Narrow phase runs on the GPU for scenes made entirely of spheres and
+    // planes — the analytic pairs narrow_sphere.comp ports exactly; any
+    // other shape in the scene routes the whole call to the CPU reference
+    // path (GJK/EPA/manifold clipping are not ported).
     bool wantsHostPairs() const override { return cpu_->wantsHostPairs(); }
     void findContacts(const std::vector<Body>& bodies, const MeshSoup& meshes,
                       float dt, const std::vector<uint64_t>* hostPairs,
                       std::vector<Contact>& out) override {
-        cpu_->findContacts(bodies, meshes, dt, hostPairs, out);
+        const uint32_t n = static_cast<uint32_t>(bodies.size());
+        // Measured on the canonical sphere-rain scenes (RTX 5080): the extra
+        // synchronous upload/dispatch/readback per step made whole-step time
+        // WORSE than the stage-2 CPU narrow phase (8192 bodies: 159 ms vs
+        // 88 ms). Kept as an explicit opt-in experiment rather than shipped
+        // as a default regression; making it win needs the narrow phase and
+        // solve fused into one submission with device-resident bodies.
+        bool gpuEligible = gpuNarrowEnabled_ && hostPairs != nullptr &&
+                           !hostPairs->empty() && n > 0;
+        for (uint32_t i = 0; gpuEligible && i < n; ++i)
+            gpuEligible = bodies[i].shape == ShapeType::Sphere ||
+                          bodies[i].shape == ShapeType::Plane;
+        const uint32_t pairCount =
+            gpuEligible ? static_cast<uint32_t>(hostPairs->size()) : 0;
+        if (!gpuEligible || !ensureBodyCapacity(n) ||
+            !ensurePairCapacity(pairCount) || !ensureContactCapacity(pairCount)) {
+            cpu_->findContacts(bodies, meshes, dt, hostPairs, out);
+            return;
+        }
+
+        packBodies(bodies);
+        uint32_t* pairWords = static_cast<uint32_t*>(mappedPairs_);
+        for (uint32_t p = 0; p < pairCount; ++p) {
+            pairWords[p * 2] = static_cast<uint32_t>((*hostPairs)[p] >> 32);
+            pairWords[p * 2 + 1] = static_cast<uint32_t>((*hostPairs)[p]);
+        }
+        *static_cast<uint32_t*>(mappedCounter_) = 0;
+
+        NarrowPush push{};
+        push.pairCount = pairCount;
+        push.capacity = pairCount; // sphere pairs emit at most one contact each
+        push.dt = dt;
+        if (!beginCommands()) {
+            cpu_->findContacts(bodies, meshes, dt, hostPairs, out);
+            return;
+        }
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, narrowPipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
+        vkCmdPushConstants(commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDispatch(commandBuffer_, (pairCount + 127) / 128, 1, 1);
+        if (!submitCommands()) {
+            cpu_->findContacts(bodies, meshes, dt, hostPairs, out);
+            return;
+        }
+
+        uint32_t count = *static_cast<uint32_t*>(mappedCounter_);
+        if (count > pairCount) count = pairCount; // atomic overshoot past capacity
+        const GpuContact* mapped = static_cast<const GpuContact*>(mappedContacts_);
+        out.clear();
+        out.resize(count);
+        for (uint32_t k = 0; k < count; ++k) {
+            const GpuContact& g = mapped[k];
+            Contact& c = out[k];
+            std::memset(&c, 0, sizeof(Contact));
+            c.a = g.a;
+            c.b = g.b;
+            c.featureKey = (uint64_t)g.featureHi << 32 | g.featureLo;
+            std::memcpy(&c.normal, g.normal, sizeof(float) * 3);
+            std::memcpy(&c.point, g.point, sizeof(float) * 3);
+            std::memcpy(&c.localAnchorA, g.anchorA, sizeof(float) * 3);
+            std::memcpy(&c.localAnchorB, g.anchorB, sizeof(float) * 3);
+            c.gap = g.gap;
+            c.bias0 = g.bias0;
+            c.vn0 = g.vn0;
+            c.restitution = g.restitution;
+            c.friction1 = g.friction1;
+            c.friction2 = g.friction2;
+            c.rollingFriction = g.rollingFriction;
+            c.spinningFriction = g.spinningFriction;
+        }
     }
     void invalidateCaches() override {
         gpuSolveActive_ = false;
@@ -379,18 +472,20 @@ private:
         if (!createShaderModule(velox_integrate_spv, velox_integrate_spv_size,
                                 integrateModule_) ||
             !createShaderModule(velox_solve_contacts_spv, velox_solve_contacts_spv_size,
-                                solveModule_))
+                                solveModule_) ||
+            !createShaderModule(velox_narrow_sphere_spv, velox_narrow_sphere_spv_size,
+                                narrowModule_))
             return false;
 
-        VkDescriptorSetLayoutBinding bindings[2]{};
-        for (uint32_t i = 0; i < 2; ++i) {
+        VkDescriptorSetLayoutBinding bindings[4]{};
+        for (uint32_t i = 0; i < 4; ++i) {
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[i].descriptorCount = 1;
             bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
         VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        layoutInfo.bindingCount = 2;
+        layoutInfo.bindingCount = 4;
         layoutInfo.pBindings = bindings;
         if (vkCreateDescriptorSetLayout(device_, &layoutInfo, nullptr, &descriptorLayout_) != VK_SUCCESS)
             return false;
@@ -407,10 +502,11 @@ private:
             return false;
 
         if (!createComputePipeline(integrateModule_, integratePipeline_) ||
-            !createComputePipeline(solveModule_, solvePipeline_))
+            !createComputePipeline(solveModule_, solvePipeline_) ||
+            !createComputePipeline(narrowModule_, narrowPipeline_))
             return false;
 
-        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
         VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         poolInfo.maxSets = 1;
@@ -441,9 +537,13 @@ private:
         if (vkCreateFence(device_, &fenceInfo, nullptr, &fence_) != VK_SUCCESS)
             return false;
 
-        // Both descriptor bindings must always reference valid buffers, so
+        // Every descriptor binding must always reference a valid buffer, so
         // allocate minimal placeholders up front; real workloads grow them.
-        return ensureBodyCapacity(1) && ensureContactCapacity(1);
+        return ensureBodyCapacity(1) && ensureContactCapacity(1) &&
+               ensurePairCapacity(1) &&
+               allocateBuffer(sizeof(uint32_t), counterBuffer_, counterMemory_,
+                              mappedCounter_) &&
+               (updateDescriptors(), true);
     }
 
     bool createShaderModule(const unsigned char* bytes, size_t size, VkShaderModule& out) {
@@ -528,12 +628,16 @@ private:
     }
 
     void updateDescriptors() {
-        VkDescriptorBufferInfo bufferInfos[2] = {
+        if (!bodyBuffer_ || !contactBuffer_ || !pairBuffer_ || !counterBuffer_)
+            return; // still initializing; the last allocation triggers the write
+        VkDescriptorBufferInfo bufferInfos[4] = {
             {bodyBuffer_, 0, VK_WHOLE_SIZE},
             {contactBuffer_, 0, VK_WHOLE_SIZE},
+            {pairBuffer_, 0, VK_WHOLE_SIZE},
+            {counterBuffer_, 0, VK_WHOLE_SIZE},
         };
-        VkWriteDescriptorSet writes[2]{};
-        for (uint32_t i = 0; i < 2; ++i) {
+        VkWriteDescriptorSet writes[4]{};
+        for (uint32_t i = 0; i < 4; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = descriptorSet_;
             writes[i].dstBinding = i;
@@ -541,7 +645,19 @@ private:
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &bufferInfos[i];
         }
-        vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device_, 4, writes, 0, nullptr);
+    }
+
+    bool ensurePairCapacity(uint32_t pairCount) {
+        const VkDeviceSize needed = VkDeviceSize(pairCount) * 2 * sizeof(uint32_t);
+        if (needed <= pairCapacity_ && pairBuffer_) return true;
+        vkDeviceWaitIdle(device_);
+        destroyBuffer(pairBuffer_, pairMemory_, mappedPairs_);
+        pairCapacity_ = 0;
+        if (!allocateBuffer(needed, pairBuffer_, pairMemory_, mappedPairs_)) return false;
+        pairCapacity_ = needed;
+        updateDescriptors();
+        return true;
     }
 
     bool ensureBodyCapacity(uint32_t count) {
@@ -591,11 +707,31 @@ private:
             if (b.isDynamic()) flags |= kFlagDynamic;
             if (b.isDynamic() && !b.isRotationLocked()) flags |= kFlagSolveAngular;
             if (b.shape == ShapeType::Sphere) flags |= kFlagSphereAnchor;
+            if (b.shape == ShapeType::Plane) flags |= kFlagPlane;
+            if (b.ccdTuning.enableContinuous &&
+                b.ccdTuning.quality != MotionQuality::Low &&
+                b.ccdTuning.quality != MotionQuality::Locked)
+                flags |= kFlagSweep;
+            flags |= (uint32_t)b.frictionCombine << 8;
+            flags |= (uint32_t)b.restitutionCombine << 11;
             std::memcpy(&g.flagsBits, &flags, sizeof(flags));
             std::memcpy(g.orientation, &b.orientation, sizeof(float) * 4);
             std::memcpy(g.inertiaOrientation, &b.inertiaOrientation, sizeof(float) * 4);
             std::memcpy(g.position, &b.position, sizeof(float) * 3);
-            g.pad = 0.0f;
+            g.speculativeDistance = b.ccdTuning.speculativeDistance;
+            if (b.shape == ShapeType::Plane) {
+                std::memcpy(g.shapeData, &b.planeNormal, sizeof(float) * 3);
+                g.shapeData[3] = b.planeOffset;
+            } else {
+                g.shapeData[0] = b.radius;
+                g.shapeData[1] = g.shapeData[2] = g.shapeData[3] = 0.0f;
+            }
+            g.material[0] = b.restitution;
+            g.material[1] = b.friction;
+            g.material[2] = b.rollingFriction;
+            g.material[3] = b.spinningFriction;
+            std::memcpy(g.frictionScale, &b.frictionScale, sizeof(float) * 3);
+            g.maxPointSpeed = b.maxPointSpeed();
         }
     }
 
@@ -651,6 +787,15 @@ private:
     VkDeviceMemory contactMemory_ = VK_NULL_HANDLE;
     void* mappedContacts_ = nullptr;
     VkDeviceSize contactCapacity_ = 0;
+    VkBuffer pairBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory pairMemory_ = VK_NULL_HANDLE;
+    void* mappedPairs_ = nullptr;
+    VkDeviceSize pairCapacity_ = 0;
+    VkBuffer counterBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory counterMemory_ = VK_NULL_HANDLE;
+    void* mappedCounter_ = nullptr;
+    VkShaderModule narrowModule_ = VK_NULL_HANDLE;
+    VkPipeline narrowPipeline_ = VK_NULL_HANDLE;
 
     // Host-side coloring state (mirrors the CUDA backend's members).
     std::vector<uint64_t> colorMask_;
@@ -663,6 +808,7 @@ private:
     uint32_t solveCount_ = 0;
     bool gpuSolveActive_ = false;
     uint32_t lastVelocityIterations_ = 0;
+    bool gpuNarrowEnabled_ = std::getenv("VELOX_VULKAN_GPU_NARROW") != nullptr;
 };
 
 } // namespace

@@ -104,7 +104,7 @@ if(VELOX_ENABLE_VULKAN)
     if(Vulkan_FOUND AND Vulkan_GLSLC_EXECUTABLE)
         set(velox_spv_dir ${CMAKE_CURRENT_BINARY_DIR}/generated)
         file(MAKE_DIRECTORY ${velox_spv_dir})
-        foreach(shader IN ITEMS integrate solve_contacts)
+        foreach(shader IN ITEMS integrate solve_contacts narrow_sphere)
             add_custom_command(
                 OUTPUT ${velox_spv_dir}/${shader}_spv.h
                 COMMAND ${Vulkan_GLSLC_EXECUTABLE} -O

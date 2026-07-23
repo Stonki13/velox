@@ -15,7 +15,10 @@ struct GpuBody {
     vec4 invInertia_flags;             // xyz inverse inertia diagonal, w flag bits
     vec4 orientation;                  // body orientation quaternion (xyzw)
     vec4 inertiaOrientation;           // principal-inertia frame quaternion
-    vec4 position;                     // xyz world position (solve shader only)
+    vec4 position;                     // xyz world position, w speculativeDistance
+    vec4 shapeData;                    // narrow-phase shader only
+    vec4 material;                     // narrow-phase shader only
+    vec4 frictionScale_reach;          // narrow-phase shader only
 };
 
 layout(std430, binding = 0) buffer Bodies { GpuBody bodies[]; };
