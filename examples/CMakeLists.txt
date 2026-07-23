@@ -96,6 +96,12 @@ target_link_libraries(vehicle_demo PRIVATE velox)
 add_executable(serialize_demo serialize_demo.cpp)
 target_link_libraries(serialize_demo PRIVATE velox)
 
+add_executable(rollback_demo rollback_demo.cpp)
+target_link_libraries(rollback_demo PRIVATE velox)
+if(BUILD_TESTING)
+    add_test(NAME velox.rollback_demo COMMAND rollback_demo)
+endif()
+
 add_executable(geometry_fuzz geometry_fuzz.cpp)
 target_link_libraries(geometry_fuzz PRIVATE velox)
 if(BUILD_TESTING)

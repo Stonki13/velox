@@ -42,6 +42,7 @@ add_library(velox
     src/vehicle.cpp
     src/serialization.cpp
     src/serialization_v2.cpp
+    src/rollback.cpp
     src/benchmark.cpp
     src/velox_c.cpp
     src/stable_api.cpp

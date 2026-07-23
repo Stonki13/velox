@@ -55,4 +55,12 @@ uint64_t verifyReplay(const ReplayRecording& recording,
                       float positionTolerance = 1e-5f,
                       float velocityTolerance = 1e-4f);
 
+// Dense per-body (position, orientation, velocity, angularVelocity) capture
+// in the same bitwise-comparable format ReplayRecording uses internally.
+// Public so tooling (canonical hashing, delta encoding, divergence
+// diagnostics — see rollback.h) can build on the exact bytes replay
+// verification already treats as authoritative, without a second
+// definition of "the state that matters" drifting from this one.
+std::vector<uint8_t> captureCanonicalBodyState(const World& world);
+
 } // namespace velox

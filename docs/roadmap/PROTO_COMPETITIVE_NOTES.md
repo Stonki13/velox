@@ -149,3 +149,74 @@ deterministic replay)` and `CPU workers (parallel integration/narrow phase,
 serial replay)`. Recorded here rather than silently ignored; not fixed by
 this plan since it is orthogonal to competitive positioning and the user is
 independently addressing recent regressions on the same subsystems.
+
+## Phase 1: deterministic multiplayer toolkit — evidence
+
+Added, all in the isolated worktree on `feature/competitive-velox`:
+
+- `include/velox/rollback.h` / `src/rollback.cpp` — a network-facing layer
+  above the existing `WorldSnapshot` (same-instance rollback) and
+  `SerializedScene` (cross-instance/cross-machine transfer):
+  - `CanonicalHash computeCanonicalHash(const World&)` / `hashCanonicalBodyState(...)`:
+    a versioned 64-bit FNV-1a hash over the exact bytes
+    `captureCanonicalBodyState` produces — the same dense per-body
+    position/orientation/velocity/angularVelocity capture `ReplayRecording`
+    already treats as authoritative, so hashing never drifts from what
+    replay verification considers "the state that matters."
+  - `SnapshotDelta encodeDelta`/`applyDelta`/`changedBodyCount`: a
+    bitmap-plus-changed-records diff between two same-shape canonical
+    body-state buffers. Throws `VeloxInvalidArgument` on a body-count
+    mismatch (encode) and `VeloxRuntimeError` on a corrupted/truncated
+    buffer (apply) rather than silently producing wrong bytes.
+  - `RollbackBuffer`: a capacity-bounded `std::deque<Entry>` ring keyed by
+    an application frame number, built on `World::saveSnapshot`/
+    `restoreSnapshot`. Evicts the oldest frame once `size() > capacity()`.
+  - `findFirstDivergence`: compares two `ReplayRecording`s frame-by-frame,
+    field-by-field, and reports the first (frame, bodyIndex, field,
+    magnitude) that exceeds tolerance — or a `bodyCount`/`frameCount`
+    mismatch if the recordings differ in shape before any field does.
+  - `include/velox/serialization.h` gained one new public function,
+    `captureCanonicalBodyState`, a thin wrapper over the existing private
+    `SerializationAccess::captureBodies` used internally by
+    `recordReplayFrame`/`verifyReplay` — no second definition of the
+    canonical byte format was introduced.
+- `examples/rollback_demo.cpp` (registered as headless CTest
+  `velox.rollback_demo`): a server/client prediction-correction scenario —
+  client predicts every frame, server applies a late impulse the client
+  didn't predict, client detects the resulting canonical-hash mismatch,
+  adopts the server's `SerializedScene` via `deserializeWorld`, and both
+  sides reconverge to an identical hash. Also exercises
+  `findFirstDivergence` against a predicted-vs-authoritative recording pair
+  and asserts it locates the exact frame/body/field the late input first
+  affects.
+- `tests/unit/test_rollback.cpp` (registered as CTest `velox.unit.test_rollback`,
+  16 `TEST_CASE`s): hash stability across identical replays, hash divergence
+  once a body's state differs, delta round-trip (single step and a 20-frame
+  delta chain), delta rejection on mismatched body counts, `applyDelta`
+  rejection on a truncated or shape-mismatched buffer (simulated
+  corruption), `RollbackBuffer` exact restore, capacity-bound eviction
+  (oldest-frame/newest-frame/contains after overflow), zero-capacity
+  rejection, `findFirstDivergence` on identical/corrupted/body-count-mismatched
+  recordings, and a bitwise-strict-replay check across worker counts
+  (1 worker vs. 0/auto) using `DeterminismMode::Strict`.
+
+### Gate results (Windows 11, MSVC 19.44, CPU-only build — `build_phase1`,
+`-DVELOX_ENABLE_CUDA=OFF`, isolated from the CUDA baseline build used above)
+
+- `cmake --build build_phase1 --config Release -j 16`: clean build, 0
+  compiler errors.
+- `ctest --test-dir build_phase1 -C Release --output-on-failure`:
+  **52/52 CTest suites pass (100%)**, including the two new
+  `velox.rollback_demo` and `velox.unit.test_rollback` entries. (This is a
+  CPU-only configuration; it does not include the CUDA-only suites counted
+  in the 53-suite baseline above, and the two `velox.stress` sub-check
+  failures noted in that baseline did not reproduce as separate CTest
+  failures in this run — `velox.stress` passed here.)
+- `fuzz_demo 40` run twice: `fuzz: 40 scenes, 0 failures` both times.
+- `proto_manifold`: `=== Results: 0 failures ===` (8/8 manifold checks pass,
+  including CPU/CUDA parity checked via CPU fallback since this build has
+  no CUDA toolkit enabled).
+
+No CPU regression is claimed or measured in this phase (no scene/timestep
+changed); Phase 2 is where benchmark evidence with hardware identity and
+commit hash gets attached.
