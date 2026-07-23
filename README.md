@@ -265,6 +265,9 @@ ctest --test-dir build -C Release --output-on-failure
   CTest workload used to catch cross-subsystem regressions.
 - [Production readiness](docs/production-readiness.md) lists the required
   hosted CI, CUDA hardware, packaging, performance, and release gates.
+- [Known limitations](docs/known-limitations.md) lists honest gaps versus
+  Jolt Physics, known pre-existing test issues, and how to attach a
+  reproducible scene or replay trace to a bug report.
 - [C API reference](include/velox/velox_c.h) provides FFI-compatible bindings
   for integration with C, Rust, Python, and other languages.
 - `doxygen docs/Doxyfile` generates API reference HTML in `docs/api-reference`.

@@ -545,3 +545,45 @@ silently working around it.
   the CPU-only (`build_phase1`, 55/55) and CUDA (`build_cuda`, 54/56, same
   2 pre-existing failures) full-suite results from Phases 1–3 remain the
   current, valid baseline; not rerun redundantly.
+
+## Phase 5: feedback loop
+
+Audited `.github/ISSUE_TEMPLATE/` before writing anything (per this plan's
+own "do not start by copying" discipline). `bug_report.md`,
+`feature_request.md`, and `performance_issue.md` already exist and are
+thorough — environment/reproduction/evidence sections for bugs, workload/
+measurement sections for performance reports, problem/API/alternatives
+for feature requests. This phase's "issue templates for bugs, performance
+reports, and feature requests" requirement was already satisfied; nothing
+was rewritten.
+
+What was genuinely missing: a standalone known-limitations document and a
+concrete "how to attach a reproducible scene" guide (the issue templates
+reference doing this but didn't point anywhere). Added:
+
+- **`docs/known-limitations.md`**: collects, in one place, the honest
+  Jolt-comparison gaps from Phase 0 (no shipped-game history, no soft
+  bodies, one vehicle model, GPU is NVIDIA-only), the measured CUDA
+  crossover point from Phase 2 (~2000+ bodies for dense contact scenes;
+  `BackendType::Auto` does not yet choose based on scene shape), the
+  deferred character-slopes gap from Phase 4, the two pre-existing
+  `velox.stress` sub-check failures tracked since the Phase 0 baseline,
+  `WorldSnapshot`'s same-instance-only rollback contract (with the
+  cross-instance alternative), and a step-by-step guide for attaching a
+  reproducible scene or replay trace to a bug report using
+  `serializeWorld()` and Phase 3's `replay_diff_cli`. Linked from
+  `README.md`'s documentation index.
+- Confirmed (grep across `include/`, `src/`) there is no telemetry,
+  analytics, or phone-home code path anywhere in the codebase — the one
+  "telemetry" string match (`include/velox/vehicle.h`) refers to
+  per-wheel state readable for rendering/UI, not reporting. Nothing to
+  gate behind opt-in because nothing exists; documented explicitly in
+  `known-limitations.md` rather than left unstated.
+
+### Gate results
+
+- Docs-only change (`docs/known-limitations.md`, `README.md` link) — no
+  core library or test files touched.
+- `ctest --test-dir build_phase1 -C Release`: **55/55 CTest suites pass
+  (100%)**, confirming the change is inert with respect to the build (as
+  expected for a documentation-only phase).
