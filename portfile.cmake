@@ -12,9 +12,9 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO Stonki13/velox
     REF "v${VERSION}"
-    # TODO(maintainer): replace with the SHA-512 of the v${VERSION} source
-    # archive produced by the Release workflow before publishing the port.
-    SHA512 0
+    # SHA-512 of https://github.com/Stonki13/velox/archive/refs/tags/v1.0.0.tar.gz.
+    # Update this only after creating and verifying the corresponding signed tag.
+    SHA512 8febc652815a3c32acb0e214a66add01c9275198b8abd6e47bfbff400d787d5f1911a50c48fabc8a8a2e5ad78cc383c5a5528b257a069516b2460e634ff5472e
     HEAD_REF main
 )
 
