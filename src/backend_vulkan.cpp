@@ -541,9 +541,9 @@ private:
 
     bool createShaderModule(const unsigned char* bytes, size_t size, VkShaderModule& out) {
         std::vector<uint32_t> code(size / sizeof(uint32_t));
-        std::memcpy(code.data(), bytes, size);
+        std::memcpy(code.data(), bytes, code.size() * sizeof(uint32_t));
         VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-        info.codeSize = size;
+        info.codeSize = code.size() * sizeof(uint32_t);
         info.pCode = code.data();
         return vkCreateShaderModule(device_, &info, nullptr, &out) == VK_SUCCESS;
     }

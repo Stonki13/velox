@@ -334,7 +334,7 @@ __global__ void solveJointColorKernel(Body* bodies, Joint* joints,
     if (joint.broken) return;
     Body& a = bodies[joint.a];
     Body& b = bodies[joint.b];
-    if (a.asleep && b.asleep) return;
+    if (isFullyAsleep(a.asleep) && isFullyAsleep(b.asleep)) return;
     joint_solver::solve(joint, a, b, dt);
 }
 

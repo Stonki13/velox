@@ -669,6 +669,10 @@ BodyId World::addBody(Body bodyValue) {
 }
 
 JointId World::addJoint(Joint jointValue) {
+    if (jointValue.a >= bodies_.size() || jointValue.b >= bodies_.size())
+        throw std::out_of_range("velox: joint body index out of range");
+    if (jointValue.a == jointValue.b)
+        throw std::invalid_argument("velox: joint endpoints must differ");
     if (joints_.size() >= UINT32_MAX)
         throw std::length_error("velox: joint capacity exceeded");
     uint32_t slot;
@@ -2721,6 +2725,14 @@ void World::removeBody(BodyId id) {
 
 SoftBodyId World::addSoftBody(const SoftBodyDesc& desc) {
     AccessGuard guard(*this, AccessKind::Mutation, "addSoftBody");
+    if (desc.invMasses.size() != desc.positions.size())
+        throw std::invalid_argument(
+            "velox: SoftBodyDesc invMasses size must match positions size");
+    for (const auto& c : desc.constraints) {
+        if (c.a >= desc.positions.size() || c.b >= desc.positions.size())
+            throw std::out_of_range(
+                "velox: SoftBodyDesc constraint index out of range");
+    }
     SoftBody sb;
     sb.positions = desc.positions;
     sb.prevPositions = desc.positions;
@@ -4474,7 +4486,7 @@ void World::stepImpl(float dt) {
 
     // --- soft bodies (XPBD, after rigid-body solve) --------------------------
     for (SoftBody& sb : softBodies_)
-        softbody_detail::stepSoftBody(sb, gravity, h, bodies_);
+        softbody_detail::stepSoftBody(sb, gravity, dt, bodies_);
 
     // --- sleeping + persistent contacts for next frame ------------------------
     updateSleeping(dt);

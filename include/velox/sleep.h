@@ -154,6 +154,7 @@ struct SleepConfig {
         if (drowsySimulationRate > 1.0f) drowsySimulationRate = 1.0f;
         if (contactStabilityThreshold < 0.0f) contactStabilityThreshold = 0.0f;
         if (contactStabilityFrames < 0) contactStabilityFrames = 0;
+        if (contactStabilityFrames > 65535) contactStabilityFrames = 65535;
     }
 };
 

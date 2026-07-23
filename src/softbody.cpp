@@ -1,7 +1,8 @@
 #include "velox/softbody.h"
 #include "velox/body.h"
-#include <cmath>
 #include <algorithm>
+#include <cmath>
+#include <stdexcept>
 
 namespace velox {
 
@@ -12,6 +13,10 @@ namespace velox {
 SoftBodyDesc makeClothSoftBody(int cols, int rows, float spacing,
                                float invMass, float compliance,
                                bool pinCorners) {
+    if (cols < 2 || rows < 2)
+        throw std::invalid_argument("velox: cloth grid requires cols >= 2 and rows >= 2");
+    if (spacing <= 0.0f)
+        throw std::invalid_argument("velox: cloth spacing must be positive");
     SoftBodyDesc desc;
 
     int n = cols * rows;
@@ -58,6 +63,10 @@ SoftBodyDesc makeClothSoftBody(int cols, int rows, float spacing,
 
 SoftBodyDesc makeSoftSphereSoftBody(float radius, int surfaceCount,
                                     float invMass, float compliance) {
+    if (surfaceCount < 12)
+        throw std::invalid_argument("velox: soft sphere requires surfaceCount >= 12");
+    if (radius <= 0.0f)
+        throw std::invalid_argument("velox: soft sphere radius must be positive");
     SoftBodyDesc desc;
 
     int n = surfaceCount + 1; // +1 for core
