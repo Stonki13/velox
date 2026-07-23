@@ -14,7 +14,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        # Ship both supported macOS CPU architectures. macos-15-intel is the
+        # explicit GitHub-hosted Intel label; macos-15 is Apple Silicon.
+        os: [ubuntu-latest, windows-latest, macos-15-intel, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

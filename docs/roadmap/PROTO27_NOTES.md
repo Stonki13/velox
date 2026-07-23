@@ -10,10 +10,11 @@
   flag into redistributable packages.
 - Added `platform_demo` and CTest `velox.platform`; it verifies exactly one
   platform and one architecture at compile time.
-- Made macOS coverage explicit in CI job names: `macos-13` is the Intel lane
-  and `macos-14` is the Apple Silicon ARM64 lane. Both CPU and strict replay
-  matrices configure with `VELOX_ENABLE_CUDA=OFF`, so CUDA is skipped
-  deliberately on unsupported platforms.
+- Made macOS coverage explicit in CI job names: `macos-15-intel` is the Intel
+  lane and `macos-15` is the Apple Silicon ARM64 lane. Both CPU and strict
+  replay matrices configure with `VELOX_ENABLE_CUDA=OFF`, so CUDA is skipped
+  deliberately on unsupported platforms. These are GitHub's current standard
+  hosted runner labels; the retired `macos-13` lane no longer receives jobs.
 
 ## Verification
 

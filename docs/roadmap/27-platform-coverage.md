@@ -32,7 +32,9 @@ Add macOS and ARM-based CI lanes to Velox's existing Windows + Linux x86_64 CI. 
 
 **CI infrastructure:**
 
-1. **GitHub Actions workflows:** Add macOS runners (`macos-latest` for Apple Silicon, `macos-13` for Intel Mac) alongside existing Windows and Linux runners.
+1. **GitHub Actions workflows:** Add macOS runners (`macos-15` for Apple
+   Silicon, `macos-15-intel` for Intel Mac) alongside existing Windows and
+   Linux runners.
 2. **Build configuration:** CMake must detect the platform and select appropriate compiler flags:
    - macOS: use Clang (default on Xcode); link against `-framework Cocoa` for any windowing examples.
    - ARM: ensure SIMD intrinsics are compiled with `-mcpu=apple-m1` or equivalent; verify that all GJK/EPA math works correctly on ARM NEON.

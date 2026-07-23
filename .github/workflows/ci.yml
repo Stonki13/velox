@@ -17,9 +17,9 @@ jobs:
             name: Linux x86_64
           - os: windows-latest
             name: Windows x86_64
-          - os: macos-13
+          - os: macos-15-intel
             name: macOS Intel x86_64
-          - os: macos-14
+          - os: macos-15
             name: macOS Apple Silicon ARM64
     runs-on: ${{ matrix.os }}
     steps:
@@ -117,9 +117,9 @@ jobs:
             name: Linux x86_64
           - os: windows-latest
             name: Windows x86_64
-          - os: macos-13
+          - os: macos-15-intel
             name: macOS Intel x86_64
-          - os: macos-14
+          - os: macos-15
             name: macOS Apple Silicon ARM64
     runs-on: ${{ matrix.os }}
     steps:
@@ -188,9 +188,9 @@ jobs:
             name: Linux ARM64
           - os: windows-latest
             name: Windows x86_64
-          - os: macos-13
+          - os: macos-15-intel
             name: macOS Intel x86_64
-          - os: macos-14
+          - os: macos-15
             name: macOS Apple Silicon ARM64
     runs-on: ${{ matrix.os }}
     steps:
