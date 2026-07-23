@@ -1,23 +1,32 @@
 # Velox
 
-**A fast, tunneling-resistant 3D physics engine for games. C++17, GPU-accelerated.**
+**C++17 3D rigid-body physics with CCD, persistent contact manifolds, strict CPU replay, and optional NVIDIA CUDA acceleration.**
 
-> **Production-ready.** Velox has reached 1.0 maturity. The core solver, GPU backend,
-> collision pipeline, and C API are stable and heavily stress-tested (52-test suite
-> including randomized fuzzing, long-duration soak tests, and differential
-> tests against Jolt Physics in CI on four platforms). The API is frozen for
-> backward compatibility. We encourage integration and welcome bug reports with
-> repro scenes.
+Velox 1.0 is a released, MIT-licensed physics library for games and realtime
+simulation. It provides a portable CPU backend, an optional CUDA backend, C and
+C++ APIs, deterministic CPU replay mode, a raycast vehicle, a query-only capsule
+character controller, and a renderer-independent debug-line interface.
 
-Velox (Latin: *swift*) is built around two core promises:
+Velox is designed around four practical goals:
 
-1. **High-speed tunneling prevention.** Continuous collision detection (CCD)
-   is a first-class citizen, not a bolted-on flag. Fast-moving bodies are swept
-   through time, so bullets don't pass through walls and cars don't fall
-   through the floor.
-2. **Blazingly fast.** The solver is designed data-oriented from day one so the
-   hot loops can run on the GPU (CUDA / compute-shader backend) as well as
-   wide-SIMD CPU.
+1. **High-speed collision robustness.** Predictive Contact Sweeping combines
+   speculative contacts with conservative advancement to protect supported
+   collider paths from tunneling.
+2. **Stable resting contact.** Clipped persistent manifolds retain feature keys
+   and warm-start impulses, improving stack convergence and friction stability.
+3. **Replayable CPU simulation.** Strict mode provides cross-platform CPU trace
+   regression coverage across the supported build matrix.
+4. **Scalable execution.** The CPU backend uses deterministic ordering and
+   worker parallelism where safe; the optional CUDA backend targets large,
+   contact-heavy workloads on NVIDIA GPUs.
+
+> **Support boundary:** Strict determinism is a CPU reference mode. CPU and CUDA
+> use different constraint execution orders and are not lockstep-identical.
+> CUDA is NVIDIA-only; Intel and AMD systems use the portable CPU backend.
+
+Velox is a focused 3D rigid-body engine, not a drop-in feature-for-feature
+replacement for Jolt, PhysX, or Havok. Evaluate it against your own scenes,
+platform targets, and gameplay requirements before shipping.
 
 ## Predictive Contact Sweeping (PCS)
 
@@ -43,15 +52,16 @@ still let extreme cases slip). Velox layers them:
 a 125-sphere pile, 3 km/s head-on impacts, a 1.5 km/s spinning box, resting
 stability for every shape, and a ball settling inside a triangle-mesh trough.
 
-## GPU acceleration
+## CUDA acceleration
 
-The narrow phase (GJK, manifolds, mesh BVH traversal) and the contact solver
-are header-only `__host__ __device__` code: the CUDA backend runs **the exact
-same physics code as the CPU backend**, over device buffers. Sequential
-impulses are inherently serial, so the GPU solver uses **graph coloring** —
+The narrow phase (GJK, manifolds, and mesh BVH traversal) uses device-compatible
+code, and the CUDA backend executes against device buffers. Sequential impulses
+are inherently serial, so the CUDA solver uses **graph coloring**:
 contacts are partitioned so no two contacts in a color share a dynamic body,
-and each color is solved as one fully parallel kernel. CMake auto-detects a
-CUDA toolkit; `World(BackendType::Auto)` picks the GPU when present.
+and each color is solved as one fully parallel kernel. CMake detects a CUDA
+toolkit when available; `World(BackendType::Auto)` selects CUDA only when Velox
+was built with CUDA and a usable NVIDIA device is present. The different solver
+ordering means CUDA is validated for physical tolerance, not CPU lockstep replay.
 
 Per-color kernel sweeps are batched with CUDA Graphs, and the coloring is greedy
 first-free-bit, which keeps the color count near the max constraints per body.
@@ -62,56 +72,9 @@ contact and joint solving, and transform integration on the device across all
 solver substeps, then download body state once. Smaller joint sets use the CPU
 joint path to avoid graph overhead.
 
-`examples/benchmark` on an RTX 5080, median ms/step (60 Hz steps, full
-pipeline, 4 solver substeps):
-
-| Scene | CPU 1 thread | CPU 16 threads | CUDA |
-|---|---|---|---|
-| 512-sphere rain | 0.84 ms | **0.62 ms** | 2.15 ms |
-| 2048-sphere rain | 4.53 ms | **1.92 ms** | 4.11 ms |
-| 8192-sphere rain | 17.99 ms | **7.01 ms** | 8.83 ms |
-| 2048 spheres on 20k-triangle terrain | 0.84 ms | **0.66 ms** | 3.27 ms |
-
-Three profile-driven passes shaped these numbers. First, contact-event
-pairing rescanned the entire contact array once per active pair (O(pairs x
-contacts), ~60 ms at ~11k contacts); one sorted pass fixed both backends.
-Second, the host broad phase ran one serial AABB-tree query per awake body;
-the read-only queries now fan out across the worker pool with a
-deterministic sort merge, and solver conflict batches are built once per
-step instead of once per substep. Third, the CUDA sorted-axis sweep scanned
-windows of hundreds of bodies per thread in dense piles (16 ms of a 23 ms
-collision phase); a uniform-grid broad phase (exact packed cell keys,
-cached-scratch thrust sort, 27-neighborhood binary-search lookups, and a
-brute-force lane for planes/meshes/oversized bodies) runs the same stage in
-~0.4 ms. The 8192-body pile stepped at 124 ms (CPU) / 83 ms (CUDA) at the
-start of this effort and 7.0 / 8.8 ms now. Small active sets over large
-static worlds remain effectively free on the CPU thanks to the incremental
-AABB-tree broad phase.
-
-The independent-distance-joint scene measures the resident constraint path:
-
-| Joints | CPU | CUDA |
-|---|---|---|
-| 1024 | 2.15 ms | **1.53 ms** |
-| 4096 | 8.65 ms | **3.28 ms** |
-
-These are a current local Release run on an RTX 5080. The GPU broad phase is
-hybrid: compact all-pairs culling keeps small scenes highly occupied, while
-large scenes use GPU sweep-and-prune, overflow-safe candidate compaction, and
-a fully parallel narrow-phase pass. The measured crossover is 4096 bodies;
-the 8192-body all-pairs reference path takes 183.94 ms instead of 51.86 ms.
-
-The CPU backend uses a persistent worker pool for independent body integration
-and deterministic narrow-phase pair batches. `World::setWorkerCount(0)` selects
-hardware concurrency; `1` provides a serial reference. Contact batches are
-merged in original broad-phase order, so worker count does not change solver
-ordering or simulation results. The CPU impulse solver forms contiguous
-order-preserving batches that stop at the first shared dynamic body; contacts
-inside each batch execute in parallel without changing Gauss-Seidel ordering.
-CUDA uses broader conflict-free graph coloring for maximum throughput.
-Dense interconnected piles can create short CPU batches, so this deterministic
-mode is intentionally conservative; the CUDA backend remains the high-throughput
-solver for those scenes.
+Performance is workload- and hardware-dependent. Run `examples/benchmark` on
+your target hardware and use [the performance guide](docs/performance.md) for
+the measurement protocol, tuning controls, and regression workflow.
 
 ## Solver
 
@@ -169,7 +132,10 @@ operand symmetry, common-translation invariance, and witness consistency.
   break events and generation-safe stale handles.
 - **Ragdoll authoring**: `RagdollBuilder` validates connected bone trees over
   existing bodies, applies per-bone mass tuning, creates limited cone-twist
-  links or motorized hinge links, and can wake/query the resulting rig.
+   links or motorized hinge links, and can wake/query the resulting rig.
+- **Gameplay helpers**: a query-only capsule `CharacterController` for
+  sweep-and-slide movement and a raycast `Vehicle` with suspension, steering,
+  drivetrain, and braking controls.
 - **Body control**: static/kinematic/dynamic motion types, accumulated forces
   and torques, point impulses, per-body damping and gravity scaling, custom
   mass properties with independently oriented principal-inertia axes, sensor flags,
@@ -185,7 +151,9 @@ operand symmetry, common-translation invariance, and witness consistency.
   swap-removal, stale-handle rejection, and automatic attached-joint cleanup
 - **Rollback snapshots**: copyable same-world checkpoints restore bodies,
   joints, geometry, stable-handle generations, warm starts, sleeping state,
-  and event phase while invalidating CPU/CUDA backend caches for exact replay
+   and event phase while invalidating CPU/CUDA backend caches for exact replay
+- **Serialization**: versioned scene archives and replay recording APIs for
+  persistent simulation data and compatibility-checked loading.
 - **Large-world origin shifting**: one transactional call rebases bodies,
   planes, static mesh/BVH geometry, CCD history, warm starts, and event points
   while preserving relative dynamics and stable handles
@@ -226,7 +194,6 @@ operand symmetry, common-translation invariance, and witness consistency.
   query. GPU: hybrid all-pairs / compacted sweep-and-prune (CUDA). Static
   meshes participate by root AABB rather than as unbounded geometry
 - PCS collision pipeline (above) with restitution and accumulated-impulse friction
-- PCS collision pipeline (above) with restitution and accumulated-impulse friction
 
 Mesh colliders are static-only (level geometry), matching how game engines
 treat non-convex meshes.
@@ -234,11 +201,15 @@ treat non-convex meshes.
 ## Build
 
 ```bash
-cmake -B build
-cmake --build build
+cmake -S . -B build -DVELOX_ENABLE_CUDA=OFF
+cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
-./build/examples/bullet_demo   # runs the high-speed CCD example
 ```
+
+This builds the portable CPU backend. Set `-DVELOX_ENABLE_CUDA=ON` on an NVIDIA
+system with a CUDA toolkit to build CUDA acceleration. On Visual Studio, run
+`build\\examples\\Release\\bullet_demo.exe` for the CCD example; on a
+single-config generator, run `./build/examples/bullet_demo`.
 
 ## Documentation
 
@@ -249,6 +220,11 @@ ctest --test-dir build -C Release --output-on-failure
   Dear ImGui interactive overlay.
 - [Concepts](docs/concepts.md) describes Predictive Contact Sweeping, TGS,
   manifolds, islands, and backend tradeoffs.
+- [Performance](docs/performance.md) explains `StepStats`, benchmark workflow,
+  and the CPU/CUDA tuning tradeoffs.
+- [Portability and determinism](docs/PORTABILITY.md) and
+  [cross-platform replay](docs/cross-platform.md) document supported CPU
+  targets and the strict replay contract.
 - [Threading contract](docs/threading.md) specifies safe cross-thread world
   access and the legacy borrowed-reference limits.
 - [Batched and async queries](docs/batched-queries.md) describes ordered
@@ -259,6 +235,8 @@ ctest --test-dir build -C Release --output-on-failure
   explicit throw policy, and controlled CUDA backend restoration.
 - [Packaging and releases](docs/packaging.md) covers `find_package(Velox)`,
   Conan source packages, and tagged release artifacts.
+- [Serialization](docs/serialization.md) documents scene archives, replay
+  recordings, and compatibility handling.
 - [Contributing](docs/CONTRIBUTING.md) describes development gates, CUDA
   compatibility requirements, and how to report a reproducible physics issue.
 - [Real-workload release gate](docs/release-gate.md) defines the game-like

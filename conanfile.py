@@ -7,8 +7,13 @@ class VeloxConan(ConanFile):
     name = "velox"
     license = "MIT"
     url = "https://github.com/Stonki13/velox"
-    description = "C++17 rigid-body physics engine"
-    topics = ("physics", "rigid-body", "game-development", "cuda")
+    description = (
+        "C++17 3D rigid-body physics with CCD and optional NVIDIA CUDA acceleration"
+    )
+    topics = (
+        "physics", "rigid-body", "game-development", "ccd", "cuda",
+        "deterministic-simulation",
+    )
     settings = "os", "arch", "compiler", "build_type"
     options = {"shared": [True, False], "fPIC": [True, False], "with_cuda": [True, False]}
     default_options = {"shared": False, "fPIC": True, "with_cuda": False}

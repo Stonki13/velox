@@ -1,7 +1,7 @@
 {
   "name": "velox",
   "version": "1.0.0",
-  "description": "C++17 rigid-body physics engine with an optional NVIDIA CUDA GPU backend.",
+  "description": "C++17 3D rigid-body physics with CCD, persistent manifolds, strict CPU replay, and optional NVIDIA CUDA acceleration.",
   "homepage": "https://github.com/Stonki13/velox",
   "license": "MIT",
   "dependencies": [

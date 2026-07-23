@@ -42,21 +42,16 @@ its version from the `vcpkg.json` `version` field, which must be kept in sync
 with `kVersionMajor/Minor/Patch` in `include/velox/version.h` (vcpkg cannot read
 the header at manifest-parse time).
 
-Until the port is published to a registry, install it as an overlay port from a
-checkout of this repository:
+Velox is currently distributed as an overlay/registry port from this repository;
+it is not claimed to be in the public vcpkg registry. Install it from a checkout:
 
 ```powershell
 vcpkg install velox --overlay-ports=C:\path\to\velox
 ```
 
-Once a maintainer has filled in the release archive SHA-512 in `portfile.cmake`
-and published the port, consumers install it normally:
-
-```powershell
-vcpkg install velox
-```
-
-Then link it from CMake exactly as with the Conan package:
+The portfile pins the signed `v1.0.0` source archive with its SHA-512. Update
+that hash only after creating and verifying the corresponding signed release
+tag. Link it from CMake exactly as with the Conan package:
 
 ```cmake
 find_package(Velox CONFIG REQUIRED)
@@ -75,8 +70,9 @@ Notes:
 
 ## Tagged Releases
 
-The `Release` workflow runs only for `v*` tags or manual dispatch. It creates
-CPU-only Windows, Linux, and macOS install trees, archives each one, produces
-SHA-256 manifests, and attaches both to the GitHub release. Publishing to
-Conan Center or the vcpkg registry remains a maintainer action after a tagged
-artifact has passed this pipeline.
+The `Release` workflow runs for `v*` tags or manual dispatch. It creates
+CPU-only Windows x64, Linux x64, macOS x64, and macOS arm64 install trees,
+archives each one, produces SHA-256 manifests, and attaches the artifacts to
+the GitHub release. Publishing to Conan Center or the public vcpkg registry
+remains a separate maintainer action after a tagged artifact passes this
+pipeline.
