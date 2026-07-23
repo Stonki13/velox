@@ -368,3 +368,70 @@ The two real, reproducible wins (Scene A at 8192 bodies, Scene B mesh
 terrain) are exactly the dense-contact scenes where `solveVelocities`
 actually runs its device path every step, matching the fix's mechanism
 precisely — this is not a coincidental correlation.
+
+## Phase 3: developer experience — tools and evidence
+
+Audited existing docs before writing anything new (per this plan's own
+"do not start by copying" discipline): `docs/packaging.md` already
+documents the CMake install path, Conan recipe, and vcpkg port/overlay
+usage in full, including static-vs-shared linkage and the optional
+`cuda` feature; `docs/debugging.md` already covers every debug-draw
+layer, headless debugging (`examples/debug_visualizer`,
+`velox.debug_visualizer`), the Dear ImGui integration, and a
+troubleshooting section. Both already satisfy this phase's "CMake/vcpkg
+consumer documentation" and "profiler/debug visualizer troubleshooting
+guide" requirements — rewriting either would duplicate existing,
+accurate documentation rather than add anything, so neither was touched.
+The rollback/prediction demo this phase's checklist also calls for was
+already built in Phase 1 (`examples/rollback_demo.cpp`,
+`velox.rollback_demo`).
+
+What was actually new this phase:
+
+- **`examples/replay_diff_cli.cpp`** (CTest `velox.replay_diff_cli`): a
+  standalone tool for the debugging workflow this whole plan targets —
+  given two recorded traces of nominally the same simulation (a client's
+  predicted history vs. the server's authoritative one, or the same
+  replay re-run on two machines), it reports the exact frame, body index,
+  and field where they first disagree, via `rollback.h`'s
+  `findFirstDivergence`. `ReplayRecording` (`serialization.h`) has no
+  on-disk format of its own — it is normally produced/consumed in-process
+  — so this tool adds a small, tool-local binary trace container (magic +
+  version + dt + packed initial scene + per-frame bytes) built on the
+  existing `packScene`/`unpackScene`, deliberately kept out of the public
+  API surface (it's CLI plumbing, not a versioned library feature that
+  would need ABI-stability guarantees). `--selftest` records a scene,
+  corrupts one body's position at a known frame, saves both traces to
+  disk, reloads them, and asserts the CLI's diff pipeline reports that
+  exact frame/body/field — exercising the real save → load → diff path,
+  not just the in-memory comparison.
+- **`examples/gpu_debris_demo.cpp`** (CTest `velox.gpu_debris_demo`): a
+  weld-joint wall that shatters into independent debris bodies under an
+  explosion (`World::explode`), then piles up — the large-body,
+  dense-contact regime this plan's GPU-scale niche targets. Runs on
+  `BackendType::Auto` so it exercises CUDA when available and the CPU
+  backend otherwise; the smoke test asserts correctness only (every body
+  finite, nothing fell through the floor), not a hard performance number,
+  since the fallback requirement is "runs correctly on both," not "wins
+  on both." Measured during development (not asserted in the test, since
+  CTest machines vary): this weld-breaking scene is considerably more
+  expensive per body than the plain sphere-rain scenes Phase 2 profiled
+  (joint-graph rebuilds as welds snap at different times), so CUDA does
+  not win at this demo's small 257-body smoke-test size — sized deliberately
+  for a fast, reliable CTest rather than to reproduce Phase 2's measured
+  crossover point.
+
+### Gate results
+
+- `cmake --build build_phase1 --config Release -j 16` (CPU-only) and
+  `cmake --build build_cuda --config Release -j 16` (CUDA enabled): both
+  clean, 0 compiler errors.
+- `ctest --test-dir build_phase1 -C Release`: **55/55 CTest suites pass
+  (100%)**, including the two new `velox.replay_diff_cli` and
+  `velox.gpu_debris_demo` entries.
+- `ctest --test-dir build_cuda -C Release`: **54/56 CTest suites pass**;
+  the 2 failures are the same pre-existing `velox.stress`/
+  `velox.stress_repeat` sub-check failures documented in the Phase 0
+  baseline and re-confirmed unrelated in Phase 2 — not newly introduced
+  by this phase's additions (both new demos build and pass on this
+  configuration too: `velox.gpu_debris_demo` ran with `backend=cuda`).
