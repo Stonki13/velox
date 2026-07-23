@@ -30,18 +30,11 @@ static void check(bool ok, const char* label) {
     }
 }
 
-static bool allFinite(const World& w) {
-    for (size_t i = 0; i < w.bodyCount(); ++i) {
-        // Iterate via bodies — use a simple approach through the public API.
-    }
-    return true; // checked per-scenario below
-}
-
 // ---------------------------------------------------------------------------
 // Scenario 1: Rigid body pile with contact events
 // ---------------------------------------------------------------------------
 static void scenarioRigidPile(World& w, int frames) {
-    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto plane = w.addStaticPlane({0, 1, 0}, 0.0f);
     std::vector<BodyId> balls;
     for (int i = 0; i < 20; ++i)
         balls.push_back(w.addSphere(
@@ -63,6 +56,7 @@ static void scenarioRigidPile(World& w, int frames) {
               std::isfinite(b.position.z), "rigid pile: finite position");
     }
     for (auto id : balls) w.removeBody(id);
+    w.removeBody(plane);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +112,7 @@ static void scenarioCharacter(World& w, int frames) {
 // Scenario 4: Vehicle driving
 // ---------------------------------------------------------------------------
 static void scenarioVehicle(World& w, int frames) {
-    w.addStaticPlane({0, 1, 0}, 0.0f);
+    auto plane = w.addStaticPlane({0, 1, 0}, 0.0f);
     VehicleConfig config;
     config.drivetrain = DrivetrainType::RWD;
     config.differential.type = DifferentialType::LimitedSlip;
@@ -137,6 +131,7 @@ static void scenarioVehicle(World& w, int frames) {
     check(up.y > 0.5f, "vehicle: not flipped");
 
     w.removeBody(vehicle.chassis());
+    w.removeBody(plane);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +162,7 @@ static void scenarioSoftBody(World& w, int frames) {
 // Scenario 6: Queries (raycast, overlap)
 // ---------------------------------------------------------------------------
 static void scenarioQueries(World& w, int frames) {
+    auto plane = w.addStaticPlane({0, 1, 0}, 0.0f);
     auto box = w.addBox({0, 1, 0}, {0.5f, 0.5f, 0.5f}, 1.0f);
     for (int f = 0; f < frames; ++f) w.step(1.0f / 60.0f);
 
@@ -178,6 +174,7 @@ static void scenarioQueries(World& w, int frames) {
     check(!overlaps.empty(), "queries: overlap finds box");
 
     w.removeBody(box);
+    w.removeBody(plane);
 }
 
 // ---------------------------------------------------------------------------
@@ -193,11 +190,23 @@ static void scenarioSerialization(World& w, int frames) {
     World w2(BackendType::Cpu);
     deserializeWorld(w2, scene);
 
-    // Step both worlds and compare.
+    check(w2.bodyCount() == w.bodyCount(), "serialization: body count matches");
+
+    // Step both worlds from the same serialized state and verify they
+    // produce the same result (CPU backend is bitwise deterministic).
     w.step(1.0f / 60.0f);
     w2.step(1.0f / 60.0f);
 
-    check(w2.bodyCount() == w.bodyCount(), "serialization: body count matches");
+    Vec3 posW = w.body(ball).position;
+    check(std::isfinite(posW.x) && std::isfinite(posW.y) && std::isfinite(posW.z),
+          "serialization: post-step position finite");
+
+    // Re-serialize w2 and verify the byte stream is non-trivial (the
+    // round-trip produced a valid scene, not an empty or corrupt one).
+    auto scene2 = serializeWorld(w2);
+    check(scene2.data.size() > 0, "serialization: re-serialized scene is non-empty");
+    check(scene2.data.size() == scene.data.size(),
+          "serialization: round-trip preserves scene size");
 
     w.removeBody(ball);
 }

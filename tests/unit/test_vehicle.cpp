@@ -273,6 +273,9 @@ TEST_CASE("Vehicle: differential types produce different behavior") {
 
     float openDiff = runWith(DifferentialType::Open);
     float lockedDiff = runWith(DifferentialType::Locked);
+    // The open differential must produce a measurable spin difference
+    // (otherwise the test can't distinguish working from stubbed-out).
+    CHECK(openDiff > 0.01f);
     // Locked diff should have smaller (or zero) spin difference.
-    CHECK(lockedDiff <= openDiff + 0.01f);
+    CHECK(lockedDiff < openDiff);
 }

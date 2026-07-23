@@ -70,9 +70,11 @@ clone) inform the gap analysis; no Jolt source was modified or vendored.
 - **Production history.** Jolt has shipped in a real title (Horizon Forbidden
   West) and is Godot 4's default physics engine. Velox has shipped in
   nothing. No amount of internal testing substitutes for that.
-- **Soft bodies.** Jolt has a soft-body solver. Velox does not, and this plan
-  does not build one — soft bodies are explicitly deferred to Phase 5 until
-  real user demand exists.
+- **Soft bodies.** Jolt has a full soft-body solver. Velox now has a minimal
+  XPBD solver (Phase B): cloth and deformable spheres with distance
+  constraints, collision against static rigid bodies. No self-collision,
+  no tetrahedral FEM, no two-way rigid-body coupling — see
+  `include/velox/softbody.h` and `docs/known-limitations.md`.
 - **Vehicle depth.** Jolt ships `WheeledVehicleController`,
   `TrackedVehicleController`, and `MotorcycleController` with differential
   and anti-roll-bar tuning. Velox has one raycast vehicle model

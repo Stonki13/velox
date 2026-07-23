@@ -87,10 +87,14 @@ JPH::Vec3 toJolt(const Vec3f& v) { return {v.x, v.y, v.z}; }
 Vec3f fromJolt(JPH::Vec3Arg v) { return {v.GetX(), v.GetY(), v.GetZ()}; }
 Quatf fromJolt(JPH::QuatArg q) { return {q.GetX(), q.GetY(), q.GetZ(), q.GetW()}; }
 
+void ensureJoltInit() {
+    static JoltRuntime runtime; // one-time global Jolt registration
+}
+
 } // namespace
 
 Trajectory runJolt(const SceneDesc& scene) {
-    static JoltRuntime runtime; // one-time global Jolt registration
+    ensureJoltInit();
 
     BPLayerInterfaceImpl broadPhaseLayers;
     ObjectVsBroadPhaseLayerFilterImpl objectVsBroadPhase;
@@ -235,7 +239,7 @@ Trajectory runJolt(const SceneDesc& scene) {
 }
 
 CharacterResult runJoltCharacter(const CharacterSceneDesc& scene) {
-    static JoltRuntime runtime;
+    ensureJoltInit();
 
     BPLayerInterfaceImpl broadPhaseLayers;
     ObjectVsBroadPhaseLayerFilterImpl objectVsBroadPhase;
