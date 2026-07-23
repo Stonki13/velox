@@ -1059,3 +1059,61 @@ claim of production readiness.
   compiler errors.
 - `ctest --test-dir build_phase1 -C Release`: **58/58 CTest suites
   pass (100%)**, including the new `velox.physics_sandbox`.
+
+## Phase F (stretch): GPU stage 5 — investigation, not implementation
+
+### What was investigated
+
+The Vulkan stage 4 writeup identified the real next lever: per-dispatch
+and per-barrier overhead inside the GPU timeline dominates, not
+submission count. Stage 4's fusion of the substep loop into one
+submission was measured as a wash because the total dispatch+barrier
+count is identical whether fused or not.
+
+Reading `backend_vulkan.cpp`'s `recordSolvePass`: each velocity
+iteration dispatches one compute kernel **per color** with a full
+`VkMemoryBarrier` after each dispatch. For a typical 8192-body sphere
+pile with ~8 greedy colors and 16 velocity iterations (2× the CPU
+default, matching the CUDA backend's compensated sweep count), that is
+**128 dispatch+barrier pairs per substep**, ×4 substeps = **512
+dispatch+barrier pairs per step**. Each barrier stalls the GPU pipeline
+until all in-flight shader writes are visible.
+
+### Approaches evaluated
+
+1. **Secondary command buffer replay** (`vkCmdExecuteCommands`):
+   pre-record the solve commands into a secondary buffer and replay
+   each frame. **Rejected**: the backend already records everything
+   into a single primary command buffer and submits once per step
+   (`advanceSubsteps`). The CPU recording cost is already amortized;
+   the bottleneck is GPU-side barrier stalls, not CPU-side recording.
+
+2. **On-device contact coloring**: move the greedy graph coloring from
+   the CPU to a compute shader, potentially enabling a single-dispatch
+   solve where each thread handles one contact and uses atomics to
+   coordinate with body-sharing neighbors. **This is the real fix**:
+   it eliminates the per-color barriers entirely, replacing
+   `O(iterations × colors)` dispatch+barrier pairs with
+   `O(iterations)` single dispatches. However, it requires a
+   fundamentally different solve shader (atomic-based conflict
+   resolution instead of color-serialized Gauss-Seidel), which is a
+   significant architectural change beyond this pass's scope.
+
+3. **Reduced color count**: the greedy first-free-color algorithm
+   already produces near-optimal colorings for the contact graphs
+   tested (chromatic number ≈ max contacts per body ≈ 6-12 for sphere
+   piles). No easy win here.
+
+### Disposition
+
+**Not implemented.** The investigation confirms that the only
+meaningful next step is approach 2 (on-device coloring + atomic-based
+single-dispatch solve). This is a multi-day architectural change to
+the Vulkan solve shader, not a quick optimization. The current Vulkan
+backend's measured ~25% win on 8192-body dense contact scenes (stage 2)
+remains the shipped state; the crossover point (~8000 bodies) is
+higher than CUDA's (~2000) because collision detection remains
+host-side, and the per-color barrier overhead limits the solve's
+scaling on very dense scenes.
+
+No code changes this phase; investigation findings recorded here.
