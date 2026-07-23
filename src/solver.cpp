@@ -10,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -67,32 +68,67 @@ public:
 
     void parallelFor(size_t taskCount, std::function<void(size_t)> task) {
         if (taskCount == 0) return;
-        if (desiredWorkers_ == 1 || taskCount == 1) {
+        if (activePool_ == this || desiredWorkers_ == 1 || taskCount == 1) {
             for (size_t i = 0; i < taskCount; ++i) task(i);
             return;
         }
         ensureStarted();
+        auto job = std::make_shared<Job>(std::move(task), taskCount,
+                                         static_cast<uint32_t>(threads_.size() + 1));
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            task_ = std::move(task);
-            taskCount_ = taskCount;
-            nextTask_.store(0);
-            remaining_.store(static_cast<uint32_t>(threads_.size() + 1));
-            exception_ = nullptr;
+            job_ = job;
             ++generation_;
         }
         wake_.notify_all();
-        runTasks();
-        finishParticipant();
-        std::unique_lock<std::mutex> lock(mutex_);
-        done_.wait(lock, [&] { return remaining_.load() == 0; });
-        std::exception_ptr exception = exception_;
-        task_ = {};
-        lock.unlock();
+        runTasks(*job);
+        finishParticipant(*job);
+        std::unique_lock<std::mutex> lock(job->doneMutex);
+        while (job->remaining.load() != 0) {
+            if (job->done.wait_for(lock, std::chrono::milliseconds(100)) ==
+                std::cv_status::timeout) {
+                // A worker can begin waiting just as a dispatch is published
+                // on some platforms. Re-notify rather than turning that rare
+                // rendezvous miss into a permanently stalled simulation.
+                lock.unlock();
+                wake_.notify_all();
+                lock.lock();
+            }
+        }
+        std::exception_ptr exception;
+        {
+            std::lock_guard<std::mutex> exceptionLock(job->exceptionMutex);
+            exception = job->exception;
+        }
         if (exception) std::rethrow_exception(exception);
     }
 
 private:
+    struct Job {
+        Job(std::function<void(size_t)> taskIn, size_t count, uint32_t participants)
+            : task(std::move(taskIn)), taskCount(count), remaining(participants) {}
+
+        std::function<void(size_t)> task;
+        const size_t taskCount;
+        std::atomic<size_t> nextTask{0};
+        std::atomic<uint32_t> remaining;
+        std::mutex exceptionMutex;
+        std::exception_ptr exception;
+        std::mutex doneMutex;
+        std::condition_variable done;
+    };
+
+    class ActivePoolScope {
+    public:
+        explicit ActivePoolScope(WorkerPool* pool) : previous_(activePool_) {
+            activePool_ = pool;
+        }
+        ~ActivePoolScope() { activePool_ = previous_; }
+
+    private:
+        WorkerPool* previous_;
+    };
+
     static uint32_t resolveCount(uint32_t requested) {
         uint32_t total = requested;
         if (total == 0) total = std::thread::hardware_concurrency();
@@ -125,6 +161,7 @@ private:
 
     void workerLoop(uint64_t seenGeneration) {
         for (;;) {
+            std::shared_ptr<Job> job;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 wake_.wait(lock, [&] {
@@ -132,43 +169,44 @@ private:
                 });
                 if (stopping_) return;
                 seenGeneration = generation_;
+                job = job_;
             }
-            runTasks();
-            finishParticipant();
+            runTasks(*job);
+            finishParticipant(*job);
         }
     }
 
-    void runTasks() {
+    void runTasks(Job& job) {
+        ActivePoolScope scope(this);
         for (;;) {
-            size_t index = nextTask_.fetch_add(1);
-            if (index >= taskCount_) return;
+            size_t index = job.nextTask.fetch_add(1);
+            if (index >= job.taskCount) return;
             try {
-                task_(index);
+                job.task(index);
             } catch (...) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!exception_) exception_ = std::current_exception();
-                nextTask_.store(taskCount_);
+                std::lock_guard<std::mutex> lock(job.exceptionMutex);
+                if (!job.exception) job.exception = std::current_exception();
+                job.nextTask.store(job.taskCount);
                 return;
             }
         }
     }
 
-    void finishParticipant() {
-        if (remaining_.fetch_sub(1) == 1) done_.notify_one();
+    void finishParticipant(Job& job) {
+        if (job.remaining.fetch_sub(1) == 1) job.done.notify_one();
     }
 
     std::vector<std::thread> threads_;
     std::mutex mutex_;
-    std::condition_variable wake_, done_;
-    std::function<void(size_t)> task_;
-    std::exception_ptr exception_;
-    std::atomic<size_t> nextTask_{0};
-    std::atomic<uint32_t> remaining_{0};
-    size_t taskCount_ = 0;
+    std::condition_variable wake_;
+    std::shared_ptr<Job> job_;
     uint64_t generation_ = 0;
     bool stopping_ = false;
     uint32_t desiredWorkers_ = 1;
+    static thread_local WorkerPool* activePool_;
 };
+
+thread_local WorkerPool* WorkerPool::activePool_ = nullptr;
 
 } // namespace
 

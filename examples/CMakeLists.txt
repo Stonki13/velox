@@ -42,6 +42,11 @@ if(BUILD_TESTING)
     # timeout on heavily loaded Windows runners.
     add_test(NAME velox.release_gate COMMAND release_gate)
     add_test(NAME velox.stress COMMAND stress_demo)
+    add_test(NAME velox.stress_repeat
+             COMMAND ${CMAKE_COMMAND}
+                 -DPROGRAM=$<TARGET_FILE:stress_demo>
+                 -DREPETITIONS=5
+                 -P ${CMAKE_SOURCE_DIR}/cmake/repeat_test.cmake)
     add_test(NAME velox.fuzz COMMAND fuzz_demo 40)
     add_test(NAME velox.soak COMMAND fuzz_demo soak 6000)
     add_test(NAME velox.islands COMMAND islands_demo)
