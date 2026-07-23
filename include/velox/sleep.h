@@ -117,10 +117,11 @@ struct SleepConfig {
     /// @ref timeToSleep. Clamped to `[0, timeToSleep)` at validation time.
     float timeToDrowsy = 0.25f;
 
-    /// @brief Fraction of substeps a drowsy body participates in (0, 1].
+    /// @brief Reserved for future reduced-rate simulation of drowsy bodies.
     ///
-    /// Lower values save more CPU but make the transition more visible.
-    /// `0.25` means the body is simulated every 4th substep.
+    /// Currently drowsy bodies are simulated at full rate (same as awake);
+    /// the drowsy state is a transitional/visual indicator before full sleep.
+    /// This field is validated but not yet applied to substep gating.
     float drowsySimulationRate = 0.25f;
 
     /// @brief Enable the drowsy intermediate state (gradual sleep).

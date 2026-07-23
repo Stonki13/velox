@@ -5,7 +5,9 @@
  *
  * Soft bodies are collections of particles connected by distance constraints,
  * solved with Extended Position-Based Dynamics (XPBD). They collide with
- * rigid bodies (planes, spheres, boxes) but do not self-collide.
+ * **static/kinematic** rigid bodies (planes, spheres, boxes) but do not
+ * collide with dynamic rigid bodies or self-collide. There is no two-way
+ * coupling: soft bodies do not push rigid bodies back.
  *
  * Two factory helpers are provided:
  * - @ref makeClothSoftBody — a rectangular cloth grid (structural + shear).

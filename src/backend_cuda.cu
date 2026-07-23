@@ -891,7 +891,10 @@ private:
     }
 
     void uploadMeshes(const MeshSoup& m) {
-        // Static geometry: upload once, re-upload only if it grew.
+        // Static geometry: upload once, re-upload only if array sizes change.
+        // If mesh content is mutated in place at the same size, call
+        // invalidateCaches() to force a re-upload; otherwise the GPU keeps
+        // stale geometry.
         if (m.vertices.size() == meshVerts_ && m.bvhNodes.size() == meshNodes_ &&
             m.hullPoints.size() == hullPts_ &&
             m.hullFaceIndices.size() == hullFaceIndices_ &&
@@ -937,6 +940,10 @@ private:
     }
 
     // Reusable device scratch for thrust (grow-only, freed at teardown).
+    // WARNING: returns the SAME buffer for every request <= capacity and
+    // deallocate is a no-op. Only safe when at most one thrust allocation
+    // is live at a time (true for sort_by_key today). If a future thrust
+    // call holds two concurrent allocations, they will alias and corrupt.
     struct CachedDeviceAllocator {
         using value_type = char;
         char* buffer = nullptr;

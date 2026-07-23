@@ -916,10 +916,9 @@ private:
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &commandBuffer_;
-        if (vkQueueSubmit(queue_, 1, &submit, fence_) != VK_SUCCESS) return false;
-        const VkResult wait = vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
         vkResetFences(device_, 1, &fence_);
-        return wait == VK_SUCCESS;
+        if (vkQueueSubmit(queue_, 1, &submit, fence_) != VK_SUCCESS) return false;
+        return vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
     }
 
     std::unique_ptr<Backend> cpu_;

@@ -226,9 +226,14 @@ TEST_CASE("Sleep: sleeping body woken by collision") {
     // Falling body that will hit the sleeper.
     BodyId falling = world.addSphere({0, 5, 0}, 0.5f, 1.0f);
 
-    stepN(world, 120);
+    bool wasWoken = false;
+    for (int i = 0; i < 120; ++i) {
+        world.step(1.0f / 60.0f);
+        if (world.isAwake(sleeper)) wasWoken = true;
+    }
 
-    // After collision, the sleeper should have been woken and moved.
+    // The collision must have woken the sleeper at some point.
+    CHECK(wasWoken);
     Vec3 pos = world.body(sleeper).position;
     CHECK(std::isfinite(pos.x));
     CHECK(std::isfinite(pos.y));

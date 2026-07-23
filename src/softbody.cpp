@@ -145,30 +145,34 @@ void collideParticleWithBody(Vec3& pos, float invMass, const Body& body) {
         Vec3 delta = pos - body.position;
         float dist = length(delta);
         float minDist = body.radius;
-        if (dist < minDist && dist > 1e-10f) {
-            pos = body.position + delta * (minDist / dist);
+        if (dist < minDist) {
+            if (dist > 1e-10f)
+                pos = body.position + delta * (minDist / dist);
+            else
+                pos = body.position + Vec3{0, minDist, 0}; // degenerate: at center
         }
         break;
     }
     case ShapeType::Box: {
-        // Transform particle into box-local space.
+        // Transform particle into box-local space. A small margin catches
+        // particles resting exactly on a face or tunnelling through thin walls.
+        constexpr float kMargin = 1e-4f;
         Vec3 local = rotateInv(body.orientation, pos - body.position);
         Vec3 he = body.halfExtents;
-        // Clamp to the box surface if inside.
-        bool inside = std::fabs(local.x) < he.x &&
-                      std::fabs(local.y) < he.y &&
-                      std::fabs(local.z) < he.z;
+        bool inside = std::fabs(local.x) < he.x + kMargin &&
+                      std::fabs(local.y) < he.y + kMargin &&
+                      std::fabs(local.z) < he.z + kMargin;
         if (inside) {
             // Push out along the axis of least penetration.
             float px = he.x - std::fabs(local.x);
             float py = he.y - std::fabs(local.y);
             float pz = he.z - std::fabs(local.z);
             if (px <= py && px <= pz)
-                local.x = local.x > 0 ? he.x : -he.x;
+                local.x = local.x >= 0 ? he.x + kMargin : -(he.x + kMargin);
             else if (py <= pz)
-                local.y = local.y > 0 ? he.y : -he.y;
+                local.y = local.y >= 0 ? he.y + kMargin : -(he.y + kMargin);
             else
-                local.z = local.z > 0 ? he.z : -he.z;
+                local.z = local.z >= 0 ? he.z + kMargin : -(he.z + kMargin);
             pos = body.position + rotate(body.orientation, local);
         }
         break;

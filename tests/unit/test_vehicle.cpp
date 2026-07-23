@@ -194,6 +194,11 @@ TEST_CASE("Vehicle DrivetrainType options") {
         Vehicle vehicle(world, config, {0, 5, 0});
         vehicle.AddDefaultWheels();
         CHECK(vehicle.wheelCount() == 4);
+        // Wheels 0,1 = front (not driven); 2,3 = rear (driven).
+        CHECK_FALSE(vehicle.wheelConfig(0).driven);
+        CHECK_FALSE(vehicle.wheelConfig(1).driven);
+        CHECK(vehicle.wheelConfig(2).driven);
+        CHECK(vehicle.wheelConfig(3).driven);
     }
 
     SUBCASE("FWD") {
@@ -202,6 +207,10 @@ TEST_CASE("Vehicle DrivetrainType options") {
         Vehicle vehicle(world, config, {0, 5, 0});
         vehicle.AddDefaultWheels();
         CHECK(vehicle.wheelCount() == 4);
+        CHECK(vehicle.wheelConfig(0).driven);
+        CHECK(vehicle.wheelConfig(1).driven);
+        CHECK_FALSE(vehicle.wheelConfig(2).driven);
+        CHECK_FALSE(vehicle.wheelConfig(3).driven);
     }
 
     SUBCASE("AWD") {
@@ -210,6 +219,8 @@ TEST_CASE("Vehicle DrivetrainType options") {
         Vehicle vehicle(world, config, {0, 5, 0});
         vehicle.AddDefaultWheels();
         CHECK(vehicle.wheelCount() == 4);
+        for (size_t i = 0; i < 4; ++i)
+            CHECK(vehicle.wheelConfig(i).driven);
     }
 }
 
