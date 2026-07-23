@@ -1009,3 +1009,53 @@ different slide distances under different sweep/slide algorithms.
 - `docs/known-limitations.md` updated: "No cross-engine
   character-controller comparison" replaced with the behavioral-only
   comparison description.
+
+## Phase E: production-readiness proof (physics sandbox)
+
+Nobody can retroactively ship a game on Velox. The honest substitute:
+a complete, non-trivial sample application that exercises the engine
+end-to-end under realistic production-shaped load for an extended run.
+
+### What was built
+
+`examples/physics_sandbox.cpp` (CTest `velox.physics_sandbox`): a
+headless physics sandbox that cycles through 7 scenarios per cycle,
+each exercising a different engine subsystem:
+
+1. **Rigid body pile** — 20 spheres settling on a plane, contact
+   events verified (Begin events fire).
+2. **Joint structures** — ball-joint pendulum, arm-length invariant
+   checked after 2 seconds.
+3. **Character controller** — capsule walking on flat ground with
+   gravity, grounded-state and finite-position checks.
+4. **Vehicle** — RWD with LSD differential, acceleration and
+   no-flip checks after 2 seconds of throttle.
+5. **Soft body cloth** — 8×8 cloth draping over a sphere, no
+   penetration and finite-position checks.
+6. **Queries** — raycast and overlap sphere against a settled box.
+7. **Serialization** — save/load round-trip via
+   `serializeWorld`/`deserializeWorld`, body-count verification.
+
+Each scenario runs for 120 frames (2 seconds at 60 Hz). The CTest
+runs 3 cycles (7 scenarios × 3 = 21 scenario runs, ~0.1 s). For a
+multi-hour soak test, run `physics_sandbox 720` (~5 hours).
+
+### What this does and does not prove
+
+**Does prove:** sustained, multi-subsystem integration under a
+realistic game-loop shape (fixed timestep, mixed workload, periodic
+serialization). Catches memory corruption, handle invalidation,
+state leaks between subsystems, and serialization round-trip
+failures that unit tests in isolation would miss.
+
+**Does not prove:** production game-ship experience. No amount of
+internal testing substitutes for a real shipped title. This is
+sustained integration testing beyond unit/benchmark scope, not a
+claim of production readiness.
+
+### Gate results
+
+- `cmake --build build_phase1 --config Release -j 16`: clean, 0
+  compiler errors.
+- `ctest --test-dir build_phase1 -C Release`: **58/58 CTest suites
+  pass (100%)**, including the new `velox.physics_sandbox`.

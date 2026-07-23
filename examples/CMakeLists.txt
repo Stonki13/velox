@@ -28,6 +28,9 @@ target_link_libraries(platform_demo PRIVATE velox)
 add_executable(stress_demo stress_demo.cpp)
 target_link_libraries(stress_demo PRIVATE velox)
 
+add_executable(physics_sandbox physics_sandbox.cpp)
+target_link_libraries(physics_sandbox PRIVATE velox)
+
 if(BUILD_TESTING)
     add_test(NAME velox.hello COMMAND hello_velox)
     add_test(NAME velox.contact_events COMMAND contact_events)
@@ -49,13 +52,15 @@ if(BUILD_TESTING)
                  -P ${CMAKE_SOURCE_DIR}/cmake/repeat_test.cmake)
     add_test(NAME velox.fuzz COMMAND fuzz_demo 40)
     add_test(NAME velox.soak COMMAND fuzz_demo soak 6000)
+    add_test(NAME velox.physics_sandbox COMMAND physics_sandbox 3)
     add_test(NAME velox.islands COMMAND islands_demo)
     add_test(NAME velox.vehicle COMMAND vehicle_demo)
     add_test(NAME velox.serialize COMMAND serialize_demo)
     # Every test normally finishes in seconds; a generous cap turns a rare
     # hang into a fast failure instead of a 25-minute default timeout.
     set_tests_properties(velox.release_gate velox.stress velox.fuzz velox.soak
-        velox.islands velox.vehicle velox.serialize PROPERTIES TIMEOUT 180)
+        velox.physics_sandbox velox.islands velox.vehicle velox.serialize
+        PROPERTIES TIMEOUT 180)
 endif()
 
 add_executable(benchmark benchmark.cpp)
