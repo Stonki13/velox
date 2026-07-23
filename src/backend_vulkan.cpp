@@ -29,6 +29,7 @@
 // cross-platform determinism guarantee: GPU float contraction differs from
 // the CPU reference path. Use BackendType::Cpu for lockstep replay.
 #include "velox/backend.h"
+#include "velox/sleep.h"
 
 #include <vulkan/vulkan.h>
 
@@ -692,7 +693,7 @@ private:
             g.angularDamping = b.angularDamping;
             std::memcpy(g.invInertia, &b.invInertia, sizeof(float) * 3);
             uint32_t flags = 0;
-            if (b.isDynamic() && !b.isLocked() && !b.asleep) {
+            if (b.isDynamic() && !b.isLocked() && !isFullyAsleep(b.asleep)) {
                 flags |= kFlagIntegrate;
                 if (!b.isRotationLocked()) flags |= kFlagTorque;
             }
@@ -704,7 +705,7 @@ private:
                 b.ccdTuning.quality != MotionQuality::Low &&
                 b.ccdTuning.quality != MotionQuality::Locked)
                 flags |= kFlagSweep;
-            if (!b.isStatic() && !b.isLocked() && !b.asleep) flags |= kFlagTransformIntegrate;
+            if (!b.isStatic() && !b.isLocked() && !isFullyAsleep(b.asleep)) flags |= kFlagTransformIntegrate;
             if (b.isRotationLocked()) flags |= kFlagRotationLocked;
             flags |= (uint32_t)b.frictionCombine << 8;
             flags |= (uint32_t)b.restitutionCombine << 11;

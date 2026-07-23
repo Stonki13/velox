@@ -44,15 +44,14 @@ for the full comparison; the headline gaps:
   Velox's own character controller is still covered by
   `tests/unit/test_character.cpp` and `examples/character_demo.cpp`.
 
-## Known pre-existing test issues
+## Resolved test issues
 
-- `velox.stress` and its repeat (`velox.stress_repeat`) currently fail two
-  named checks: `sleeping pile (sleeps, wakes on impact)` and
-  `contact events (begin fires once per touch)`. These are pre-existing
-  sleep-state bookkeeping and contact-event-counting defects, not
-  correctness issues in the state-hashing/rollback/replay/GPU-transfer
-  work described in `PROTO_COMPETITIVE_NOTES.md`. Tracked, not silently
-  ignored — see that file's Phase 0 baseline section for exact evidence.
+- `velox.stress` sub-checks `sleeping pile (sleeps, wakes on impact)` and
+  `contact events (begin fires once per touch)` failed on GPU-backend
+  builds (CUDA/Vulkan) due to drowsy-state handling in the device broad
+  phase and integration kernels. Fixed in Phase A (see
+  `PROTO_COMPETITIVE_NOTES.md`); regression tests added to
+  `tests/unit/test_sleep.cpp`.
 
 ## Deterministic multiplayer toolkit
 

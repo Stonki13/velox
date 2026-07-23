@@ -768,3 +768,95 @@ inertia scope guard that stage 2/3 never needed, documented above.
   benchmark scenes are joint-free, isotropic, and now route through
   `advanceSubsteps` by default; parity/behavioral bounds still hold).
 Full CPU+Vulkan suite: **56/56 PASS**.
+
+## Phase A: fix the two known `velox.stress` regressions
+
+The Phase 0 baseline documented two named sub-check failures in
+`velox.stress`: `sleeping pile (sleeps, wakes on impact)` and
+`contact events (begin fires once per touch)`. These failed
+reproducibly on GPU-backend builds (CUDA, Vulkan) but passed on
+CPU-only builds — they were backend-specific, not general solver
+defects.
+
+### Root cause
+
+The sleep system's gradual-sleep path transitions bodies through
+`Awake → Drowsy (byte=2) → Asleep (byte=1)`. The CPU backend
+correctly distinguishes these states: `isFullyAsleep(b.asleep)`
+(`b.asleep == 1`) gates integration, transform advance, and broad-phase
+pair culling, so **drowsy bodies still generate contacts, receive
+gravity, and advance their transforms** — they are simulated at full
+rate until the island timer crosses `timeToSleep` and they enter full
+sleep.
+
+The CUDA and Vulkan backends used `b.asleep` as a C-style boolean
+(truthy for both `1` and `2`) in five places:
+
+- `integrateKernel` / Vulkan integrate flag: skipped drowsy bodies
+  (no gravity applied)
+- `integrateTransformsKernel` / Vulkan transform flag: skipped drowsy
+  bodies (no position advance)
+- `gridPairsKernel`, `oversizePairsKernel`, `allPairsContactsKernel`:
+  culled drowsy–drowsy and drowsy–static pairs from the broad phase
+
+The broad-phase culling was the load-bearing bug: once an island
+entered Drowsy, its contacts vanished from the narrow phase, the
+`SleepManager`'s contact-stability counter reset to zero (no contacts
+→ `hasContact[i] = 0` → stability = 0), the calm check failed
+(`contactStability_[i] < contactStabilityFrames`), and the drowsy
+body was woken. The island then re-settled, re-entered Drowsy ~15
+frames later, and was woken again — a permanent 25-frame sleep/wake
+cycle. Each cycle produced a spurious End+Begin contact-event pair
+(the sleeping-pair persistence path requires `isFullyAsleep`, which
+is false for Drowsy, so the event system emitted End when the pair
+left the active set and Begin when it reappeared).
+
+### Fix
+
+Changed all five CUDA kernel sites and both Vulkan flag sites to use
+`isFullyAsleep(b.asleep)` (byte == 1) instead of `b.asleep` as a
+boolean, matching the CPU backend's behavior exactly. Drowsy bodies
+now generate contacts, receive gravity, and advance transforms on all
+backends.
+
+Files changed: `src/backend_cuda.cu` (5 kernel sites + `#include
+"velox/sleep.h"`), `src/backend_vulkan.cpp` (2 flag sites +
+`#include "velox/sleep.h"`).
+
+### Regression tests added
+
+Two new `TEST_CASE`s in `tests/unit/test_sleep.cpp`, both using
+`BackendType::Auto` so they exercise whichever GPU backend is
+available:
+
+- `Sleep regression: settled pile stays asleep (no drowsy wake
+  cycle)`: 9-sphere pile settles for 400 frames, verifies all asleep,
+  then verifies they STAY asleep for 120 more frames.
+- `Sleep regression: contact events bounded during rest (no
+  sleep/wake spam)`: ball dropped on floor, verifies Begin event
+  count is 1–6 over 300 frames (not one per sleep/wake cycle).
+
+### Before/after evidence
+
+Diagnostic (same binary, `BackendType::Auto`, Windows 11, RTX 5080):
+
+| Metric | Before fix | After fix |
+|---|---|---|
+| Sleeping pile: allAsleep after 400 frames | **NO** (wakeCount=15, 25-frame cycle) | **YES** (wakeCount=0) |
+| Sleeping pile: firstAllAsleep frame | 37 (then immediately woken) | 37 (stays asleep) |
+| Contact events: Begin count over 300 frames | **12** (spurious, one per cycle) | **3** (restitution bounces only) |
+| CPU/CUDA parity | divergent behavior | identical behavior |
+
+### Gate results
+
+- `cmake --build build_cuda --config Release -j 16`: clean, 0
+  compiler errors.
+- `ctest --test-dir build_cuda -C Release`: **57/57 CTest suites
+  pass (100%)**, including `velox.stress`, `velox.stress_repeat`,
+  and the new regression tests in `velox.unit.test_sleep`.
+- `cmake --build build_phase1 --config Release -j 16` (CPU+Vulkan):
+  clean, 0 compiler errors.
+- `ctest --test-dir build_phase1 -C Release`: **56/56 CTest suites
+  pass (100%)**.
+- `docs/known-limitations.md` updated: the "Known pre-existing test
+  issues" section replaced with "Resolved test issues".

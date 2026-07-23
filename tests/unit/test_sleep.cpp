@@ -823,3 +823,57 @@ TEST_CASE("Sleep: SleepManager default config") {
     CHECK(mgr.config().enableGradualSleep == true);
     CHECK(mgr.config().enableContactStability == true);
 }
+
+// ============================================================================
+// Regression: drowsy bodies must keep their contacts so contact stability
+// is not reset, which would wake them and create a sleep/wake cycle.
+// This was a GPU-backend bug: the CUDA/Vulkan broad phases used `b.asleep`
+// (truthy for Drowsy) instead of `isFullyAsleep(b.asleep)`, so drowsy pairs
+// were culled from the broad phase, contacts vanished, contact stability
+// reset to zero, the calm check failed, and the drowsy body was woken.
+// ============================================================================
+
+TEST_CASE("Sleep regression: settled pile stays asleep (no drowsy wake cycle)") {
+    World world; // BackendType::Auto — catches GPU-backend regressions
+    world.addStaticPlane({0, 1, 0}, 0.0f);
+    BodyId balls[9];
+    for (int i = 0; i < 9; ++i)
+        balls[i] = world.addSphere(
+            {(i % 3) * 1.05f, 0.5f + (i / 3) * 1.05f, 0}, 0.5f, 1.0f);
+
+    stepN(world, 400); // ~6.7 s to settle
+
+    bool allAsleep = true;
+    for (auto id : balls) allAsleep &= !world.isAwake(id);
+    CHECK(allAsleep);
+
+    // Verify the pile STAYS asleep for another 2 seconds (no wake cycle).
+    stepN(world, 120);
+    for (auto id : balls)
+        CHECK_FALSE(world.isAwake(id));
+}
+
+TEST_CASE("Sleep regression: contact events bounded during rest (no sleep/wake spam)") {
+    World world; // BackendType::Auto
+    auto floor = world.addStaticPlane({0, 1, 0}, 0.0f);
+    auto ball = world.addSphere({0, 2.0f, 0}, 0.5f, 1.0f);
+
+    int began = 0;
+    float impulse = 0.0f;
+    for (int i = 0; i < 300; ++i) {
+        world.step(1.0f / 60.0f);
+        for (const auto& ev : world.contactEvents()) {
+            bool ours = (ev.a == ball && ev.b == floor) ||
+                        (ev.a == floor && ev.b == ball);
+            if (ours && ev.type == ContactEventType::Begin) {
+                ++began;
+                impulse = std::fmax(impulse, ev.impulse);
+            }
+        }
+    }
+    // Restitution bounces produce a few Begin events; resting contact must
+    // not spam one Begin per sleep/wake cycle.
+    CHECK(began >= 1);
+    CHECK(began <= 6);
+    CHECK(impulse > 0.0f);
+}
