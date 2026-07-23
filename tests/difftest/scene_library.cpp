@@ -342,4 +342,26 @@ std::vector<SceneDesc> canonicalScenes() {
             terrainMesh(),  ccdGrazing(), sleepWake()};
 }
 
+std::vector<CharacterSceneDesc> characterScenes() {
+    CharacterSceneDesc flat;
+    flat.name = "character_flat_walk";
+    flat.slopeAngleDeg = 0.0f;
+    flat.targetVelocity = {0, 0, 3};
+    flat.frames = 120;
+
+    CharacterSceneDesc gentle;
+    gentle.name = "character_gentle_slope";
+    gentle.slopeAngleDeg = 20.0f; // below the 45-degree slope limit
+    gentle.targetVelocity = {0, 0, 3};
+    gentle.frames = 120;
+
+    CharacterSceneDesc steep;
+    steep.name = "character_steep_slope";
+    steep.slopeAngleDeg = 55.0f; // above the 45-degree slope limit
+    steep.targetVelocity = {0, 0, 3};
+    steep.frames = 120;
+
+    return {flat, gentle, steep};
+}
+
 } // namespace difftest

@@ -18,6 +18,7 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 
 #include <memory>
 #include <stdexcept>
@@ -231,6 +232,74 @@ Trajectory runJolt(const SceneDesc& scene) {
         trajectory.push_back(std::move(state));
     }
     return trajectory;
+}
+
+CharacterResult runJoltCharacter(const CharacterSceneDesc& scene) {
+    static JoltRuntime runtime;
+
+    BPLayerInterfaceImpl broadPhaseLayers;
+    ObjectVsBroadPhaseLayerFilterImpl objectVsBroadPhase;
+    ObjectLayerPairFilterImpl objectPairs;
+
+    JPH::PhysicsSystem physics;
+    physics.Init(4096, 0, 4096, 4096, broadPhaseLayers, objectVsBroadPhase, objectPairs);
+    physics.SetGravity(JPH::Vec3(0, -9.81f, 0));
+
+    JPH::TempAllocatorImpl tempAllocator(16 * 1024 * 1024);
+    JPH::JobSystemThreadPool jobSystem(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, 1);
+
+    // Slope: a large static box rotated by slopeAngleDeg around X.
+    float angleRad = scene.slopeAngleDeg * 3.14159265f / 180.0f;
+    JPH::BodyInterface& bodyInterface = physics.GetBodyInterface();
+    JPH::RefConst<JPH::Shape> slopeShape = new JPH::BoxShape(JPH::Vec3(25, 0.5f, 25));
+    JPH::Quat slopeRot = JPH::Quat::sRotation(JPH::Vec3(1, 0, 0), -angleRad);
+    JPH::BodyCreationSettings slopeSettings(
+        slopeShape, JPH::RVec3(0, -0.5f, 0), slopeRot,
+        JPH::EMotionType::Static, Layers::NON_MOVING);
+    slopeSettings.mFriction = 0.8f;
+    bodyInterface.CreateAndAddBody(slopeSettings, JPH::EActivation::DontActivate);
+
+    // Character capsule.
+    JPH::RefConst<JPH::Shape> capsuleShape =
+        new JPH::CapsuleShape(scene.capsuleHalfHeight, scene.capsuleRadius);
+
+    JPH::CharacterVirtualSettings settings;
+    settings.mShape = capsuleShape;
+    settings.mMaxSlopeAngle = std::acos(scene.slopeLimitCosine);
+    settings.mBackFaceMode = JPH::EBackFaceMode::IgnoreBackFaces;
+
+    float startY = scene.capsuleHalfHeight + scene.capsuleRadius + 0.5f;
+    JPH::CharacterVirtual character(&settings,
+        JPH::RVec3(0, startY, -5.0f), JPH::Quat::sIdentity(), &physics);
+
+    JPH::Vec3 desiredVel = toJolt(scene.targetVelocity);
+
+    JPH::ObjectLayerFilter objectLayerFilter;
+    JPH::BroadPhaseLayerFilter broadPhaseLayerFilter;
+    JPH::BodyFilter bodyFilter;
+    JPH::ShapeFilter shapeFilter;
+
+    CharacterResult result;
+    for (int i = 0; i < scene.frames; ++i) {
+        physics.Update(scene.dt, 1, &tempAllocator, &jobSystem);
+
+        character.SetLinearVelocity(desiredVel);
+        character.Update(scene.dt, JPH::Vec3(0, -9.81f, 0),
+                         broadPhaseLayerFilter, objectLayerFilter,
+                         bodyFilter, shapeFilter, tempAllocator);
+
+        result.grounded = character.GetGroundState() ==
+                          JPH::CharacterVirtual::EGroundState::OnGround;
+    }
+
+    JPH::RVec3 finalPos = character.GetPosition();
+    result.finalPosition = {float(finalPos.GetX()), float(finalPos.GetY()),
+                            float(finalPos.GetZ())};
+    result.heightGained = float(finalPos.GetY()) - startY;
+    float dx = float(finalPos.GetX());
+    float dz = float(finalPos.GetZ()) + 5.0f;
+    result.horizontalDistance = std::sqrt(dx * dx + dz * dz);
+    return result;
 }
 
 } // namespace difftest

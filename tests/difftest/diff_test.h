@@ -129,4 +129,43 @@ Trajectory runJolt(const SceneDesc& scene);
 // Canonical scene library.
 std::vector<SceneDesc> canonicalScenes();
 
+// ---------------------------------------------------------------------------
+// Character-controller cross-engine comparison
+// ---------------------------------------------------------------------------
+
+/// Describes a character-on-slope scenario for cross-engine validation.
+struct CharacterSceneDesc {
+    std::string name;
+    float slopeAngleDeg = 0.0f;      ///< Inclination of the ramp (degrees).
+    Vec3f targetVelocity{0, 0, 3};   ///< Desired horizontal walk velocity.
+    int frames = 120;                ///< Simulation frames at dt.
+    float dt = 1.0f / 60.0f;
+    float capsuleRadius = 0.3f;
+    float capsuleHalfHeight = 0.9f;
+    float slopeLimitCosine = 0.7071f; ///< ~45 degrees.
+};
+
+/// Outcome of one engine's character run.
+struct CharacterResult {
+    Vec3f finalPosition{};
+    bool grounded = false;
+    float heightGained = 0.0f;       ///< Y difference from start.
+    float horizontalDistance = 0.0f; ///< XZ distance from start.
+};
+
+/// Behavioral comparison between two engines' character results.
+struct CharacterDiffResult {
+    bool bothGrounded = false;
+    bool agreeOnClimb = false;       ///< Both gained height (or both didn't).
+    float positionDelta = 0.0f;      ///< Distance between final positions.
+    bool passed = false;
+};
+
+CharacterResult runVeloxCharacter(const CharacterSceneDesc& scene);
+CharacterResult runJoltCharacter(const CharacterSceneDesc& scene);
+CharacterDiffResult compareCharacter(const CharacterSceneDesc& scene,
+                                     const CharacterResult& a,
+                                     const CharacterResult& b);
+std::vector<CharacterSceneDesc> characterScenes();
+
 } // namespace difftest

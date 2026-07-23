@@ -333,6 +333,25 @@ int main() {
         if (!pass) ++failures;
     }
 
+    // Gate 3: character-controller cross-engine comparison.
+    const std::vector<CharacterSceneDesc> charScenes = characterScenes();
+    std::printf("\n%-24s %8s %8s %10s %8s  %s\n", "character scene",
+                "grounded", "climb?", "posDelta", "agree", "verdict");
+    for (const CharacterSceneDesc& scene : charScenes) {
+        const CharacterResult velox = runVeloxCharacter(scene);
+        const CharacterResult jolt = runJoltCharacter(scene);
+        const CharacterDiffResult result = compareCharacter(scene, velox, jolt);
+        std::printf("%-24s %5s/%-5s %5s/%-5s %10.3f %8s  %s\n",
+                    scene.name.c_str(),
+                    velox.grounded ? "Y" : "N", jolt.grounded ? "Y" : "N",
+                    velox.heightGained > 0.1f ? "Y" : "N",
+                    jolt.heightGained > 0.1f ? "Y" : "N",
+                    result.positionDelta,
+                    result.agreeOnClimb ? "Y" : "N",
+                    result.passed ? "PASS" : "FAIL");
+        if (!result.passed) ++failures;
+    }
+
     if (failures) {
         std::fprintf(stderr, "difftest: %d failure(s)\n", failures);
         return 1;

@@ -97,4 +97,47 @@ Trajectory runVelox(const SceneDesc& scene) {
     return trajectory;
 }
 
+CharacterResult runVeloxCharacter(const CharacterSceneDesc& scene) {
+    velox::World world(velox::BackendType::Cpu);
+
+    // Build a slope: a large static box rotated by slopeAngleDeg around X.
+    float angleRad = scene.slopeAngleDeg * 3.14159265f / 180.0f;
+    auto slope = world.addBox({0, -0.5f, 0}, {25.0f, 0.5f, 25.0f}, 0.0f);
+    velox::Body& slopeBody = world.body(slope);
+    slopeBody.orientation = velox::fromAxisAngle({1, 0, 0}, -angleRad);
+    slopeBody.friction = 0.8f;
+
+    velox::CharacterControllerDesc desc;
+    desc.capsuleRadius = scene.capsuleRadius;
+    desc.capsuleHalfHeight = scene.capsuleHalfHeight;
+    desc.slopeLimitCosine = scene.slopeLimitCosine;
+    desc.movementSpeed = velox::length(toVelox(scene.targetVelocity));
+
+    velox::CharacterController controller(world, desc);
+    // Start at the low end of the slope.
+    float startY = scene.capsuleHalfHeight + scene.capsuleRadius + 0.5f;
+    controller.SetPosition({0, startY, -5.0f});
+
+    velox::Vec3 vel = toVelox(scene.targetVelocity);
+    float verticalVel = 0.0f;
+    CharacterResult result;
+    for (int i = 0; i < scene.frames; ++i) {
+        world.step(scene.dt);
+        // Apply gravity to the vertical velocity, then combine with
+        // the desired horizontal movement.
+        verticalVel -= 9.81f * scene.dt;
+        velox::Vec3 displacement = vel * scene.dt;
+        displacement.y = verticalVel * scene.dt;
+        auto moveResult = controller.Move(displacement);
+        if (moveResult.grounded) verticalVel = 0.0f;
+        result.grounded = moveResult.grounded;
+    }
+    velox::Vec3 finalPos = controller.Position();
+    result.finalPosition = fromVelox(finalPos);
+    result.heightGained = finalPos.y - startY;
+    result.horizontalDistance = std::sqrt(
+        finalPos.x * finalPos.x + (finalPos.z + 5.0f) * (finalPos.z + 5.0f));
+    return result;
+}
+
 } // namespace difftest

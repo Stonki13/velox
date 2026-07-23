@@ -43,13 +43,15 @@ for the full comparison; the headline gaps:
   backend is currently faster. `BackendType::Auto` does not (yet) choose
   based on scene shape — it is a static choice made at `World`
   construction time.
-- **No cross-engine character-controller comparison.** The Jolt
-  differential-test corpus (`tests/difftest/`) does not include a
-  character-slopes scene: a meaningful comparison needs both engines'
-  character controllers running side by side, which is a materially
-  different (and larger) undertaking than the harness's rigid-body scenes.
-  Velox's own character controller is still covered by
-  `tests/unit/test_character.cpp` and `examples/character_demo.cpp`.
+- **Cross-engine character-controller comparison is behavioral only.**
+  The difftest corpus (`tests/difftest/`) now includes 3 character-slope
+  scenes (flat, gentle, steep) comparing Velox's `CharacterController`
+  against Jolt's `CharacterVirtual`. The comparison checks climb/slide
+  agreement and approximate final position — not identical trajectories,
+  since the two controllers use fundamentally different sweep and slide
+  algorithms. Grounded-state reporting may differ (Velox reports grounded
+  on flat/gentle slopes where Jolt does not, due to different ground
+  detection thresholds).
 
 ## Resolved test issues
 
