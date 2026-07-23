@@ -17,7 +17,10 @@ frozen for backward compatibility. Breaking changes require a major version bump
 
 - **Version 1.0.0**: Public API is now frozen. Future breaking changes require
   a major version bump per semantic versioning.
-- README updated to reflect production-ready status with 35-test suite.
+- README updated to reflect production-ready status with the 52-test suite.
+- CPU worker dispatch now retains per-job completion state and re-notifies a
+  stalled participant; the release suite repeats the stress executable five
+  times to cover CI-style process launches.
 
 ## [0.5.0] - 2026-07-21
 
@@ -38,7 +41,7 @@ frozen for backward compatibility. Breaking changes require a major version bump
 - Anisotropic friction with per-body local-space friction scale
 - Origin shifting for large worlds without precision loss
 - Vulkan interactive sandbox for debugging
-- 35-test suite including differential testing against Jolt Physics
+- Regression suite including differential testing against Jolt Physics
 
 ## [0.4.0] - 2026-07-21
 

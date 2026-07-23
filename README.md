@@ -3,7 +3,7 @@
 **A fast, tunneling-resistant 3D physics engine for games. C++17, GPU-accelerated.**
 
 > **Production-ready.** Velox has reached 1.0 maturity. The core solver, GPU backend,
-> collision pipeline, and C API are stable and heavily stress-tested (35-test suite
+> collision pipeline, and C API are stable and heavily stress-tested (52-test suite
 > including randomized fuzzing, long-duration soak tests, and differential
 > tests against Jolt Physics in CI on four platforms). The API is frozen for
 > backward compatibility. We encourage integration and welcome bug reports with
