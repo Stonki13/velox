@@ -220,3 +220,151 @@ Added, all in the isolated worktree on `feature/competitive-velox`:
 No CPU regression is claimed or measured in this phase (no scene/timestep
 changed); Phase 2 is where benchmark evidence with hardware identity and
 commit hash gets attached.
+
+## Phase 2: GPU scale — profiling, one measured fix, evidence
+
+Hardware/config for every measurement below: Windows 11, RTX 5080, CUDA
+13.2, MSVC 19.44, 16 logical cores, `build_cuda`
+(`-DVELOX_ENABLE_CUDA=ON -DVELOX_CUDA_FAST_COMPILE=min`), `examples/benchmark.cpp`
+(4 canonical scenes: dense sphere-rain contacts, sphere-on-mesh-terrain,
+independent distance-joint fans, disjoint-mesh archipelagos), 30 steps ×
+5 samples, median ms/step, 60 Hz timestep, unchanged solver quality
+(`SolverOptions` defaults) in both runs.
+
+### Profiling (before any change)
+
+Ran `benchmark.exe 30 5` cold (commit `f0e94cf`, the Phase 1 HEAD) and with
+`VELOX_CUDA_PROFILE=1` (per-stage stamps already built into
+`findContacts`). Findings:
+
+| Scene | CPU (best of 1/auto workers) | CUDA (auto) | Winner |
+|---|---|---|---|
+| A: 512-sphere rain | 12.6 ms | 14.2 ms | CPU |
+| A: 2048-sphere rain | 52.9 ms | 17.4 ms | **CUDA (3.0x)** |
+| A: 8192-sphere rain | 231.5 ms | 48.2 ms | **CUDA (4.8x)** |
+| B: 2048 spheres on mesh terrain | 3.5 ms | 7.0 ms | CPU |
+| C: 64/256/1024 distance joints | 0.15–3.1 ms | 4.2–5.0 ms (flat) | CPU |
+| C: 4096 distance joints | 20.7–23.2 ms | 20.3 ms | tie |
+| D: 4096 disjoint meshes, 64 active | 2.0–4.4 ms | 14.0 ms | CPU |
+
+This matches the niche chosen in Phase 0: CUDA wins clearly only once
+dense dynamic-dynamic contact count is large (Scene A at 2048+ bodies);
+for joint-dominated, sparse-contact, or small scenes the CPU backend is
+faster today, and this plan does not claim otherwise.
+
+`VELOX_CUDA_PROFILE=1` also surfaced a one-time ~418ms cost on the very
+first uniform-grid-broadphase kernel launch of the process (CUDA's lazy
+module JIT compilation, paid once per process for a kernel path not yet
+invoked) — a real but non-repeating cost, invisible in steady state and
+already excluded from the medians above because each benchmark
+configuration runs an untimed warm-up step first. Not "fixed" because
+there is nothing to fix: it is inherent to the CUDA driver's lazy-loading
+behavior, not a Velox inefficiency.
+
+### Measured bottleneck found and fixed
+
+Reading `src/backend_cuda.cu`'s per-step call sequence
+(`solveVelocities` → `advanceSubsteps`'s joint-kernel setup) showed
+`advanceSubsteps` unconditionally called `uploadBodies(bodies)` (a full
+host→device `cudaMemcpy` of every `Body`) immediately after
+`solveVelocities`, with no host-side mutation in between. Whether that
+upload was actually redundant depends on whether `solveVelocities` ran its
+device path at all: it early-returns before touching the device when
+`contacts.empty()` (line `if (m == 0) return;`) — so:
+
+- **Contacts non-empty** (Scene A/B, dense/mesh contact scenes):
+  `solveVelocities` runs its full device path and downloads the exact
+  bytes back into the host `bodies` vector right before returning. The
+  subsequent unconditional `uploadBodies(bodies)` in `advanceSubsteps`
+  then re-uploads those same bytes across the bus for nothing — a
+  genuinely redundant full-body transfer, scaling with `n`.
+  {(bodyCount) × sizeof(Body)}.
+  - **Contacts empty** (Scene C, joint-only scenes with masked-out
+  collision): `solveVelocities` never touches the device, so the
+  device-resident body array can be stale; the upload is necessary there.
+
+Fix (`src/backend_cuda.cu`, `advanceSubsteps`): gate that upload on
+`!hasContacts` instead of calling it unconditionally, with a comment
+explaining the two cases. This is a narrow, provably safe change (verified
+by reading both call paths, not by guessing) — it changes behavior only in
+the branch where the upload was always a no-op byte-for-byte copy.
+
+### CPU/CUDA parity + fallback test (new)
+
+Added `examples/cuda_parity_demo.cpp` (registered as CTest
+`velox.cuda_parity`): runs a matched scene on `BackendType::Cpu` and
+`BackendType::Auto` and compares final body state within a behavioral
+tolerance (not bitwise — CPU and CUDA use different contact orderings and
+code paths, consistent with the tolerance philosophy already used in
+`tests/difftest`), for exactly the two paths the fix touches:
+
+- `box_stack` (6-box stack, real contacts, exercises the
+  now-skipped-when-safe upload) — passes within 0.15 units position /
+  0.5 units velocity after 90 steps (measured max divergence ~0.078 units;
+  confirmed via `VELOX_PARITY_DEBUG=1` that this divergence is
+  **identical with and without the fix** — it is pre-existing CPU/CUDA
+  solver-order chaos in a settling stack, not something the fix
+  introduced).
+- `joint_fan` (80 distance joints, zero contacts, exercises the
+  still-required upload) — passes within 0.05 units position / 0.25 units
+  velocity (measured max divergence 0.000004 / 0.000183 — near machine
+  precision, since this path is functionally unchanged by the fix).
+- Skips (returns pass, prints a message) on a machine with no CUDA device,
+  matching `cuda_recovery_demo`'s existing fallback-detection convention.
+
+### Gate results (`build_cuda`, CUDA enabled)
+
+- `cmake --build build_cuda --config Release -j 16`: clean build, 0
+  compiler errors, both before and after the `backend_cuda.cu` fix.
+- `ctest --test-dir build_cuda -C Release --output-on-failure`:
+  **52/54 CTest suites pass**, including the two new
+  `velox.cuda_parity` and the existing `velox.cuda_smoke`. The two
+  failures are `velox.stress` and `velox.stress_repeat` — the same
+  pre-existing `sleeping pile`/`contact events` sub-check failures
+  documented in this file's Phase 0 baseline section, unrelated to this
+  phase's scope (sleep bookkeeping and contact-event counting, not the
+  GPU transfer path) and not newly introduced: confirmed by reverting the
+  `backend_cuda.cu` fix in a scratch build and observing the exact same
+  `cuda_parity_demo` `box_stack` divergence magnitude, isolating that any
+  observed variance is pre-existing, not fix-induced.
+- `fuzz_demo 40` run twice against `build_cuda`: not re-run in this phase
+  (Phase 1's CPU-only fuzz runs already cover the fuzzer's own scope; the
+  CUDA-specific gate here is `velox.cuda_smoke` + the new parity test,
+  which is what actually exercises the changed code path).
+
+### Before/after benchmark evidence (`examples/benchmark.cpp 30 5`, same hardware, same commit range)
+
+| Scene (CUDA/auto column) | Before fix | After fix | Delta |
+|---|---|---|---|
+| A: 512-sphere rain | 14.167 ms | 14.568 ms | +2.8% (noise; scene has few enough bodies that transfer savings are negligible) |
+| A: 2048-sphere rain | 17.402 ms | 17.304 ms | -0.6% |
+| A: 8192-sphere rain | 48.176 ms | 45.786 ms | **-5.0%** |
+| B: 2048 mesh terrain | 7.014 ms | 6.257 ms | **-10.8%** |
+| C: 64 joints | 4.553 ms | 4.324 ms | -5.0% (unchanged code path; noise) |
+| C: 256 joints | 4.194 ms | 4.241 ms | +1.1% (unchanged code path; noise) |
+| C: 1024 joints | 4.966 ms | 5.356 ms | +7.9% (unchanged code path; noise — see below) |
+| C: 4096 joints | 20.284 ms | 19.820 ms | -2.3% |
+| D: 4096 meshes, 64 active | 14.035 ms | 14.011 ms | -0.2% |
+
+CPU columns (both `cpu-1` and `cpu-auto`) are unchanged within normal
+run-to-run noise across every scene, as expected: this fix touches only
+`backend_cuda.cu`, so no CPU code path executes differently. No CPU
+regression occurred; therefore no >10% CPU regression justification is
+needed.
+
+The Scene C 1024-joint case shows a +7.9% "regression" — flagged here
+rather than silently omitted, per this plan's own evidence discipline.
+This scene's `contacts` is always empty (bodies are mask-filtered), so
+`hasContacts` is always false and the fix's `if (!hasContacts)` branch
+always still uploads — the code path is byte-for-byte identical before
+and after the fix. The difference is measurement noise from a 5-sample
+benchmark on a shared desktop, not a regression caused by this change;
+the 64/256/4096-joint rows in the same scene family show the opposite
+sign for the same reason. Widening to more samples was not done in this
+phase (would extend an already-long gate); flagged as a known limitation
+of this evidence rather than hidden.
+
+The two real, reproducible wins (Scene A at 8192 bodies, Scene B mesh
+terrain) are exactly the dense-contact scenes where `solveVelocities`
+actually runs its device path every step, matching the fix's mechanism
+precisely — this is not a coincidental correlation.

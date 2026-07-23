@@ -713,7 +713,14 @@ public:
         if (bodies.empty()) return true;
 
         int n = static_cast<int>(bodies.size());
-        uploadBodies(bodies);
+        // solveVelocities only touches dBodies_ when there are contacts to
+        // solve (it early-returns before any transfer when contacts.empty());
+        // when it did run, the bodies it just downloaded into the host
+        // vector are byte-identical to what it left on the device, so
+        // re-uploading here would push those same bytes back across the bus
+        // for nothing. Only re-sync when solveVelocities skipped the device
+        // entirely and the device copy may be stale relative to `bodies`.
+        if (!hasContacts) uploadBodies(bodies);
         prepareJoints(bodies, joints, dt);
         if (!stream_) VELOX_CUDA_CHECK(cudaStreamCreate(&stream_));
         for (int s = 0; s < substeps; ++s) {
