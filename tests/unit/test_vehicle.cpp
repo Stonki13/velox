@@ -151,10 +151,10 @@ TEST_CASE("Vehicle driving forward with throttle") {
         world.step(1.0f / 60.0f);
     }
 
-    // forwardSpeed should be positive or the vehicle moved
+    // With full throttle for 2 seconds on flat ground, the vehicle must
+    // have accelerated to a meaningful speed.
     float speed = vehicle.forwardSpeed();
-    // Speed can be positive or zero depending on simulation — just verify it's readable
-    CHECK(speed >= 0.0f);
+    CHECK(speed > 1.0f);
 }
 
 TEST_CASE("Vehicle wheelState is accessible") {

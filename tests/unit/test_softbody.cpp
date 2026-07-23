@@ -28,8 +28,9 @@ TEST_CASE("SoftBody: cloth drapes over a sphere") {
     CHECK(minY < 0.5f);
 
     // No particle should be inside the sphere (collision works).
+    Vec3 obstaclePos = w.body(obstacle).position;
     for (const auto& p : sb.positions) {
-        float d = length(p);
+        float d = length(p - obstaclePos);
         CHECK(d >= 0.95f); // small tolerance for XPBD penetration
     }
 }
