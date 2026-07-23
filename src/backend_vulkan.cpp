@@ -10,6 +10,21 @@
 // delegate to the owned CPU backend, as do configurations the GPU path does
 // not cover yet (ConeBlockSolver friction, Adaptive iteration policy).
 //
+// Stage 4 (advanceSubsteps below) additionally fuses the ENTIRE joint-free
+// substep loop -- velocity solve, position/orientation integration
+// (shaders/integrate_transforms.comp, isotropic inertia only) -- into a
+// single command-buffer submission per step, keeping bodies and colored
+// contacts GPU-resident the whole time instead of one submission per
+// backend call. Measured (docs/roadmap/PROTO_COMPETITIVE_NOTES.md): a wash
+// against the unfused stage-2/3 path, not a win -- the dispatch/barrier
+// count per step is unchanged by fusion (same number of colored solve
+// passes either way), and that appears to be the actual bottleneck, not
+// the number of CPU-GPU fence waits fusion removes. Kept enabled (it is
+// not a regression and the architecture is the right foundation for a
+// future win, e.g. a real multi-substep pipeline barrier restructuring or
+// moving coloring itself on-device), but the crossover point from stage 2
+// stands.
+//
 // Like the CUDA backend, this backend is NOT part of the strict bitwise
 // cross-platform determinism guarantee: GPU float contraction differs from
 // the CPU reference path. Use BackendType::Cpu for lockstep replay.
@@ -20,6 +35,7 @@
 #include "integrate_spv.h"
 #include "solve_contacts_spv.h"
 #include "narrow_sphere_spv.h"
+#include "integrate_transforms_spv.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -83,6 +99,11 @@ struct NarrowPush {
     float dt;
 };
 
+struct TransformPush {
+    float dt;
+    uint32_t count;
+};
+
 constexpr uint32_t kFlagIntegrate = 1u;
 constexpr uint32_t kFlagTorque = 2u;
 constexpr uint32_t kFlagDynamic = 4u;
@@ -90,6 +111,14 @@ constexpr uint32_t kFlagSolveAngular = 8u;
 constexpr uint32_t kFlagSphereAnchor = 16u;
 constexpr uint32_t kFlagPlane = 32u;
 constexpr uint32_t kFlagSweep = 64u;
+// Transform-integration eligibility (!isStatic() && !isLocked() && !asleep)
+// is deliberately distinct from kFlagIntegrate (velocity-integration
+// eligibility, which additionally requires isDynamic()): a kinematic body
+// advances its transform from an externally set velocity without ever being
+// gravity/force-integrated. Bits 8-13 are reserved by frictionCombine/
+// restitutionCombine below (3 bits each).
+constexpr uint32_t kFlagTransformIntegrate = 128u;
+constexpr uint32_t kFlagRotationLocked = 1u << 14;
 constexpr uint32_t kPushRange = 32; // covers every shader's push block
 
 class VulkanBackend final : public Backend {
@@ -113,11 +142,13 @@ public:
             if (integratePipeline_) vkDestroyPipeline(device_, integratePipeline_, nullptr);
             if (solvePipeline_) vkDestroyPipeline(device_, solvePipeline_, nullptr);
             if (narrowPipeline_) vkDestroyPipeline(device_, narrowPipeline_, nullptr);
+            if (transformPipeline_) vkDestroyPipeline(device_, transformPipeline_, nullptr);
             if (pipelineLayout_) vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
             if (descriptorLayout_) vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
             if (integrateModule_) vkDestroyShaderModule(device_, integrateModule_, nullptr);
             if (solveModule_) vkDestroyShaderModule(device_, solveModule_, nullptr);
             if (narrowModule_) vkDestroyShaderModule(device_, narrowModule_, nullptr);
+            if (transformModule_) vkDestroyShaderModule(device_, transformModule_, nullptr);
             vkDestroyDevice(device_, nullptr);
         }
         if (instance_) vkDestroyInstance(instance_, nullptr);
@@ -133,20 +164,8 @@ public:
             return;
         }
         packBodies(bodies);
-
-        IntegratePush push{};
-        push.gravity[0] = gravity.x;
-        push.gravity[1] = gravity.y;
-        push.gravity[2] = gravity.z;
-        push.dt = dt;
-        push.count = n;
         if (!beginCommands()) { cpu_->integrate(bodies, gravity, dt); return; }
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, integratePipeline_);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
-        vkCmdPushConstants(commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, sizeof(push), &push);
-        vkCmdDispatch(commandBuffer_, (n + 255) / 256, 1, 1);
+        recordIntegrate(gravity, dt, n);
         if (!submitCommands()) { cpu_->integrate(bodies, gravity, dt); return; }
         unpackVelocities(bodies);
     }
@@ -174,84 +193,10 @@ public:
             return;
         }
 
-        if (warmStart) {
-            // Deterministic sort + greedy graph coloring, identical to the
-            // CUDA backend's host pass: contact arrival order is nondeterministic,
-            // and unstable solve order is enough to walk a tall stack off balance.
-            std::sort(contacts.begin(), contacts.end(),
-                      [](const Contact& x, const Contact& y) {
-                          uint64_t kx = (uint64_t)x.a << 32 | x.b;
-                          uint64_t ky = (uint64_t)y.a << 32 | y.b;
-                          if (kx != ky) return kx < ky;
-                          if (x.point.x != y.point.x) return x.point.x < y.point.x;
-                          if (x.point.y != y.point.y) return x.point.y < y.point.y;
-                          return x.point.z < y.point.z;
-                      });
-
-            colorMask_.assign(n, 0);
-            nextColor_.assign(n, 64);
-            colorOf_.resize(m);
-            numColors_ = 0;
-            for (uint32_t k = 0; k < m; ++k) {
-                const Contact& c = contacts[k];
-                bool sensor = bodies[c.a].isSensor() || bodies[c.b].isSensor();
-                bool sa = sensor || !bodies[c.a].isDynamic();
-                bool sb = sensor || !bodies[c.b].isDynamic();
-                uint64_t used = (sa ? 0 : colorMask_[c.a]) | (sb ? 0 : colorMask_[c.b]);
-                int color;
-                if (~used) {
-                    color = 0;
-                    while (used & (1ull << color)) ++color;
-                } else {
-                    int na = sa ? 64 : nextColor_[c.a];
-                    int nb = sb ? 64 : nextColor_[c.b];
-                    color = na > nb ? na : nb;
-                    if (!sa) nextColor_[c.a] = color + 1;
-                    if (!sb) nextColor_[c.b] = color + 1;
-                }
-                if (color < 64) {
-                    if (!sa) colorMask_[c.a] |= 1ull << color;
-                    if (!sb) colorMask_[c.b] |= 1ull << color;
-                }
-                colorOf_[k] = color;
-                if (color + 1 > numColors_) numColors_ = color + 1;
-            }
-
-            colorStart_.assign(numColors_ + 1, 0);
-            for (uint32_t k = 0; k < m; ++k) ++colorStart_[colorOf_[k] + 1];
-            for (int c = 0; c < numColors_; ++c) colorStart_[c + 1] += colorStart_[c];
-            sorted_.resize(m);
-            fill_ = colorStart_;
-            for (uint32_t k = 0; k < m; ++k) sorted_[fill_[colorOf_[k]]++] = contacts[k];
-            contacts = sorted_;
-
-            GpuContact* mapped = static_cast<GpuContact*>(mappedContacts_);
-            for (uint32_t k = 0; k < m; ++k) {
-                const Contact& c = contacts[k];
-                GpuContact& g = mapped[k];
-                std::memcpy(g.normal, &c.normal, sizeof(float) * 3);
-                g.bias0 = c.bias0;
-                std::memcpy(g.anchorA, &c.localAnchorA, sizeof(float) * 3);
-                g.friction1 = c.friction1;
-                std::memcpy(g.anchorB, &c.localAnchorB, sizeof(float) * 3);
-                g.friction2 = c.friction2;
-                g.vn0 = c.vn0;
-                g.restitution = c.restitution;
-                g.rollingFriction = c.rollingFriction;
-                g.spinningFriction = c.spinningFriction;
-                g.normalImpulse = c.normalImpulse;
-                g.tangentImpulse1 = c.tangentImpulse1;
-                g.tangentImpulse2 = c.tangentImpulse2;
-                g.spinningImpulse = c.spinningImpulse;
-                g.rollingImpulse1 = c.rollingImpulse1;
-                g.rollingImpulse2 = c.rollingImpulse2;
-                g.a = c.a;
-                g.b = c.b;
-                g.skip = (bodies[c.a].isSensor() || bodies[c.b].isSensor()) ? 1u : 0u;
-                g.pad = 0;
-            }
-            solveCount_ = m;
-            gpuSolveActive_ = true;
+        if (warmStart && !colorContacts(bodies, contacts)) {
+            cpu_->solveVelocities(bodies, contacts, dt, warmStart, options);
+            gpuSolveActive_ = false;
+            return;
         }
         if (!gpuSolveActive_ || solveCount_ != m) {
             // A non-warm-start call without a matching device-resident set
@@ -265,35 +210,14 @@ public:
         // Colored order converges slower per sweep than sequential order, so
         // run twice the sweeps — the CUDA backend's measured trade-off.
         const int gpuIterations = 2 * options.velocityIterations;
-        SolvePush push{};
-        push.dt = dt;
         if (!beginCommands()) {
             cpu_->solveVelocities(bodies, contacts, dt, warmStart, options);
             gpuSolveActive_ = false;
             return;
         }
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, solvePipeline_);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
-        auto dispatchColor = [&](uint32_t mode, int color) {
-            push.mode = mode;
-            push.first = static_cast<uint32_t>(colorStart_[color]);
-            push.count = static_cast<uint32_t>(colorStart_[color + 1] - colorStart_[color]);
-            if (push.count == 0) return;
-            vkCmdPushConstants(commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                               0, sizeof(push), &push);
-            vkCmdDispatch(commandBuffer_, (push.count + 127) / 128, 1, 1);
-            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
-                                 0, nullptr, 0, nullptr);
-        };
-        if (warmStart)
-            for (int c = 0; c < numColors_; ++c) dispatchColor(0, c);
+        if (warmStart) recordSolvePass(0, dt);
         for (int iteration = 0; iteration < gpuIterations; ++iteration)
-            for (int c = 0; c < numColors_; ++c) dispatchColor(1, c);
+            recordSolvePass(1, dt);
         if (!submitCommands()) {
             cpu_->solveVelocities(bodies, contacts, dt, warmStart, options);
             gpuSolveActive_ = false;
@@ -301,6 +225,71 @@ public:
         }
         lastVelocityIterations_ = static_cast<uint32_t>(gpuIterations);
         unpackVelocities(bodies);
+    }
+
+    // Stage 4: fuses the ENTIRE substep loop (velocity solve, joint-free,
+    // plus position/orientation integration) into ONE submission, eliminating
+    // the per-substep fence wait that stages 2/3 pay via World's default
+    // per-call loop (integrate + solveVelocities as separate submissions,
+    // repeated per substep). Bodies and colored contacts stay device-resident
+    // for the whole step; only one upload and one download happen.
+    //
+    // Scope guards, deliberate and narrow:
+    //  - Any joint present: this backend has no GPU joint solver at all
+    //    (unlike CUDA's hinge/distance kernels), so bail entirely and let
+    //    World's default per-call loop run joints on the CPU path as usual.
+    //  - ConeBlockSolver / Adaptive: same reasons solveVelocities excludes them.
+    //  - Any DYNAMIC body with anisotropic inverse inertia: shaders/
+    //    integrate_transforms.comp only ports Body::advanceOrientation's
+    //    ISOTROPIC branch (the common case: spheres, cubes, any symmetric
+    //    shape). The anisotropic branch is an iterative fixed-point gyroscopic
+    //    solve that is not worth hand-porting to GLSL for this pass; bodies
+    //    that need it fall back to the CPU path for the whole step, not a
+    //    silent approximation.
+    // World already called integrate() for substep 0 before invoking this
+    // (see world.cpp's "first substep's gravity" comment); this method only
+    // needs to redo it for s > 0, matching the CUDA backend's own contract.
+    bool advanceSubsteps(std::vector<Body>& bodies, std::vector<Contact>& contacts,
+                         std::vector<Joint>& joints, const Vec3& gravity, float dt,
+                         int substeps, const SolverOptions& options) override {
+        if (!joints.empty()) return false;
+        if (options.frictionModel == FrictionModel::ConeBlockSolver ||
+            options.iterationPolicy == IterationPolicy::Adaptive)
+            return false;
+        const uint32_t n = static_cast<uint32_t>(bodies.size());
+        if (n == 0) return false;
+        for (const Body& b : bodies) {
+            if (!b.isDynamic()) continue;
+            if (b.invInertia.x != b.invInertia.y || b.invInertia.y != b.invInertia.z)
+                return false; // needs the CPU's iterative gyroscopic solve
+        }
+        const uint32_t m = static_cast<uint32_t>(contacts.size());
+        const bool hasContacts = m > 0;
+        if (!ensureBodyCapacity(n) || (hasContacts && !ensureContactCapacity(m)))
+            return false;
+        if (hasContacts && !colorContacts(bodies, contacts)) return false;
+
+        packBodies(bodies);
+        if (!beginCommands()) { gpuSolveActive_ = false; return false; }
+
+        const int gpuIterations = 2 * options.velocityIterations;
+        if (hasContacts) recordSolvePass(0, dt); // warm start substep 0's contacts
+        for (int i = 0; i < gpuIterations; ++i)
+            if (hasContacts) recordSolvePass(1, dt);
+        recordIntegrateTransforms(n, dt);
+
+        for (int s = 1; s < substeps; ++s) {
+            recordIntegrate(gravity, dt, n);
+            for (int i = 0; i < gpuIterations; ++i)
+                if (hasContacts) recordSolvePass(1, dt); // reuse resident impulses, no recolor
+            recordIntegrateTransforms(n, dt);
+        }
+
+        if (!submitCommands()) { gpuSolveActive_ = false; return false; }
+
+        unpackFull(bodies);
+        lastVelocityIterations_ = static_cast<uint32_t>(substeps * gpuIterations);
+        return true;
     }
 
     void fetchImpulses(std::vector<Contact>& contacts) override {
@@ -474,7 +463,9 @@ private:
             !createShaderModule(velox_solve_contacts_spv, velox_solve_contacts_spv_size,
                                 solveModule_) ||
             !createShaderModule(velox_narrow_sphere_spv, velox_narrow_sphere_spv_size,
-                                narrowModule_))
+                                narrowModule_) ||
+            !createShaderModule(velox_integrate_transforms_spv,
+                                velox_integrate_transforms_spv_size, transformModule_))
             return false;
 
         VkDescriptorSetLayoutBinding bindings[4]{};
@@ -503,7 +494,8 @@ private:
 
         if (!createComputePipeline(integrateModule_, integratePipeline_) ||
             !createComputePipeline(solveModule_, solvePipeline_) ||
-            !createComputePipeline(narrowModule_, narrowPipeline_))
+            !createComputePipeline(narrowModule_, narrowPipeline_) ||
+            !createComputePipeline(transformModule_, transformPipeline_))
             return false;
 
         VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
@@ -712,6 +704,8 @@ private:
                 b.ccdTuning.quality != MotionQuality::Low &&
                 b.ccdTuning.quality != MotionQuality::Locked)
                 flags |= kFlagSweep;
+            if (!b.isStatic() && !b.isLocked() && !b.asleep) flags |= kFlagTransformIntegrate;
+            if (b.isRotationLocked()) flags |= kFlagRotationLocked;
             flags |= (uint32_t)b.frictionCombine << 8;
             flags |= (uint32_t)b.restitutionCombine << 11;
             std::memcpy(&g.flagsBits, &flags, sizeof(flags));
@@ -743,6 +737,171 @@ private:
             std::memcpy(&b.velocity, mapped[i].velocity, sizeof(float) * 3);
             std::memcpy(&b.angularVelocity, mapped[i].angularVelocity, sizeof(float) * 3);
         }
+    }
+
+    // advanceSubsteps integrates position/orientation on the GPU too (see
+    // shaders/integrate_transforms.comp), so its readback needs the full
+    // dynamic state, not just velocity.
+    void unpackFull(std::vector<Body>& bodies) {
+        const GpuBody* mapped = static_cast<const GpuBody*>(mappedBodies_);
+        for (size_t i = 0; i < bodies.size(); ++i) {
+            Body& b = bodies[i];
+            if (b.isStatic()) continue;
+            std::memcpy(&b.velocity, mapped[i].velocity, sizeof(float) * 3);
+            std::memcpy(&b.angularVelocity, mapped[i].angularVelocity, sizeof(float) * 3);
+            std::memcpy(&b.position, mapped[i].position, sizeof(float) * 3);
+            std::memcpy(&b.orientation, mapped[i].orientation, sizeof(float) * 4);
+        }
+    }
+
+    // Deterministic sort + greedy graph coloring, identical to the CUDA
+    // backend's host pass: contact arrival order is nondeterministic, and
+    // unstable solve order is enough to walk a tall stack off balance.
+    // Reorders `contacts` in place (color order) and uploads the colored
+    // contacts to the device buffer. Returns false on a capacity failure.
+    bool colorContacts(const std::vector<Body>& bodies, std::vector<Contact>& contacts) {
+        const uint32_t n = static_cast<uint32_t>(bodies.size());
+        const uint32_t m = static_cast<uint32_t>(contacts.size());
+        std::sort(contacts.begin(), contacts.end(),
+                  [](const Contact& x, const Contact& y) {
+                      uint64_t kx = (uint64_t)x.a << 32 | x.b;
+                      uint64_t ky = (uint64_t)y.a << 32 | y.b;
+                      if (kx != ky) return kx < ky;
+                      if (x.point.x != y.point.x) return x.point.x < y.point.x;
+                      if (x.point.y != y.point.y) return x.point.y < y.point.y;
+                      return x.point.z < y.point.z;
+                  });
+
+        colorMask_.assign(n, 0);
+        nextColor_.assign(n, 64);
+        colorOf_.resize(m);
+        numColors_ = 0;
+        for (uint32_t k = 0; k < m; ++k) {
+            const Contact& c = contacts[k];
+            bool sensor = bodies[c.a].isSensor() || bodies[c.b].isSensor();
+            bool sa = sensor || !bodies[c.a].isDynamic();
+            bool sb = sensor || !bodies[c.b].isDynamic();
+            uint64_t used = (sa ? 0 : colorMask_[c.a]) | (sb ? 0 : colorMask_[c.b]);
+            int color;
+            if (~used) {
+                color = 0;
+                while (used & (1ull << color)) ++color;
+            } else {
+                int na = sa ? 64 : nextColor_[c.a];
+                int nb = sb ? 64 : nextColor_[c.b];
+                color = na > nb ? na : nb;
+                if (!sa) nextColor_[c.a] = color + 1;
+                if (!sb) nextColor_[c.b] = color + 1;
+            }
+            if (color < 64) {
+                if (!sa) colorMask_[c.a] |= 1ull << color;
+                if (!sb) colorMask_[c.b] |= 1ull << color;
+            }
+            colorOf_[k] = color;
+            if (color + 1 > numColors_) numColors_ = color + 1;
+        }
+
+        colorStart_.assign(numColors_ + 1, 0);
+        for (uint32_t k = 0; k < m; ++k) ++colorStart_[colorOf_[k] + 1];
+        for (int c = 0; c < numColors_; ++c) colorStart_[c + 1] += colorStart_[c];
+        sorted_.resize(m);
+        fill_ = colorStart_;
+        for (uint32_t k = 0; k < m; ++k) sorted_[fill_[colorOf_[k]]++] = contacts[k];
+        contacts = sorted_;
+
+        GpuContact* mapped = static_cast<GpuContact*>(mappedContacts_);
+        for (uint32_t k = 0; k < m; ++k) {
+            const Contact& c = contacts[k];
+            GpuContact& g = mapped[k];
+            std::memcpy(g.normal, &c.normal, sizeof(float) * 3);
+            g.bias0 = c.bias0;
+            std::memcpy(g.anchorA, &c.localAnchorA, sizeof(float) * 3);
+            g.friction1 = c.friction1;
+            std::memcpy(g.anchorB, &c.localAnchorB, sizeof(float) * 3);
+            g.friction2 = c.friction2;
+            g.vn0 = c.vn0;
+            g.restitution = c.restitution;
+            g.rollingFriction = c.rollingFriction;
+            g.spinningFriction = c.spinningFriction;
+            g.normalImpulse = c.normalImpulse;
+            g.tangentImpulse1 = c.tangentImpulse1;
+            g.tangentImpulse2 = c.tangentImpulse2;
+            g.spinningImpulse = c.spinningImpulse;
+            g.rollingImpulse1 = c.rollingImpulse1;
+            g.rollingImpulse2 = c.rollingImpulse2;
+            g.a = c.a;
+            g.b = c.b;
+            g.skip = (bodies[c.a].isSensor() || bodies[c.b].isSensor()) ? 1u : 0u;
+            g.pad = 0;
+        }
+        solveCount_ = m;
+        gpuSolveActive_ = true;
+        return true;
+    }
+
+    // Records one warm-start (mode 0) or solve (mode 1) pass over every
+    // color into the ALREADY-BEGUN command buffer. Caller is responsible for
+    // beginCommands()/submitCommands(); this only records, never submits, so
+    // advanceSubsteps can chain many passes into a single submission.
+    void recordSolvePass(uint32_t mode, float dt) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, solvePipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
+        SolvePush push{};
+        push.mode = mode;
+        push.dt = dt;
+        for (int color = 0; color < numColors_; ++color) {
+            push.first = static_cast<uint32_t>(colorStart_[color]);
+            push.count = static_cast<uint32_t>(colorStart_[color + 1] - colorStart_[color]);
+            if (push.count == 0) continue;
+            vkCmdPushConstants(commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                               0, sizeof(push), &push);
+            vkCmdDispatch(commandBuffer_, (push.count + 127) / 128, 1, 1);
+            recordBarrier();
+        }
+    }
+
+    // Records an integrate.comp dispatch (velocity integration) into the
+    // already-begun command buffer, for advanceSubsteps' s > 0 substeps.
+    void recordIntegrate(const Vec3& gravity, float dt, uint32_t n) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, integratePipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
+        IntegratePush push{};
+        push.gravity[0] = gravity.x;
+        push.gravity[1] = gravity.y;
+        push.gravity[2] = gravity.z;
+        push.dt = dt;
+        push.count = n;
+        vkCmdPushConstants(commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDispatch(commandBuffer_, (n + 255) / 256, 1, 1);
+        recordBarrier();
+    }
+
+    // Records an integrate_transforms.comp dispatch (position/orientation
+    // integration, the isotropic path only -- see advanceSubsteps' scope
+    // guard) into the already-begun command buffer.
+    void recordIntegrateTransforms(uint32_t n, float dt) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, transformPipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
+        TransformPush push{};
+        push.dt = dt;
+        push.count = n;
+        vkCmdPushConstants(commandBuffer_, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDispatch(commandBuffer_, (n + 255) / 256, 1, 1);
+        recordBarrier();
+    }
+
+    void recordBarrier() {
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier,
+                             0, nullptr, 0, nullptr);
     }
 
     bool beginCommands() {
@@ -796,6 +955,8 @@ private:
     void* mappedCounter_ = nullptr;
     VkShaderModule narrowModule_ = VK_NULL_HANDLE;
     VkPipeline narrowPipeline_ = VK_NULL_HANDLE;
+    VkShaderModule transformModule_ = VK_NULL_HANDLE;
+    VkPipeline transformPipeline_ = VK_NULL_HANDLE;
 
     // Host-side coloring state (mirrors the CUDA backend's members).
     std::vector<uint64_t> colorMask_;

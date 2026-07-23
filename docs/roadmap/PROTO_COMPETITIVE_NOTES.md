@@ -701,4 +701,70 @@ bounds are the wrong instrument there, the same reasoning `tests/difftest`
 applies to chaotic scenes; importantly, the sphere-pile trajectory
 divergence is the SAME with the GPU narrow phase off and on, isolating it
 to the pre-existing colored-solve-order effect, not to the new shader).
+
+### Stage 4: fuse the whole substep loop into one submission — built, measured honestly as a wash
+
+Implemented `VulkanBackend::advanceSubsteps` (the same override point the
+CUDA backend uses): for joint-free steps, it now runs the ENTIRE substep
+loop — warm-start, all colored solve iterations, and position/orientation
+integration — as ONE command-buffer submission, keeping bodies and colored
+contacts GPU-resident the whole step instead of a separate submission per
+`integrate()`/`solveVelocities()` call (stage 2/3's behavior via World's
+default per-call loop). New shader `shaders/integrate_transforms.comp`
+ports `Body::advanceTransform`'s **isotropic** path (position advance +
+the quaternion exponential-map orientation update) — the anisotropic
+gyroscopic branch is an iterative fixed-point solve not worth hand-porting
+to GLSL for this pass, so `advanceSubsteps` scope-guards it explicitly:
+any joints, `ConeBlockSolver`/`Adaptive`, or any *dynamic* body with
+anisotropic inverse inertia bails the whole step to the CPU path, not a
+silent approximation. Spheres, cubes, and any symmetric shape (this plan's
+actual measured scenes) always take the isotropic path.
+
+**Measured result: a wash, not a win — reported as such rather than
+oversold.** An A/B test toggling `advanceSubsteps` on and off in the same
+build (8192-sphere rain, `benchmark.exe 20 2/3`, 11 trials total) gave:
+
+| | trials (ms/step) | mean |
+|---|---|---|
+| Fused (stage 4) | 152, 146, 147, 165, 158, 155, 97 | 145.7 |
+| Unfused (stage 2/3 per-call loop) | 169, 105, 166, 165, 103, 164, 164 | 148.1 |
+
+Both configurations show large run-to-run variance (97-169 ms) exceeding
+the ~2 ms difference in their means — meaning fusion produced **no
+measurable improvement** on this hardware, within noise of doing nothing.
+(These absolute numbers are also noticeably higher than stage 2's original
+88 ms figure for the same scene; system load differed between sessions
+and this doc does not claim a regression from that unrelated variance —
+only the controlled same-session A/B above is used for the stage 4
+verdict.)
+
+**Why fusion didn't help, and what would:** the total dispatch and
+pipeline-barrier count per step is *identical* whether the substep loop is
+fused into one submission or split across several (`2 * velocityIterations
+* numColors` colored solve dispatches either way). Fusion only removes the
+CPU-GPU fence wait *between* backend calls — but the evidence here says
+that wasn't the actual bottleneck; the per-dispatch/barrier overhead
+inside the GPU timeline was. This is the mechanism CUDA graph replay
+(`cudaGraphLaunch`) sidesteps and Vulkan has no direct equivalent for;
+closing this gap for real needs either replaying a pre-recorded command
+buffer (`vkCmdExecuteCommands` with secondary buffers, or a driver
+extension for graph-like replay) or moving the coloring itself on-device
+to cut the *count* of colored dispatches, not just the submission count.
+Recorded as a finding, not chased further this pass.
+
+**Disposition:** kept enabled by default (not a regression, and the
+architecture — GPU-resident bodies/contacts across a whole step — is the
+right foundation for the real fix above). No opt-in gate needed, unlike
+stage 3's clear regression. `advanceSubsteps` also gained an isotropic-
+inertia scope guard that stage 2/3 never needed, documented above.
+
+### Gate results
+
+- `cmake --build build_phase1 --config Release -j 16`: clean, 0 compiler
+  errors.
+- `ctest --test-dir build_phase1 -C Release`: **56/56 CTest suites pass
+  (100%)**, including `velox.vulkan_smoke`'s three checks (unaffected by
+  stage 4 — the fused path is exercised implicitly since Scene A's
+  benchmark scenes are joint-free, isotropic, and now route through
+  `advanceSubsteps` by default; parity/behavioral bounds still hold).
 Full CPU+Vulkan suite: **56/56 PASS**.
