@@ -7,26 +7,20 @@ simulation. It provides a portable CPU backend, an optional CUDA backend, C and
 C++ APIs, deterministic CPU replay mode, a raycast vehicle, a query-only capsule
 character controller, and a renderer-independent debug-line interface.
 
-Velox is designed around four practical goals:
+## Capabilities
 
-1. **High-speed collision robustness.** Predictive Contact Sweeping combines
-   speculative contacts with conservative advancement to protect supported
-   collider paths from tunneling.
-2. **Stable resting contact.** Clipped persistent manifolds retain feature keys
-   and warm-start impulses, improving stack convergence and friction stability.
-3. **Replayable CPU simulation.** Strict mode provides cross-platform CPU trace
-   regression coverage across the supported build matrix.
-4. **Scalable execution.** The CPU backend uses deterministic ordering and
-   worker parallelism where safe; the optional CUDA backend targets large,
-   contact-heavy workloads on NVIDIA GPUs.
+- Predictive Contact Sweeping combines speculative contacts with conservative
+  advancement for supported continuous-collision paths.
+- Clipped persistent manifolds retain feature keys and warm-start impulses for
+  resting contact and friction constraints.
+- Strict mode provides cross-platform CPU trace regression coverage across the
+  supported build matrix.
+- The CPU backend uses stable ordering and worker parallelism for eligible work;
+  the CUDA backend targets NVIDIA GPUs.
 
 > **Support boundary:** Strict determinism is a CPU reference mode. CPU and CUDA
 > use different constraint execution orders and are not lockstep-identical.
 > CUDA is NVIDIA-only; Intel and AMD systems use the portable CPU backend.
-
-Velox is a focused 3D rigid-body engine, not a drop-in feature-for-feature
-replacement for Jolt, PhysX, or Havok. Evaluate it against your own scenes,
-platform targets, and gameplay requirements before shipping.
 
 ## Predictive Contact Sweeping (PCS)
 

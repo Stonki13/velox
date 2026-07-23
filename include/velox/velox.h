@@ -1,6 +1,5 @@
 #pragma once
-// Velox — a fast, tunneling-proof 3D physics engine.
-// Single include for the public API.
+// Single include for the public C++ API.
 #include "version.h"
 #include "platform.h"
 #include "error.h"

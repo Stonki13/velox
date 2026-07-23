@@ -17,7 +17,7 @@ frozen for backward compatibility. Breaking changes require a major version bump
 
 - **Version 1.0.0**: Public API is now frozen. Future breaking changes require
   a major version bump per semantic versioning.
-- README updated to reflect production-ready status with the 52-test suite.
+- README and package metadata updated for the 1.0 release.
 - CPU worker dispatch now retains per-job completion state and re-notifies a
   stalled participant; the release suite repeats the stress executable five
   times to cover CI-style process launches.
@@ -26,22 +26,9 @@ frozen for backward compatibility. Breaking changes require a major version bump
 
 ### Added
 
-- **C API wrapper** (`include/velox/velox_c.h`) for FFI compatibility with Box3D's
-  pure C17 design. Enables integration with any language/engine without C++ dependency.
-- Recording/replay exposed in C API matching Box3D's pattern.
-- Full Box3D feature parity: C API, recording/replay, 8 joint types (vs Box3D's 9,
-  with ConeTwist and SixDof as Velox-exclusive advantages), motor joint, character
-  controller, vehicle model, ragdoll builder.
-
-### Velox advantages over Box3D
-
-- GPU acceleration (CUDA backend with graph-colored parallel solving)
-- 3-layer Predictive Contact Sweeping CCD (more robust than Box3D's single-layer)
-- Built-in character controller, raycast vehicle, ragdoll builder
-- Anisotropic friction with per-body local-space friction scale
-- Origin shifting for large worlds without precision loss
-- Vulkan interactive sandbox for debugging
-- Regression suite including differential testing against Jolt Physics
+- **C API wrapper** (`include/velox/velox_c.h`) for C-compatible FFI integrations.
+- Recording and replay exposed through the C API.
+- C API coverage for joints, motors, character control, vehicles, and ragdolls.
 
 ## [0.4.0] - 2026-07-21
 
