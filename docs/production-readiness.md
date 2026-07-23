@@ -45,7 +45,8 @@ the same hardware workflow.
 
 1. All pull request gates are green for the release commit.
 2. Run the CUDA hardware workflow on each supported driver/toolkit baseline.
-3. Run the scheduled extended fuzz and 60,000-frame soak jobs successfully.
+3. Run the scheduled, or explicitly release-dispatched, extended fuzz,
+   geometry, and 60,000-frame soak jobs successfully.
 4. Review benchmark results on the maintained CPU and GPU reference machines;
    explain or fix regressions above 10 percent.
 5. Verify the version header, `vcpkg.json`, and `CHANGELOG.md` agree.
